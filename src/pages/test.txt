@@ -1,0 +1,44 @@
+import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { usePlatformStore } from '../stores/usePlatformStore';
+import type { ApiKey } from '../types/platform';
+import { showToast } from '../components/common/ToastContainer';
+import {
+  Plus, Trash2, Edit3, Key, Server,
+  Eye, EyeOff, Power, PowerOff,
+  X
+} from 'lucide-react';
+
+// ---- Dialog: Add/Edit Platform ----
+function AddPlatformDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { addPlatform } = usePlatformStore();
+  const [name, setName] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [pathPrefix, setPathPrefix] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { if (open) { setName(''); setBaseUrl(''); setPathPrefix(''); } }, [open]);
+
+  const handleSave = async () => {
+    if (!name.trim() || !baseUrl.trim() || !pathPrefix.trim()) {
+      showToast(t('accounts.fill_all_fields'), 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      await addPlatform(name.trim(), baseUrl.trim(), pathPrefix.trim());
+      showToast(t('common.success'), 'success');
+      onClose();
+    } catch (e) {
+      showToast(${t('common.error')}: , 'error');
+    } finally { setSaving(false); }
+  };
+
+  if (!open) return null;
+  return (
+    <div className=""fixed"" onClick={onClose}>
+      {/* Modal content */}
+    </div>
+  );
+}
