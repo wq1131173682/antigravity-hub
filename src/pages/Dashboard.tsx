@@ -153,6 +153,9 @@ function Dashboard() {
     fetchPlatforms();
     fetchProxyStatus();
     platforms.forEach(p => fetchModels(p.id));
+    // Refresh quota usage for all models so the bars reflect latest data
+    const allModelIds = Object.values(models).flat().map(m => m.id);
+    allModelIds.forEach(id => fetchModelUsage(id));
     showToast(t('common.success'), 'success');
   };
 

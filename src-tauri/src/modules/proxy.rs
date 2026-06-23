@@ -361,17 +361,20 @@ async fn forward_with_retry(
         return Err("No active API keys available for this platform".to_string());
     }
 
+    // Pre-load key values into a map to avoid repeated list_keys calls
+    let key_value_map: std::collections::HashMap<String, String> = {
+        let keys = crate::modules::keystore::list_keys(platform_id)?;
+        keys.into_iter().map(|k| (k.id, k.key_value)).collect()
+    };
+
     for attempt in 0..max_retries {
         let key_idx = attempt % keys_to_try.len();
         let key_id = &keys_to_try[key_idx];
 
-        // Get the key value from keystore
-        let api_key_value = {
-            let keys = crate::modules::keystore::list_keys(platform_id)?;
-            keys.into_iter().find(|k| k.id == *key_id)
-                .map(|k| k.key_value.clone())
-                .ok_or_else(|| format!("Key not found: {}", key_id))?
-        };
+        // Look up key value from pre-loaded map (avoids file I/O per retry)
+        let api_key_value = key_value_map.get(key_id)
+            .ok_or_else(|| format!("Key not found: {}", key_id))?
+            .clone();
 
         // Build the forwarded request
         let mut req_builder = client.request(method.clone(), target_url.as_str());
