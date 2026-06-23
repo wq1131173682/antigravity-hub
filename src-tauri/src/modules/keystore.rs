@@ -180,7 +180,7 @@ pub fn get_best_available_key(platform_id: &str) -> Result<Option<ApiKey>, Strin
     let mut scored_keys: Vec<(ApiKey, u32)> = api_keys.into_iter().map(|k| {
         let total_usage = quota_state.as_ref()
             .and_then(|state| state.trackers.iter().find(|t| t.key_id == k.id))
-            .map(|t| t.five_hour.count + t.day.count + t.month.count)
+            .map(|t| t.five_hour.len() + t.day.len() + t.month.len())
             .unwrap_or(0);
         (k, total_usage)
     }).collect();

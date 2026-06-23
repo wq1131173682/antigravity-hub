@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use once_cell::sync::Lazy;
 use std::path::PathBuf;
 use std::fs;
@@ -8,25 +10,65 @@ use super::platform_manager;
 
 const QUOTA_WINDOW_FILE: &str = "quota_windows.json";
 
-/// A usage window tracker
+// ── Sliding-window tracker ──
+
+/// A sliding usage window tracker using individual call timestamps.
+/// Timestamps are pushed on record and expired ones cleaned on mutation;
+/// read-side methods (len, is_empty) are O(1) and may count a few stale
+/// entries between API calls, which is conservative and safe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageWindow {
-    pub count: u32,
-    pub window_start: i64,
+    pub timestamps: VecDeque<i64>,
 }
 
 impl UsageWindow {
-    pub fn new(window_start: i64) -> Self {
-        Self { count: 0, window_start }
+    pub fn new() -> Self {
+        Self { timestamps: VecDeque::new() }
     }
 
-    pub fn is_expired(&self, duration_secs: i64, now: i64) -> bool {
-        now - self.window_start >= duration_secs
+    /// Record a call at `now` and evict entries older than `now - duration_secs`.
+    pub fn record(&mut self, now: i64, duration_secs: i64) {
+        let cutoff = now - duration_secs;
+        while let Some(&t) = self.timestamps.front() {
+            if t < cutoff {
+                self.timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.timestamps.push_back(now);
     }
 
-    pub fn reset(&mut self, now: i64) {
-        self.count = 0;
-        self.window_start = now;
+    /// Remove all timestamps older than `now - duration_secs`.
+    pub fn clean_expired(&mut self, now: i64, duration_secs: i64) {
+        let cutoff = now - duration_secs;
+        while let Some(&t) = self.timestamps.front() {
+            if t < cutoff {
+                self.timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Remove expired AND return the count of remaining (mutable helper).
+    pub fn count_active(&mut self, now: i64, duration_secs: i64) -> u32 {
+        self.clean_expired(now, duration_secs);
+        self.timestamps.len() as u32
+    }
+
+    /// Number of entries in the buffer (may include stale entries between records).
+    pub fn len(&self) -> u32 {
+        self.timestamps.len() as u32
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.timestamps.is_empty()
+    }
+
+    /// Earliest timestamp in the buffer (for display purposes).
+    pub fn window_start(&self) -> i64 {
+        self.timestamps.front().copied().unwrap_or(0)
     }
 }
 
@@ -57,14 +99,13 @@ pub struct ModelKeyTracker {
 
 impl ModelKeyTracker {
     pub fn new(key_id: String, model_id: String, platform_id: String) -> Self {
-        let now = chrono::Utc::now().timestamp();
         Self {
             key_id,
             model_id,
             platform_id,
-            five_hour: UsageWindow::new(now),
-            day: UsageWindow::new(now),
-            month: UsageWindow::new(now),
+            five_hour: UsageWindow::new(),
+            day: UsageWindow::new(),
+            month: UsageWindow::new(),
             consecutive_429: 0,
             consecutive_500: 0,
             last_429_time: 0,
@@ -93,23 +134,25 @@ impl ModelKeyTracker {
         }
     }
 
-    /// Record a successful API call
+    /// Record a successful API call — sliding-window timestamps.
     pub fn record_call(&mut self) {
         let now = chrono::Utc::now().timestamp();
-        let windows: Vec<(&mut UsageWindow, i64)> = vec![
-            (&mut self.five_hour, 5 * 3600),
-            (&mut self.day, 86400),
-            (&mut self.month, 2592000),
-        ];
-        for (window, duration) in windows {
-            if window.is_expired(duration, now) {
-                window.reset(now);
-            }
-            window.count += 1;
-        }
+        self.five_hour.record(now, 5 * 3600);
+        self.day.record(now, 86400);
+        self.month.record(now, 2_592_000);
     }
 
-    /// Get which windows are exceeded (based on model limits)
+    /// Clean expired entries in all windows using the current time.
+    pub fn clean_all_windows(&mut self) {
+        let now = chrono::Utc::now().timestamp();
+        self.five_hour.clean_expired(now, 5 * 3600);
+        self.day.clean_expired(now, 86400);
+        self.month.clean_expired(now, 2_592_000);
+    }
+
+    /// Get which windows are exceeded (based on model limits).
+    /// Uses len() without cleaning — stale entries gradually decay on
+    /// subsequent record_calls, so this is conservative.
     pub fn get_exceeded_windows(&self) -> Vec<String> {
         let limits = self.get_limits().unwrap_or(UsageLimits {
             max_per_5hrs: u32::MAX,
@@ -117,9 +160,9 @@ impl ModelKeyTracker {
             max_per_month: u32::MAX,
         });
         let mut exceeded = Vec::new();
-        if self.five_hour.count > limits.max_per_5hrs { exceeded.push("5hour".into()); }
-        if self.day.count > limits.max_per_day { exceeded.push("day".into()); }
-        if self.month.count > limits.max_per_month { exceeded.push("month".into()); }
+        if self.five_hour.len() > limits.max_per_5hrs { exceeded.push("5hour".into()); }
+        if self.day.len() > limits.max_per_day { exceeded.push("day".into()); }
+        if self.month.len() > limits.max_per_month { exceeded.push("month".into()); }
         exceeded
     }
 
@@ -183,17 +226,11 @@ impl Default for QuotaWindowState {
 }
 
 impl QuotaWindowState {
-    /// Get the best available key for a specific model
+    /// Get the best available key for a specific model (lowest total usage).
     pub fn get_best_available_key_for_model(&self, model_id: &str) -> Option<&ModelKeyTracker> {
-        let available: Vec<&ModelKeyTracker> = self.trackers.iter()
+        self.trackers.iter()
             .filter(|t| t.model_id == model_id && t.is_available())
-            .collect();
-        if available.is_empty() {
-            return None;
-        }
-        available.into_iter().min_by_key(|t| {
-            t.five_hour.count + t.day.count + t.month.count
-        })
+            .min_by_key(|t| t.five_hour.len() + t.day.len() + t.month.len())
     }
 
     pub fn get_tracker_mut(&mut self, key_id: &str, model_id: &str) -> Option<&mut ModelKeyTracker> {
@@ -228,9 +265,62 @@ impl QuotaWindowState {
     }
 }
 
+// ── Global state + dirty-flag debounced persistence ──
+
 static QUOTA_STATE: Lazy<Mutex<QuotaWindowState>> = Lazy::new(|| {
     Mutex::new(load_quota_state().unwrap_or_default())
 });
+
+/// Dirty flag: state has changed since last save.
+/// Set on every mutation, cleared after a successful save.
+static QUOTA_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Last flush timestamp — avoid writing more often than every N seconds
+/// even when the dirty flag is set.
+static LAST_SAVE_TS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn mark_dirty() {
+    QUOTA_DIRTY.store(true, Ordering::Relaxed);
+}
+
+fn should_flush() -> bool {
+    if !QUOTA_DIRTY.load(Ordering::Relaxed) {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let last = LAST_SAVE_TS.load(Ordering::Relaxed);
+    now - last >= 30
+}
+
+fn clear_dirty() {
+    QUOTA_DIRTY.store(false, Ordering::Relaxed);
+    LAST_SAVE_TS.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+}
+
+/// Attempt to persist state to disk, but only if dirty AND at least 30s
+/// have passed since the last flush.  Returns true when a write actually
+/// happened.
+fn try_flush(state: &QuotaWindowState) -> bool {
+    if !should_flush() {
+        return false;
+    }
+    if save_quota_state_inner(state).is_ok() {
+        clear_dirty();
+        true
+    } else {
+        false
+    }
+}
+
+/// Force a flush regardless of the debounce timer.  Used before reads
+/// that need up-to-date on-disk state, or on explicit user request.
+fn force_flush(state: &QuotaWindowState) {
+    if save_quota_state_inner(state).is_ok() {
+        clear_dirty();
+    }
+}
+
+// ── Serialization helpers ──
 
 fn load_quota_state() -> Result<QuotaWindowState, String> {
     let path = get_data_dir()?.join(QUOTA_WINDOW_FILE);
@@ -245,7 +335,7 @@ pub fn load_quota_state_internal() -> Result<QuotaWindowState, String> {
     load_quota_state()
 }
 
-fn save_quota_state(state: &QuotaWindowState) -> Result<(), String> {
+fn save_quota_state_inner(state: &QuotaWindowState) -> Result<(), String> {
     let path = get_data_dir()?.join(QUOTA_WINDOW_FILE);
     let content = serde_json::to_string_pretty(state).map_err(|e| format!("serialize quota windows failed: {}", e))?;
     fs::write(&path, content).map_err(|e| format!("write quota windows failed: {}", e))
@@ -262,21 +352,28 @@ pub fn record_api_call(key_id: &str, model_id: &str, platform_id: &str) -> Resul
     let tracker = state.ensure_tracker(key_id, model_id, platform_id);
     tracker.record_call();
     tracker.record_success();
-    save_quota_state(&state)
+    mark_dirty();
+    // Best-effort flush: non-blocking write at most every 30s
+    let _ = try_flush(&state);
+    Ok(())
 }
 
 pub fn record_429_error(key_id: &str, model_id: &str, platform_id: &str) -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     let tracker = state.ensure_tracker(key_id, model_id, platform_id);
     tracker.record_429();
-    save_quota_state(&state)
+    mark_dirty();
+    let _ = try_flush(&state);
+    Ok(())
 }
 
 pub fn record_500_error(key_id: &str, model_id: &str, platform_id: &str) -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     let tracker = state.ensure_tracker(key_id, model_id, platform_id);
     tracker.record_500();
-    save_quota_state(&state)
+    mark_dirty();
+    let _ = try_flush(&state);
+    Ok(())
 }
 
 pub fn get_best_available_key_for_model(model_id: &str) -> Result<Option<String>, String> {
@@ -284,8 +381,23 @@ pub fn get_best_available_key_for_model(model_id: &str) -> Result<Option<String>
     Ok(state.get_best_available_key_for_model(model_id).map(|t| t.key_id.clone()))
 }
 
+fn build_window_json(window: &UsageWindow, max: u32) -> serde_json::Value {
+    serde_json::json!({
+        "count": window.len(),
+        "max": max,
+        "window_start": window.window_start(),
+    })
+}
+
 pub fn get_all_window_status() -> Result<Vec<serde_json::Value>, String> {
-    let state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
+    let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
+    // Clean all windows before returning for accurate display
+    let now = chrono::Utc::now().timestamp();
+    for t in &mut state.trackers {
+        t.five_hour.clean_expired(now, 5 * 3600);
+        t.day.clean_expired(now, 86400);
+        t.month.clean_expired(now, 2_592_000);
+    }
     let statuses: Vec<serde_json::Value> = state.trackers.iter().map(|t| {
         let limits = t.get_limits().ok().unwrap_or(UsageLimits {
             max_per_5hrs: 0, max_per_day: 0, max_per_month: 0,
@@ -294,9 +406,9 @@ pub fn get_all_window_status() -> Result<Vec<serde_json::Value>, String> {
             "key_id": t.key_id,
             "model_id": t.model_id,
             "platform_id": t.platform_id,
-            "five_hour": { "count": t.five_hour.count, "max": limits.max_per_5hrs, "window_start": t.five_hour.window_start },
-            "day": { "count": t.day.count, "max": limits.max_per_day, "window_start": t.day.window_start },
-            "month": { "count": t.month.count, "max": limits.max_per_month, "window_start": t.month.window_start },
+            "five_hour": build_window_json(&t.five_hour, limits.max_per_5hrs),
+            "day": build_window_json(&t.day, limits.max_per_day),
+            "month": build_window_json(&t.month, limits.max_per_month),
             "consecutive_429": t.consecutive_429,
             "consecutive_500": t.consecutive_500,
             "disabled_until": t.disabled_until,
@@ -304,12 +416,20 @@ pub fn get_all_window_status() -> Result<Vec<serde_json::Value>, String> {
             "is_available": t.is_available(),
         })
     }).collect();
+    // Flush after clean if dirty
+    if QUOTA_DIRTY.load(Ordering::Relaxed) {
+        force_flush(&state);
+    }
     Ok(statuses)
 }
 
 pub fn get_key_usage(key_id: &str, model_id: &str) -> Result<serde_json::Value, String> {
-    let state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
-    if let Some(t) = state.trackers.iter().find(|t| t.key_id == key_id && t.model_id == model_id) {
+    let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
+    if let Some(t) = state.trackers.iter_mut().find(|t| t.key_id == key_id && t.model_id == model_id) {
+        let now = chrono::Utc::now().timestamp();
+        t.five_hour.clean_expired(now, 5 * 3600);
+        t.day.clean_expired(now, 86400);
+        t.month.clean_expired(now, 2_592_000);
         let limits = t.get_limits().ok().unwrap_or(UsageLimits {
             max_per_5hrs: 0, max_per_day: 0, max_per_month: 0,
         });
@@ -319,9 +439,9 @@ pub fn get_key_usage(key_id: &str, model_id: &str) -> Result<serde_json::Value, 
             "key_name": t.key_id,
             "disabled": !t.is_available(),
             "disabled_reason": t.disabled_reason,
-            "five_hour": { "count": t.five_hour.count, "max": limits.max_per_5hrs, "window_start": t.five_hour.window_start },
-            "day": { "count": t.day.count, "max": limits.max_per_day, "window_start": t.day.window_start },
-            "month": { "count": t.month.count, "max": limits.max_per_month, "window_start": t.month.window_start },
+            "five_hour": build_window_json(&t.five_hour, limits.max_per_5hrs),
+            "day": build_window_json(&t.day, limits.max_per_day),
+            "month": build_window_json(&t.month, limits.max_per_month),
             "is_available": t.is_available(),
         }))
     } else {
@@ -341,7 +461,14 @@ pub fn get_key_usage(key_id: &str, model_id: &str) -> Result<serde_json::Value, 
 
 /// Get all usage for a specific model across all keys
 pub fn get_model_usage(model_id: &str) -> Result<Vec<serde_json::Value>, String> {
-    let state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
+    let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
+    // Clean all trackers for fresh count
+    let now = chrono::Utc::now().timestamp();
+    for t in &mut state.trackers.iter_mut().filter(|t| t.model_id == model_id) {
+        t.five_hour.clean_expired(now, 5 * 3600);
+        t.day.clean_expired(now, 86400);
+        t.month.clean_expired(now, 2_592_000);
+    }
     let usages: Vec<serde_json::Value> = state.trackers.iter()
         .filter(|t| t.model_id == model_id)
         .map(|t| {
@@ -354,9 +481,9 @@ pub fn get_model_usage(model_id: &str) -> Result<Vec<serde_json::Value>, String>
                 "key_name": t.key_id,
                 "disabled": !t.is_available(),
                 "disabled_reason": t.disabled_reason,
-                "five_hour": { "count": t.five_hour.count, "max": limits.max_per_5hrs, "window_start": t.five_hour.window_start },
-                "day": { "count": t.day.count, "max": limits.max_per_day, "window_start": t.day.window_start },
-                "month": { "count": t.month.count, "max": limits.max_per_month, "window_start": t.month.window_start },
+                "five_hour": build_window_json(&t.five_hour, limits.max_per_5hrs),
+                "day": build_window_json(&t.day, limits.max_per_day),
+                "month": build_window_json(&t.month, limits.max_per_month),
                 "is_available": t.is_available(),
             })
         })
@@ -367,25 +494,33 @@ pub fn get_model_usage(model_id: &str) -> Result<Vec<serde_json::Value>, String>
 pub fn remove_key_tracker(key_id: &str) -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     state.remove_key_trackers(key_id);
-    save_quota_state(&state)
+    mark_dirty();
+    force_flush(&state);
+    Ok(())
 }
 
 pub fn remove_model_trackers(model_id: &str) -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     state.remove_model_trackers(model_id);
-    save_quota_state(&state)
+    mark_dirty();
+    force_flush(&state);
+    Ok(())
 }
 
 pub fn remove_platform_trackers(platform_id: &str) -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     state.remove_platform_trackers(platform_id);
-    save_quota_state(&state)
+    mark_dirty();
+    force_flush(&state);
+    Ok(())
 }
 
 pub fn set_auto_switch(enabled: bool) -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     state.auto_switch_enabled = enabled;
-    save_quota_state(&state)
+    mark_dirty();
+    force_flush(&state);
+    Ok(())
 }
 
 pub fn get_auto_switch_enabled() -> Result<bool, String> {
@@ -393,6 +528,7 @@ pub fn get_auto_switch_enabled() -> Result<bool, String> {
     Ok(state.auto_switch_enabled)
 }
 
+/// Re-enable trackers whose backoff period has expired.
 pub fn clean_expired_disabled() -> Result<Vec<String>, String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
@@ -407,9 +543,29 @@ pub fn clean_expired_disabled() -> Result<Vec<String>, String> {
         }
     }
     if !reenabled.is_empty() {
-        save_quota_state(&state)?;
+        mark_dirty();
+        force_flush(&state);
+    } else if QUOTA_DIRTY.load(Ordering::Relaxed) {
+        // Still flush if there are pending dirty changes
+        force_flush(&state);
     }
     Ok(reenabled)
+}
+
+/// Clean expired window entries in all trackers (called periodically by scheduler).
+pub fn clean_expired_windows() -> Result<(), String> {
+    let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now().timestamp();
+    for t in &mut state.trackers {
+        t.five_hour.clean_expired(now, 5 * 3600);
+        t.day.clean_expired(now, 86400);
+        t.month.clean_expired(now, 2_592_000);
+    }
+    // Flush dirty state if enough time has passed
+    if QUOTA_DIRTY.load(Ordering::Relaxed) {
+        force_flush(&state);
+    }
+    Ok(())
 }
 
 pub fn initialize() {
