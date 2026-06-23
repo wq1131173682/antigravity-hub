@@ -187,6 +187,28 @@ export async function cleanExpiredDisabled(): Promise<string[]> {
   return await invoke('clean_expired_disabled_cmd');
 }
 
+// ============================================================================
+// Token Stats (live session counters for the dashboard)
+// ============================================================================
+
+export interface TokenStats {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  request_count: number;
+  streaming_request_count: number;
+  first_request_at: number;
+  last_updated: number;
+}
+
+export async function getTokenStats(): Promise<TokenStats> {
+  return await invoke('get_token_stats');
+}
+
+export async function resetTokenStats(): Promise<void> {
+  return await invoke('reset_token_stats');
+}
+
 /** Get the primary LAN IP address (for proxy host 0.0.0.0 display) */
 export async function getLanIp(): Promise<string> {
   return await invoke('get_lan_ip');

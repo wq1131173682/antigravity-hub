@@ -4,8 +4,8 @@ import { useNavigate } from 'react-router-dom';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
-import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check } from 'lucide-react';
-import { getLanIp } from '../services/platformService';
+import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw } from 'lucide-react';
+import { getLanIp, getTokenStats, resetTokenStats, TokenStats } from '../services/platformService';
 import { isTauri } from '../utils/env';
 
 interface KeySwitchedPayload {
@@ -24,6 +24,14 @@ function formatLimit(v: number): string {
   return String(v);
 }
 
+/** Compact token counter (1234 → "1.2k", 1234567 → "1.2M"). */
+function formatTokens(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
+  if (v >= 10_000) return `${(v / 1_000).toFixed(1)}k`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(2)}k`;
+  return String(v);
+}
+
 function Dashboard() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -36,6 +44,8 @@ function Dashboard() {
   const [starting, setStarting] = useState(false);
   const [lanIp, setLanIp] = useState('');
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
+  const [resettingStats, setResettingStats] = useState(false);
   const startTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Cleanup timeout on unmount
@@ -96,6 +106,38 @@ function Dashboard() {
     setup();
     return () => { if (unlistenFn) unlistenFn(); };
   }, [models, fetchModelUsage]);
+
+  // Poll aggregate token stats every 3s. Counters are in-memory on the
+  // backend, so this is the only way to keep the dashboard live without
+  // re-emitting events from proxy.rs on every successful call.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const s = await getTokenStats();
+        if (!cancelled) setTokenStats(s);
+      } catch {
+        /* non-fatal: backend may not be running yet */
+      }
+    };
+    refresh();
+    const id = setInterval(refresh, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  const handleResetTokenStats = async () => {
+    if (resettingStats) return;
+    setResettingStats(true);
+    try {
+      await resetTokenStats();
+      const fresh = await getTokenStats();
+      setTokenStats(fresh);
+    } catch (e) {
+      console.error('Failed to reset token stats', e);
+    } finally {
+      setResettingStats(false);
+    }
+  };
 
   // Count keys across all platforms
   const allKeys = useMemo(() => {
@@ -338,6 +380,111 @@ function Dashboard() {
           </div>
         </div>
 
+        {/* Token Usage — live in-memory session counters from the proxy. */}
+        <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-violet-50 dark:bg-violet-900/20 rounded-md">
+                <Activity className="w-4 h-4 text-violet-500 dark:text-violet-400" />
+              </div>
+              <h2 className="font-semibold text-gray-900 dark:text-base-content text-sm">
+                Token 用量 / Token Usage
+              </h2>
+              <span className="text-[11px] text-gray-400 dark:text-gray-500">本次会话</span>
+              {tokenStats && tokenStats.last_updated > 0 && (
+                <span className="flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping" />
+                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500" />
+                  </span>
+                  live
+                </span>
+              )}
+            </div>
+            <button
+              className="text-[11px] px-2 py-1 rounded-md border border-gray-200 dark:border-base-300 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-base-200 transition-colors flex items-center gap-1 disabled:opacity-50"
+              onClick={handleResetTokenStats}
+              disabled={resettingStats || !tokenStats || tokenStats.request_count === 0}
+              title="清空当前会话的 token 统计"
+            >
+              <RotateCcw className={`w-3 h-3 ${resettingStats ? 'animate-spin' : ''}`} />
+              Reset
+            </button>
+          </div>
+
+          {tokenStats && tokenStats.request_count > 0 ? (
+            <>
+              {/* Top row: total + request count */}
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="rounded-lg p-3 bg-gradient-to-br from-violet-50 to-fuchsia-50 dark:from-violet-900/20 dark:to-fuchsia-900/20 border border-violet-100 dark:border-violet-900/30">
+                  <div className="text-[10px] uppercase tracking-wide text-violet-600 dark:text-violet-400 font-semibold mb-1">Total Tokens</div>
+                  <div className="text-2xl font-bold text-gray-900 dark:text-base-content tabular-nums">
+                    {formatTokens(tokenStats.total_tokens)}
+                  </div>
+                  <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">prompt + completion</div>
+                </div>
+                <div className="rounded-lg p-3 bg-gray-50 dark:bg-base-200/50 border border-gray-100 dark:border-base-300">
+                  <div className="text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400 font-semibold mb-1">Requests</div>
+                  <div className="text-2xl font-bold text-gray-900 dark:text-base-content tabular-nums">
+                    {tokenStats.request_count.toLocaleString()}
+                  </div>
+                  <div className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+                    {tokenStats.streaming_request_count > 0
+                      ? `含 ${tokenStats.streaming_request_count} 流式`
+                      : '全部非流式'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Bottom row: prompt vs completion breakdown bar */}
+              <div>
+                <div className="flex items-center justify-between text-[11px] mb-1.5">
+                  <div className="flex items-center gap-1.5 text-blue-600 dark:text-blue-400">
+                    <ArrowDownToLine className="w-3 h-3" />
+                    <span className="font-medium">Prompt (input)</span>
+                    <span className="font-mono tabular-nums text-gray-700 dark:text-gray-300">
+                      {formatTokens(tokenStats.prompt_tokens)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                    <span className="font-mono tabular-nums text-gray-700 dark:text-gray-300">
+                      {formatTokens(tokenStats.completion_tokens)}
+                    </span>
+                    <span className="font-medium">Completion (output)</span>
+                    <ArrowUpFromLine className="w-3 h-3" />
+                  </div>
+                </div>
+                <div className="h-2 w-full rounded-full overflow-hidden bg-gray-100 dark:bg-base-300 flex">
+                  {(() => {
+                    const total = Math.max(1, tokenStats.total_tokens);
+                    const promptPct = (tokenStats.prompt_tokens / total) * 100;
+                    const completionPct = 100 - promptPct;
+                    return (
+                      <>
+                        <div
+                          className="h-full bg-gradient-to-r from-blue-400 to-blue-500 dark:from-blue-500 dark:to-blue-400 transition-all duration-500"
+                          style={{ width: `${promptPct}%` }}
+                          title={`Prompt: ${formatTokens(tokenStats.prompt_tokens)} (${promptPct.toFixed(1)}%)`}
+                        />
+                        <div
+                          className="h-full bg-gradient-to-r from-emerald-400 to-emerald-500 dark:from-emerald-500 dark:to-emerald-400 transition-all duration-500"
+                          style={{ width: `${completionPct}%` }}
+                          title={`Completion: ${formatTokens(tokenStats.completion_tokens)} (${completionPct.toFixed(1)}%)`}
+                        />
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500 py-3">
+              <Hash className="w-3.5 h-3.5" />
+              代理尚未处理任何请求 · proxy has not processed any request yet
+            </div>
+          )}
+        </div>
+
         {/* Model Overview with Quota Limits */}
         {platforms.length > 0 && (
           <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
@@ -365,53 +512,150 @@ function Dashboard() {
                       </span>
                       <span className="text-[10px] text-gray-400">{platformModels.length} models</span>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-2.5">
                       {platformModels.map(m => {
-                        // Calculate total usage across all keys for this model
+                        // Per-key usage entries (one row per key that has a tracker for this model).
+                        // Backend `get_model_usage` returns one entry per (key_id, model_id) pair.
                         const usageEntries = modelUsage[m.id] || [];
-                        const totalUsed5h = usageEntries.reduce((s, u) => s + (u.five_hour?.count || 0), 0);
-                        const totalUsedDay = usageEntries.reduce((s, u) => s + (u.day?.count || 0), 0);
-                        const totalUsedMonth = usageEntries.reduce((s, u) => s + (u.month?.count || 0), 0);
                         const usageLoaded = usageEntries.length > 0;
-
-                        const quotas = [
-                          { label: '5h', used: totalUsed5h, limit: m.per_5hour },
-                          { label: 'Day', used: totalUsedDay, limit: m.per_day },
-                          { label: 'Mon', used: totalUsedMonth, limit: m.per_month },
-                        ].filter(q => q.limit > 0);
+                        const availableCount = usageEntries.filter(u => u.is_available).length;
+                        const totalCount = usageEntries.length;
+                        const allExhausted = usageLoaded && availableCount === 0;
 
                         return (
                           <div key={m.id} className="bg-gray-50 dark:bg-base-200/50 rounded-lg p-3 border border-gray-100 dark:border-base-300">
-                            <div className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate mb-2" title={m.model_name}>
-                              {m.display_name || m.model_name}
-                            </div>
-                            {quotas.length > 0 ? (
-                              <div className="space-y-1.5 text-[11px]">
-                                {quotas.map(q => {
-                                  const pct = usageLoaded ? Math.min(100, Math.round((q.used / q.limit) * 100)) : 0;
-                                  const barColor = pct >= 80 ? 'bg-red-500 dark:bg-red-400'
-                                    : pct >= 50 ? 'bg-amber-400 dark:bg-amber-400'
-                                    : 'bg-emerald-400 dark:bg-emerald-500';
-                                  return (
-                                    <div key={q.label}>
-                                      <div className="flex justify-between mb-0.5">
-                                        <span className="text-gray-400 dark:text-gray-500">{q.label}</span>
-                                        <span className="text-gray-600 dark:text-gray-400 font-mono">
-                                          {usageLoaded ? `${q.used}/` : ''}{formatLimit(q.limit)}
-                                        </span>
-                                      </div>
-                                      <div className="h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                                        <div
-                                          className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                                          style={{ width: `${pct}%` }}
-                                        />
-                                      </div>
-                                    </div>
-                                  );
-                                })}
+                            {/* Header: model name + key availability summary */}
+                            <div className="flex items-center justify-between mb-2 gap-2">
+                              <div className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate" title={m.model_name}>
+                                {m.display_name || m.model_name}
                               </div>
+                              {usageLoaded ? (
+                                <div
+                                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded flex-shrink-0 ${
+                                    allExhausted
+                                      ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
+                                      : availableCount < totalCount
+                                        ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
+                                        : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
+                                  }`}
+                                  title={`${availableCount} of ${totalCount} keys available (passing the quota filter)`}
+                                >
+                                  {availableCount}/{totalCount} {t('dashboard.keys_short', 'keys')}
+                                </div>
+                              ) : (
+                                <div className="text-[10px] text-gray-400 dark:text-gray-500 flex-shrink-0">…</div>
+                              )}
+                            </div>
+
+                            {usageLoaded ? (
+                              // Per-key table — one row per (key, model) tracker.
+                              // This is the data the proxy actually uses for key selection.
+                              <table className="w-full text-[10px] font-mono">
+                                <thead>
+                                  <tr className="text-gray-400 dark:text-gray-500 border-b border-gray-200/60 dark:border-base-300/60">
+                                    <th className="text-left font-normal pb-1 pr-2">Key</th>
+                                    <th className="text-right font-normal pb-1 px-1">5h</th>
+                                    <th className="text-right font-normal pb-1 px-1">Day</th>
+                                    <th className="text-right font-normal pb-1 pl-1">Mon</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {usageEntries.map(u => {
+                                    const over5h = m.per_5hour > 0 && u.five_hour.count > m.per_5hour;
+                                    const overDay = m.per_day > 0 && u.day.count > m.per_day;
+                                    const overMon = m.per_month > 0 && u.month.count > m.per_month;
+                                    const isDisabled = !u.is_available;
+                                    const overAny = over5h || overDay || overMon;
+
+                                    // Build a single status color for the row indicator dot
+                                    const rowDotCls = isDisabled
+                                      ? 'bg-red-500'
+                                      : overAny
+                                        ? 'bg-amber-500'
+                                        : 'bg-emerald-500';
+
+                                    // Row background: subtle red tint for fully disabled,
+                                    // subtle amber tint for over-quota, transparent for healthy
+                                    const rowBgCls = isDisabled
+                                      ? 'bg-red-50/60 dark:bg-red-900/10 hover:bg-red-50 dark:hover:bg-red-900/20'
+                                      : overAny
+                                        ? 'bg-amber-50/40 dark:bg-amber-900/10 hover:bg-amber-50 dark:hover:bg-amber-900/20'
+                                        : 'hover:bg-gray-100/60 dark:hover:bg-base-300/40';
+
+                                    // Helper: ratio for the per-cell mini progress bar
+                                    const ratioOf = (count: number, limit: number) => {
+                                      if (limit <= 0) return 0;
+                                      return Math.min(1, count / limit);
+                                    };
+                                    const r5h = ratioOf(u.five_hour.count, m.per_5hour);
+                                    const rDay = ratioOf(u.day.count, m.per_day);
+                                    const rMon = ratioOf(u.month.count, m.per_month);
+
+                                    return (
+                                      <tr key={u.key_id} className={`transition-colors ${rowBgCls}`}>
+                                        <td className="py-1 pr-2 text-gray-700 dark:text-gray-300 truncate max-w-0">
+                                          <div className="flex items-center gap-1.5">
+                                            <span
+                                              className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${rowDotCls}`}
+                                              title={
+                                                isDisabled
+                                                  ? `disabled until ${u.disabled_until ? new Date(u.disabled_until * 1000).toLocaleString() : 'further notice'}`
+                                                  : overAny
+                                                    ? 'over quota'
+                                                    : 'available'
+                                              }
+                                            />
+                                            <span className="truncate">{u.key_id.slice(0, 8)}</span>
+                                          </div>
+                                        </td>
+                                        <td className="py-1 px-1 text-right">
+                                          <div className="flex flex-col items-end gap-0.5">
+                                            <span className={over5h ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}>
+                                              {u.five_hour.count}<span className="text-gray-400 dark:text-gray-500">/{formatLimit(m.per_5hour)}</span>
+                                            </span>
+                                            <div className="w-12 h-0.5 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+                                              <div
+                                                className={`h-full ${over5h ? 'bg-red-500' : r5h > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                                style={{ width: `${r5h * 100}%` }}
+                                              />
+                                            </div>
+                                          </div>
+                                        </td>
+                                        <td className="py-1 px-1 text-right">
+                                          <div className="flex flex-col items-end gap-0.5">
+                                            <span className={overDay ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}>
+                                              {u.day.count}<span className="text-gray-400 dark:text-gray-500">/{formatLimit(m.per_day)}</span>
+                                            </span>
+                                            <div className="w-12 h-0.5 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+                                              <div
+                                                className={`h-full ${overDay ? 'bg-red-500' : rDay > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                                style={{ width: `${rDay * 100}%` }}
+                                              />
+                                            </div>
+                                          </div>
+                                        </td>
+                                        <td className="py-1 pl-1 text-right">
+                                          <div className="flex flex-col items-end gap-0.5">
+                                            <span className={overMon ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}>
+                                              {u.month.count}<span className="text-gray-400 dark:text-gray-500">/{formatLimit(m.per_month)}</span>
+                                            </span>
+                                            <div className="w-12 h-0.5 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+                                              <div
+                                                className={`h-full ${overMon ? 'bg-red-500' : rMon > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                                style={{ width: `${rMon * 100}%` }}
+                                              />
+                                            </div>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
                             ) : (
-                              <span className="text-[11px] text-gray-400 dark:text-gray-500">No limits set</span>
+                              <div className="text-[10px] text-gray-400 dark:text-gray-500 py-1">
+                                {t('dashboard.no_usage_data', 'No usage data yet')}
+                              </div>
                             )}
                           </div>
                         );

@@ -145,6 +145,9 @@ pub fn run() {
             commands::get_auto_switch_cmd,
             commands::remove_quota_tracker,
             commands::clean_expired_disabled_cmd,
+            // Aggregate token I/O counters
+            commands::get_token_stats,
+            commands::reset_token_stats,
             // Proxy control
             commands::start_proxy,
             commands::stop_proxy,

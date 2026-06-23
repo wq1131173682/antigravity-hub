@@ -376,6 +376,54 @@ pub fn record_500_error(key_id: &str, model_id: &str, platform_id: &str) -> Resu
     Ok(())
 }
 
+/// Filter candidate key_ids down to those whose (key_id, model_id) tracker is
+/// currently available — i.e. not disabled (within backoff) and not over any
+/// configured quota window (5h / day / month).
+///
+/// Keys with no tracker yet (never used on this model) are treated as available,
+/// so freshly added keys remain selectable.
+///
+/// Fail-open on lock poisoning: if the quota state mutex is poisoned, return
+/// the candidate list unchanged rather than blocking the proxy.
+pub fn filter_available_keys(
+    candidates: &[String],
+    model_id: &str,
+    _platform_id: &str,
+) -> Vec<String> {
+    let mut state = match QUOTA_STATE.lock() {
+        Ok(s) => s,
+        Err(_) => return candidates.to_vec(),
+    };
+    let now = chrono::Utc::now().timestamp();
+    let result: Vec<String> = candidates
+        .iter()
+        .filter(|key_id| {
+            match state
+                .trackers
+                .iter_mut()
+                .find(|t| t.key_id == **key_id && t.model_id == model_id)
+            {
+                None => true,
+                Some(t) => {
+                    // Refresh the in-memory view of expired timestamps so we
+                    // don't reject a key whose window has just rolled over.
+                    t.five_hour.clean_expired(now, 5 * 3600);
+                    t.day.clean_expired(now, 86400);
+                    t.month.clean_expired(now, 2_592_000);
+                    t.is_available()
+                }
+            }
+        })
+        .cloned()
+        .collect();
+    // Mark dirty whenever the filter touched any tracker — clean_expired may have
+    // evicted entries, and the next scheduler tick (within 30s) will flush the
+    // cleaned state to disk. Without this, in-memory evictions are lost on
+    // restart if no record_call happens in the meantime.
+    mark_dirty();
+    result
+}
+
 pub fn get_best_available_key_for_model(model_id: &str) -> Result<Option<String>, String> {
     let state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     Ok(state.get_best_available_key_for_model(model_id).map(|t| t.key_id.clone()))

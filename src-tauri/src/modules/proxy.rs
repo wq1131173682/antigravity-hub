@@ -303,30 +303,54 @@ fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
     format!("{}/{}", base, path)
 }
 
-/// Get key IDs to try for a platform+model combination
+/// Get key IDs to try for a platform+model combination.
+///
+/// Resolution order:
+///   1. If a key_model_map entry exists for the resolved model_id, use it.
+///   2. Otherwise, fall back to every active key on the platform (sorted by sort_order).
+///
+/// After resolution, drop any key whose local sliding-window tracker reports the
+/// (key_id, model_id) pair as over quota or in backoff. This is what triggers an
+/// automatic key switch when the local counter is past the configured daily /
+/// weekly / monthly limit, even if the upstream keeps returning 200 OK.
 fn get_keys_to_try(platform_id: &str, model_name: Option<String>) -> Vec<String> {
-    if let Some(model_name) = model_name {
-        // Try to find the model and its associated keys
-        if let Ok(models) = crate::modules::model_manager::list_models(platform_id) {
-            if let Some(model) = models.iter().find(|m| m.model_name == model_name) {
-                if let Ok(key_ids) = crate::modules::key_model_map::get_keys_for_model(&model.id) {
-                    if !key_ids.is_empty() {
-                        return key_ids;
-                    }
-                }
-            }
+    // Resolve model_id once (used both for the mapping lookup and the quota filter).
+    let model_id: Option<String> = model_name.as_ref().and_then(|name| {
+        crate::modules::model_manager::list_models(platform_id)
+            .ok()?
+            .into_iter()
+            .find(|m| m.model_name == *name)
+            .map(|m| m.id)
+    });
+
+    // Build candidate set: explicit mapping wins, otherwise fall back to all active keys.
+    let candidates: Vec<String> = if let Some(mid) = model_id.as_ref() {
+        match crate::modules::key_model_map::get_keys_for_model(mid) {
+            Ok(ids) if !ids.is_empty() => ids,
+            _ => list_active_key_ids(platform_id),
         }
-    }
+    } else {
+        list_active_key_ids(platform_id)
+    };
 
-    // Fallback: get all active keys for the platform
-    if let Ok(keys) = crate::modules::keystore::list_keys(platform_id) {
-        return keys.into_iter()
-            .filter(|k| k.is_active())
-            .map(|k| k.id.clone())
-            .collect();
+    // Skip keys whose quota window is already exceeded or currently in backoff.
+    if let Some(mid) = model_id.as_ref() {
+        crate::modules::quota_window::filter_available_keys(&candidates, mid, platform_id)
+    } else {
+        candidates
     }
+}
 
-    Vec::new()
+/// Helper: return IDs of every active key on a platform, preserving sort_order.
+fn list_active_key_ids(platform_id: &str) -> Vec<String> {
+    crate::modules::keystore::list_keys(platform_id)
+        .map(|keys| {
+            keys.into_iter()
+                .filter(|k| k.is_active())
+                .map(|k| k.id)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Forward request with automatic key rotation on 429/500.
@@ -478,14 +502,61 @@ async fn forward_with_retry(
             .map(|(key, value)| (key.as_str().to_string(), value.to_str().unwrap_or("").to_string()))
             .collect();
 
-        // Stream the response body back to client (avoids hanging on streaming APIs)
-        let body = axum::body::Body::from_stream(resp.bytes_stream());
+        // Detect streaming responses so we don't break token-by-token delivery
+        // to the client. OpenAI / Anthropic streaming uses `text/event-stream`;
+        // non-streaming responses use `application/json` (or no content-type).
+        let is_streaming = response_headers.iter().any(|(k, v)| {
+            k.to_lowercase() == "content-type"
+                && v.to_lowercase().contains("text/event-stream")
+        });
 
         let mut response_builder = axum::response::Response::builder().status(status);
         for (key, value) in &response_headers {
             response_builder = response_builder.header(key.as_str(), value.as_str());
         }
 
+        if is_streaming {
+            // Pass-through: the body is consumed as a stream by the client.
+            // Tokens inside SSE chunks can't be reliably summed (the final
+            // `usage` chunk comes at the very end), so we just count the
+            // request and let the client see the streamed usage itself.
+            crate::modules::token_stats::record_streaming_request();
+            let body = axum::body::Body::from_stream(resp.bytes_stream());
+            return response_builder
+                .body(body)
+                .map_err(|e| format!("Failed to build response: {}", e));
+        }
+
+        // Non-streaming: buffer the body so we can inspect `usage` before
+        // forwarding to the client. This adds one round-trip of latency
+        // (wait for full response) but is required to count tokens.
+        let body_bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(format!("Failed to read upstream response: {}", e));
+            }
+        };
+
+        // Try to extract `usage` from the JSON body. Both OpenAI and Anthropic
+        // expose prompt/completion token counts under `usage.{prompt_tokens,
+        // completion_tokens}`; missing fields are silently ignored.
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            if let Some(usage) = json.get("usage") {
+                let prompt = usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let completion = usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if prompt > 0 || completion > 0 {
+                    crate::modules::token_stats::record_usage(prompt, completion);
+                }
+            }
+        }
+
+        let body = axum::body::Body::from(body_bytes);
         return response_builder
             .body(body)
             .map_err(|e| format!("Failed to build response: {}", e));

@@ -223,6 +223,19 @@ pub async fn get_model_usage(model_id: String) -> Result<Vec<serde_json::Value>,
     modules::quota_window::get_model_usage(&model_id)
 }
 
+/// Get aggregate token I/O counters for the current proxy session.
+#[tauri::command]
+pub async fn get_token_stats() -> Result<modules::token_stats::TokenStats, String> {
+    Ok(modules::token_stats::get_summary())
+}
+
+/// Reset aggregate token counters.
+#[tauri::command]
+pub async fn reset_token_stats() -> Result<(), String> {
+    modules::token_stats::reset();
+    Ok(())
+}
+
 /// Set auto-switch enabled/disabled
 #[tauri::command]
 pub async fn set_auto_switch_cmd(enabled: bool) -> Result<(), String> {
