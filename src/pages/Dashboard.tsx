@@ -7,6 +7,7 @@ import { showToast } from '../components/common/ToastContainer';
 import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw } from 'lucide-react';
 import { getLanIp, getTokenStats, resetTokenStats, TokenStats } from '../services/platformService';
 import { isTauri } from '../utils/env';
+import { MODEL_CONFIG } from '../config/modelConfig';
 
 interface KeySwitchedPayload {
   platformId: string;
@@ -485,7 +486,7 @@ function Dashboard() {
           )}
         </div>
 
-        {/* Model Overview with Quota Limits */}
+        {/* Model Overview with Quota Limits — Redesigned */}
         {platforms.length > 0 && (
           <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
             <div className="flex items-center gap-2 mb-4">
@@ -499,90 +500,109 @@ function Dashboard() {
                 {allModels.length} models
               </span>
             </div>
-            <div className="space-y-3">
+
+            <div className="space-y-4">
               {platforms.map(p => {
                 const platformModels = models[p.id] || [];
                 if (platformModels.length === 0) return null;
+
                 return (
                   <div key={p.id}>
-                    <div className="flex items-center gap-2 mb-2">
+                    {/* Platform divider */}
+                    <div className="flex items-center gap-2 mb-3">
+                      <Globe className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500" />
                       <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">{p.name}</span>
                       <span className="text-[10px] font-mono bg-gray-100 dark:bg-base-300 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400">
                         /{p.path_prefix}
                       </span>
-                      <span className="text-[10px] text-gray-400">{platformModels.length} models</span>
+                      <span className="text-[10px] text-gray-400 dark:text-gray-500">{platformModels.length} models</span>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-2.5">
+
+                    {/* Model cards grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-3">
                       {platformModels.map(m => {
-                        // Per-key usage entries (one row per key that has a tracker for this model).
-                        // Backend `get_model_usage` returns one entry per (key_id, model_id) pair.
                         const usageEntries = modelUsage[m.id] || [];
                         const usageLoaded = usageEntries.length > 0;
                         const availableCount = usageEntries.filter(u => u.is_available).length;
                         const totalCount = usageEntries.length;
                         const allExhausted = usageLoaded && availableCount === 0;
 
+                        // Sort entries: available first, then exhausted/disabled
+                        const sortedEntries = [...usageEntries].sort((a, b) => {
+                          if (a.is_available && !b.is_available) return -1;
+                          if (!a.is_available && b.is_available) return 1;
+                          return 0;
+                        });
+
+                        // Get model icon from config
+                        const modelConfig = MODEL_CONFIG[m.id.toLowerCase()];
+                        const ModelIcon = modelConfig?.Icon;
+
                         return (
-                          <div key={m.id} className="bg-gray-50 dark:bg-base-200/50 rounded-lg p-3 border border-gray-100 dark:border-base-300">
-                            {/* Header: model name + key availability summary */}
-                            <div className="flex items-center justify-between mb-2 gap-2">
-                              <div className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate" title={m.model_name}>
-                                {m.display_name || m.model_name}
-                              </div>
-                              {usageLoaded ? (
-                                <div
-                                  className={`text-[10px] font-mono px-1.5 py-0.5 rounded flex-shrink-0 ${
-                                    allExhausted
-                                      ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
-                                      : availableCount < totalCount
-                                        ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
-                                        : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
-                                  }`}
-                                  title={`${availableCount} of ${totalCount} keys available (passing the quota filter)`}
-                                >
-                                  {availableCount}/{totalCount} {t('dashboard.keys_short', 'keys')}
+                          <div
+                            key={m.id}
+                            className="bg-gray-50 dark:bg-base-200/50 rounded-lg border border-gray-100 dark:border-base-300 overflow-hidden"
+                          >
+                            {/* Card header: icon + model name + availability badge */}
+                            <div className="px-3 py-2.5 border-b border-gray-100/60 dark:border-base-300/60 bg-white/50 dark:bg-base-100/30">
+                              <div className="flex items-center gap-2.5">
+                                {/* Model icon */}
+                                {ModelIcon ? (
+                                  <ModelIcon size={18} className="flex-shrink-0" />
+                                ) : (
+                                  <div className="w-[18px] h-[18px] flex-shrink-0 rounded bg-gray-200 dark:bg-base-300 flex items-center justify-center">
+                                    <span className="text-[9px] font-bold text-gray-500 dark:text-gray-400">M</span>
+                                  </div>
+                                )}
+                                {/* Model name */}
+                                <div className="flex-1 min-w-0">
+                                  <div className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate" title={m.model_name}>
+                                    {m.display_name || m.model_name}
+                                  </div>
                                 </div>
-                              ) : (
-                                <div className="text-[10px] text-gray-400 dark:text-gray-500 flex-shrink-0">…</div>
-                              )}
+                                {/* Availability badge */}
+                                {usageLoaded ? (
+                                  <div
+                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
+                                      allExhausted
+                                        ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
+                                        : availableCount < totalCount
+                                          ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
+                                          : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
+                                    }`}
+                                    title={`${availableCount} of ${totalCount} keys available`}
+                                  >
+                                    {availableCount}/{totalCount}
+                                  </div>
+                                ) : (
+                                  <div className="text-[10px] text-gray-400 dark:text-gray-500 flex-shrink-0">…</div>
+                                )}
+                              </div>
                             </div>
 
-                            {usageLoaded ? (
-                              // Per-key table — one row per (key, model) tracker.
-                              // This is the data the proxy actually uses for key selection.
-                              <table className="w-full text-[10px] font-mono">
-                                <thead>
-                                  <tr className="text-gray-400 dark:text-gray-500 border-b border-gray-200/60 dark:border-base-300/60">
-                                    <th className="text-left font-normal pb-1 pr-2">Key</th>
-                                    <th className="text-right font-normal pb-1 px-1">5h</th>
-                                    <th className="text-right font-normal pb-1 px-1">Day</th>
-                                    <th className="text-right font-normal pb-1 pl-1">Mon</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {usageEntries.map(u => {
+                            {/* Key rows */}
+                            <div className="px-3 py-2">
+                              {usageLoaded ? (
+                                <div className="space-y-2">
+                                  {sortedEntries.map(u => {
                                     const over5h = m.per_5hour > 0 && u.five_hour.count > m.per_5hour;
                                     const overDay = m.per_day > 0 && u.day.count > m.per_day;
                                     const overMon = m.per_month > 0 && u.month.count > m.per_month;
                                     const isDisabled = !u.is_available;
                                     const overAny = over5h || overDay || overMon;
 
-                                    // Build a single status color for the row indicator dot
                                     const rowDotCls = isDisabled
                                       ? 'bg-red-500'
                                       : overAny
                                         ? 'bg-amber-500'
                                         : 'bg-emerald-500';
 
-                                    // Row background: subtle red tint for fully disabled,
-                                    // subtle amber tint for over-quota, transparent for healthy
                                     const rowBgCls = isDisabled
-                                      ? 'bg-red-50/60 dark:bg-red-900/10 hover:bg-red-50 dark:hover:bg-red-900/20'
+                                      ? 'bg-red-50/40 dark:bg-red-900/10'
                                       : overAny
-                                        ? 'bg-amber-50/40 dark:bg-amber-900/10 hover:bg-amber-50 dark:hover:bg-amber-900/20'
-                                        : 'hover:bg-gray-100/60 dark:hover:bg-base-300/40';
+                                        ? 'bg-amber-50/30 dark:bg-amber-900/10'
+                                        : 'bg-emerald-50/20 dark:bg-emerald-900/5';
 
-                                    // Helper: ratio for the per-cell mini progress bar
                                     const ratioOf = (count: number, limit: number) => {
                                       if (limit <= 0) return 0;
                                       return Math.min(1, count / limit);
@@ -591,72 +611,93 @@ function Dashboard() {
                                     const rDay = ratioOf(u.day.count, m.per_day);
                                     const rMon = ratioOf(u.month.count, m.per_month);
 
+                                    const barColor = (ratio: number, over: boolean) =>
+                                      over ? 'bg-red-500' : ratio > 0.8 ? 'bg-amber-500' : 'bg-emerald-500';
+
+                                    const disabledInfo = isDisabled && u.disabled_until
+                                      ? `Disabled until ${new Date(u.disabled_until * 1000).toLocaleString()}`
+                                      : isDisabled ? 'Disabled (5xx backoff)' : '';
+
                                     return (
-                                      <tr key={u.key_id} className={`transition-colors ${rowBgCls}`}>
-                                        <td className="py-1 pr-2 text-gray-700 dark:text-gray-300 truncate max-w-0">
-                                          <div className="flex items-center gap-1.5">
-                                            <span
-                                              className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${rowDotCls}`}
-                                              title={
-                                                isDisabled
-                                                  ? `disabled until ${u.disabled_until ? new Date(u.disabled_until * 1000).toLocaleString() : 'further notice'}`
-                                                  : overAny
-                                                    ? 'over quota'
-                                                    : 'available'
-                                              }
-                                            />
-                                            <span className="truncate">{u.key_id.slice(0, 8)}</span>
-                                          </div>
-                                        </td>
-                                        <td className="py-1 px-1 text-right">
-                                          <div className="flex flex-col items-end gap-0.5">
-                                            <span className={over5h ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}>
-                                              {u.five_hour.count}<span className="text-gray-400 dark:text-gray-500">/{formatLimit(m.per_5hour)}</span>
-                                            </span>
-                                            <div className="w-12 h-0.5 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+                                      <div
+                                        key={u.key_id}
+                                        className={`rounded-md px-2 py-1.5 transition-colors ${rowBgCls}`}
+                                        title={`
+Key: ${u.key_id}
+${disabledInfo ? disabledInfo + '\n' : ''}Status: ${isDisabled ? 'Disabled' : overAny ? 'Over quota' : 'Available'}
+5h: ${u.five_hour.count}/${m.per_5hour <= 0 ? '∞' : m.per_5hour}
+Day: ${u.day.count}/${m.per_day <= 0 ? '∞' : m.per_day}
+Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
+`.trim()}
+                                      >
+                                        {/* Key identifier row */}
+                                        <div className="flex items-center gap-1.5 mb-1">
+                                          <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${rowDotCls}`} />
+                                          <span className="text-[11px] font-mono text-gray-600 dark:text-gray-400 truncate">
+                                            {u.key_id.slice(0, 10)}…{u.key_id.slice(-4)}
+                                          </span>
+                                        </div>
+
+                                        {/* Progress bars row */}
+                                        <div className="grid grid-cols-3 gap-2">
+                                          {/* 5h */}
+                                          <div>
+                                            <div className="flex items-baseline justify-between mb-0.5">
+                                              <span className="text-[9px] text-gray-400 dark:text-gray-500">5h</span>
+                                              <span className={`text-[10px] font-mono ${over5h ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}`}>
+                                                {u.five_hour.count}/{formatLimit(m.per_5hour)}
+                                              </span>
+                                            </div>
+                                            <div className="w-full h-1 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
                                               <div
-                                                className={`h-full ${over5h ? 'bg-red-500' : r5h > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                                                style={{ width: `${r5h * 100}%` }}
+                                                className={`h-full transition-all ${barColor(r5h, over5h)}`}
+                                                style={{ width: m.per_5hour > 0 ? `${r5h * 100}%` : '0%' }}
                                               />
                                             </div>
                                           </div>
-                                        </td>
-                                        <td className="py-1 px-1 text-right">
-                                          <div className="flex flex-col items-end gap-0.5">
-                                            <span className={overDay ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}>
-                                              {u.day.count}<span className="text-gray-400 dark:text-gray-500">/{formatLimit(m.per_day)}</span>
-                                            </span>
-                                            <div className="w-12 h-0.5 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+
+                                          {/* Day */}
+                                          <div>
+                                            <div className="flex items-baseline justify-between mb-0.5">
+                                              <span className="text-[9px] text-gray-400 dark:text-gray-500">Day</span>
+                                              <span className={`text-[10px] font-mono ${overDay ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}`}>
+                                                {u.day.count}/{formatLimit(m.per_day)}
+                                              </span>
+                                            </div>
+                                            <div className="w-full h-1 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
                                               <div
-                                                className={`h-full ${overDay ? 'bg-red-500' : rDay > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                                                style={{ width: `${rDay * 100}%` }}
+                                                className={`h-full transition-all ${barColor(rDay, overDay)}`}
+                                                style={{ width: m.per_day > 0 ? `${rDay * 100}%` : '0%' }}
                                               />
                                             </div>
                                           </div>
-                                        </td>
-                                        <td className="py-1 pl-1 text-right">
-                                          <div className="flex flex-col items-end gap-0.5">
-                                            <span className={overMon ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-600 dark:text-gray-400'}>
-                                              {u.month.count}<span className="text-gray-400 dark:text-gray-500">/{formatLimit(m.per_month)}</span>
-                                            </span>
-                                            <div className="w-12 h-0.5 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+
+                                          {/* Month */}
+                                          <div>
+                                            <div className="flex items-baseline justify-between mb-0.5">
+                                              <span className="text-[9px] text-gray-400 dark:text-gray-500">Mon</span>
+                                              <span className={`text-[10px] font-mono ${overMon ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}`}>
+                                                {u.month.count}/{formatLimit(m.per_month)}
+                                              </span>
+                                            </div>
+                                            <div className="w-full h-1 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
                                               <div
-                                                className={`h-full ${overMon ? 'bg-red-500' : rMon > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}`}
-                                                style={{ width: `${rMon * 100}%` }}
+                                                className={`h-full transition-all ${barColor(rMon, overMon)}`}
+                                                style={{ width: m.per_month > 0 ? `${rMon * 100}%` : '0%' }}
                                               />
                                             </div>
                                           </div>
-                                        </td>
-                                      </tr>
+                                        </div>
+                                      </div>
                                     );
                                   })}
-                                </tbody>
-                              </table>
-                            ) : (
-                              <div className="text-[10px] text-gray-400 dark:text-gray-500 py-1">
-                                {t('dashboard.no_usage_data', 'No usage data yet')}
-                              </div>
-                            )}
+                                </div>
+                              ) : (
+                                <div className="text-[11px] text-gray-400 dark:text-gray-500 py-2 text-center">
+                                  {t('dashboard.no_usage_data', 'No usage data yet')}
+                                </div>
+                              )}
+                            </div>
                           </div>
                         );
                       })}

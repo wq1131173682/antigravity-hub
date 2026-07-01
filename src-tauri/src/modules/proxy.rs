@@ -4,6 +4,7 @@ use serde::Serialize;
 use reqwest::Client;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use rand::seq::SliceRandom;
 
 use tracing::{info, warn, error};
 
@@ -160,6 +161,37 @@ fn extract_model_name(body_bytes: &[u8]) -> Option<String> {
         .and_then(|v| v.get("model")?.as_str().map(String::from))
 }
 
+/// Inject `max_tokens` into the request body if missing.
+/// Some upstream APIs (e.g. custom OpenAI-compatible backends) require `max_tokens`
+/// explicitly, but many chat clients omit it. We inject a reasonable default.
+fn ensure_max_tokens(body_bytes: &[u8], target_path: &str) -> Vec<u8> {
+    // Only inject for completion/message endpoints
+    let needs_max_tokens = target_path.contains("/chat/completions")
+        || target_path.contains("/v1/messages")
+        || target_path.contains("/completions");
+
+    if !needs_max_tokens {
+        return body_bytes.to_vec();
+    }
+
+    match serde_json::from_slice::<serde_json::Value>(body_bytes) {
+        Ok(mut json) => {
+            if let Some(obj) = json.as_object_mut() {
+                if !obj.contains_key("max_tokens") {
+                    obj.insert(
+                        "max_tokens".to_string(),
+                        serde_json::Value::Number(4096.into()),
+                    );
+                    info!("Injected default max_tokens=4096 into request body");
+                    return serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
+                }
+            }
+            body_bytes.to_vec()
+        }
+        Err(_) => body_bytes.to_vec(),
+    }
+}
+
 /// Handle all incoming proxy requests
 async fn proxy_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -236,6 +268,9 @@ async fn proxy_handler(
 
     // Try to extract model name from request body
     let model_name = extract_model_name(&body_bytes);
+
+    // Inject default max_tokens if missing (some upstream APIs require it)
+    let body_bytes: axum::body::Bytes = ensure_max_tokens(&body_bytes, &target_path).into();
 
     // Try forwarding the request with key rotation
     let result = forward_with_retry(
@@ -324,9 +359,16 @@ fn get_keys_to_try(platform_id: &str, model_name: Option<String>) -> Vec<String>
     });
 
     // Build candidate set: explicit mapping wins, otherwise fall back to all active keys.
+    // NOTE: key_model_map returns ALL associated key IDs regardless of keystore status,
+    // so we must intersect with active keys to exclude manually-disabled ones.
     let candidates: Vec<String> = if let Some(mid) = model_id.as_ref() {
         match crate::modules::key_model_map::get_keys_for_model(mid) {
-            Ok(ids) if !ids.is_empty() => ids,
+            Ok(ids) if !ids.is_empty() => {
+                // Filter out keys that are disabled in the keystore (manually disabled)
+                let active_ids = list_active_key_ids(platform_id);
+                let active_set: std::collections::HashSet<&String> = active_ids.iter().collect();
+                ids.into_iter().filter(|id| active_set.contains(id)).collect()
+            }
             _ => list_active_key_ids(platform_id),
         }
     } else {
@@ -334,11 +376,18 @@ fn get_keys_to_try(platform_id: &str, model_name: Option<String>) -> Vec<String>
     };
 
     // Skip keys whose quota window is already exceeded or currently in backoff.
-    if let Some(mid) = model_id.as_ref() {
+    let mut available = if let Some(mid) = model_id.as_ref() {
         crate::modules::quota_window::filter_available_keys(&candidates, mid, platform_id)
     } else {
         candidates
-    }
+    };
+
+    // Load balancing: shuffle available keys so traffic is distributed
+    // rather than always hitting key[0] first.
+    let mut rng = rand::thread_rng();
+    available.shuffle(&mut rng);
+
+    available
 }
 
 /// Helper: return IDs of every active key on a platform, preserving sort_order.
@@ -435,21 +484,28 @@ async fn forward_with_retry(
         };
 
         let status = resp.status();
-        let is_error = status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+
+        // 429: rate limited — wait with exponential backoff, then retry SAME key
+        // Do NOT switch keys for 429; the key is still valid, just temporarily throttled
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            warn!("429 from {}, {}={}, model={}, will retry same key",
+                target_url, format!("key[{}]", key_idx), key_id, model_identifier);
+            if let Some(mid) = &model_id {
+                let _ = crate::modules::quota_window::record_429_error(key_id, mid, platform_id);
+            }
+            last_error = "Rate limited (429)".to_string();
+            // Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped at 32s)
+            let backoff_secs = std::cmp::min(32, 2_u64.pow(attempt as u32 + 1));
+            info!("Waiting {}s before retrying same key...", backoff_secs);
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            continue; // Retry the same key
+        }
+
+        let is_error = status.is_server_error();
 
         if is_error {
             let key_label = format!("key[{}]", key_idx);
-            let (reason_str, disabled_until_ts) = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                warn!("429 from {}, {}={}, model={}, trying next",
-                    target_url, key_label, key_id, model_identifier);
-                if let Some(mid) = &model_id {
-                    let _ = crate::modules::quota_window::record_429_error(key_id, mid, platform_id);
-                }
-                let reason = format!("Rate limited at {}", chrono::Utc::now().format("%H:%M:%S"));
-                let until = chrono::Utc::now().timestamp() + 120;
-                let _ = crate::modules::keystore::set_key_status(key_id, true, Some(reason.clone()), Some(until));
-                (reason, until)
-            } else {
+            let (reason_str, disabled_until_ts) = {
                 warn!("{} from {}, {}={}, model={}, trying next",
                     status, target_url, key_label, key_id, model_identifier);
                 if let Some(mid) = &model_id {

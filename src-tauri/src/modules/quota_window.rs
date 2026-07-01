@@ -153,6 +153,7 @@ impl ModelKeyTracker {
     /// Get which windows are exceeded (based on model limits).
     /// Uses len() without cleaning — stale entries gradually decay on
     /// subsequent record_calls, so this is conservative.
+    /// NOTE: A limit of 0 means "unlimited" (matching frontend's ∞ display).
     pub fn get_exceeded_windows(&self) -> Vec<String> {
         let limits = self.get_limits().unwrap_or(UsageLimits {
             max_per_5hrs: u32::MAX,
@@ -160,9 +161,16 @@ impl ModelKeyTracker {
             max_per_month: u32::MAX,
         });
         let mut exceeded = Vec::new();
-        if self.five_hour.len() > limits.max_per_5hrs { exceeded.push("5hour".into()); }
-        if self.day.len() > limits.max_per_day { exceeded.push("day".into()); }
-        if self.month.len() > limits.max_per_month { exceeded.push("month".into()); }
+        // limit == 0 means unlimited — skip the check (frontend shows as ∞)
+        if limits.max_per_5hrs > 0 && self.five_hour.len() > limits.max_per_5hrs {
+            exceeded.push("5hour".into());
+        }
+        if limits.max_per_day > 0 && self.day.len() > limits.max_per_day {
+            exceeded.push("day".into());
+        }
+        if limits.max_per_month > 0 && self.month.len() > limits.max_per_month {
+            exceeded.push("month".into());
+        }
         exceeded
     }
 
@@ -172,13 +180,14 @@ impl ModelKeyTracker {
     }
 
     /// Record a 429 error
+    /// NOTE: 429 does NOT disable the key — it only records the count.
+    /// The proxy should wait and retry the same key, not switch.
     pub fn record_429(&mut self) {
         let now = chrono::Utc::now().timestamp();
         self.consecutive_429 += 1;
         self.last_429_time = now;
-        let backoff = (std::cmp::min(120, 1 << self.consecutive_429) * 60) as i64;
-        self.disabled_until = Some(now + backoff);
-        self.disabled_reason = Some(format!("Rate limited (429 x{}) - retry after {}s", self.consecutive_429, backoff));
+        // Do NOT set disabled_until — 429 is a rate limit, not an error.
+        // The key remains available for retry after a short wait.
     }
 
     /// Record a 500 error
