@@ -153,6 +153,37 @@ function Dashboard() {
     return Object.values(models).flat();
   }, [models]);
 
+  // Aggregate 5h quota across all models & keys — the headline metric.
+  const fiveHourSummary = useMemo(() => {
+    let totalUsed = 0;
+    let totalLimit = 0;        // sum of per_5hour where limit > 0
+    let limitedKeys = 0;       // keys that have a finite 5h limit
+    let overCount = 0;         // keys currently exceeding 5h
+    let nearLimitCount = 0;    // keys >= 80% of 5h but not over
+    let availableKeyCount = 0;
+
+    for (const m of allModels) {
+      const entries = modelUsage[m.id] || [];
+      for (const u of entries) {
+        if (m.per_5hour > 0) {
+          totalLimit += m.per_5hour;
+          limitedKeys += 1;
+          totalUsed += Math.min(u.five_hour.count, m.per_5hour);
+          if (u.five_hour.count > m.per_5hour) overCount += 1;
+          else if (u.five_hour.count / m.per_5hour >= 0.8) nearLimitCount += 1;
+        } else {
+          // unlimited 5h key — still count usage
+          totalUsed += u.five_hour.count;
+        }
+        if (u.is_available) availableKeyCount += 1;
+      }
+    }
+
+    const ratio = totalLimit > 0 ? Math.min(1, totalUsed / totalLimit) : 0;
+    const remaining = Math.max(0, totalLimit - totalUsed);
+    return { totalUsed, totalLimit, limitedKeys, overCount, nearLimitCount, availableKeyCount, ratio, remaining };
+  }, [allModels, modelUsage]);
+
   // Detect LAN IP when proxy host is 0.0.0.0
   useEffect(() => {
     if (config?.proxy_host === '0.0.0.0') {
@@ -486,6 +517,103 @@ function Dashboard() {
           )}
         </div>
 
+        {/* ★ 5h Quota Hero — the headline metric, prominently displayed */}
+        {fiveHourSummary.totalLimit > 0 && (
+          <div className="relative overflow-hidden rounded-2xl shadow-md border-2 border-indigo-200 dark:border-indigo-800/50 bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 dark:from-indigo-700 dark:via-violet-700 dark:to-purple-800">
+            {/* Decorative glow */}
+            <div className="absolute -top-8 -right-8 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
+            <div className="absolute -bottom-6 -left-6 w-32 h-32 bg-fuchsia-300/10 rounded-full blur-2xl" />
+
+            <div className="relative p-5 sm:p-6 text-white">
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-white/20 backdrop-blur-sm ring-1 ring-white/30">
+                      <Activity className="w-4 h-4" />
+                    </span>
+                    <h2 className="text-base font-bold tracking-tight">
+                      5 小时限额总览
+                    </h2>
+                    <span className="text-[10px] font-semibold uppercase tracking-wider bg-white/20 px-2 py-0.5 rounded-full">
+                      5h Quota
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-indigo-100/80">
+                    所有模型 · 所有 Key 的 5 小时滚动窗口用量
+                  </p>
+                </div>
+                {/* Quick badges */}
+                <div className="flex flex-col gap-1.5 items-end">
+                  {fiveHourSummary.overCount > 0 ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-red-500/90 text-white px-2.5 py-1 rounded-full shadow-sm">
+                      <AlertTriangle className="w-3 h-3" />
+                      {fiveHourSummary.overCount} 超额
+                    </span>
+                  ) : fiveHourSummary.nearLimitCount > 0 ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-amber-400/90 text-amber-950 px-2.5 py-1 rounded-full shadow-sm">
+                      <AlertTriangle className="w-3 h-3" />
+                      {fiveHourSummary.nearLimitCount} 接近上限
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold bg-emerald-400/90 text-emerald-950 px-2.5 py-1 rounded-full shadow-sm">
+                      <Check className="w-3 h-3" />
+                      全部正常
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Big numbers row */}
+              <div className="grid grid-cols-3 gap-3 mb-4">
+                <div className="bg-white/15 backdrop-blur-sm rounded-xl p-3 ring-1 ring-white/20">
+                  <div className="text-[10px] uppercase tracking-wider text-indigo-100/80 font-semibold mb-0.5">已用</div>
+                  <div className="text-2xl sm:text-3xl font-bold tabular-nums leading-tight">
+                    {formatTokens(fiveHourSummary.totalUsed)}
+                  </div>
+                </div>
+                <div className="bg-white/15 backdrop-blur-sm rounded-xl p-3 ring-1 ring-white/20">
+                  <div className="text-[10px] uppercase tracking-wider text-indigo-100/80 font-semibold mb-0.5">总额度</div>
+                  <div className="text-2xl sm:text-3xl font-bold tabular-nums leading-tight">
+                    {formatLimit(fiveHourSummary.totalLimit)}
+                  </div>
+                </div>
+                <div className="bg-white/15 backdrop-blur-sm rounded-xl p-3 ring-1 ring-white/20">
+                  <div className="text-[10px] uppercase tracking-wider text-indigo-100/80 font-semibold mb-0.5">剩余</div>
+                  <div className="text-2xl sm:text-3xl font-bold tabular-nums leading-tight text-emerald-200">
+                    {formatLimit(fiveHourSummary.remaining)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Big progress bar */}
+              <div>
+                <div className="flex items-center justify-between text-[11px] mb-1.5">
+                  <span className="text-indigo-100/90 font-medium">使用进度</span>
+                  <span className="font-mono tabular-nums text-white font-bold">
+                    {(fiveHourSummary.ratio * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="h-3 w-full rounded-full overflow-hidden bg-white/20 ring-1 ring-white/10">
+                  <div
+                    className={`h-full rounded-full transition-all duration-700 ease-out ${
+                      fiveHourSummary.ratio >= 1
+                        ? 'bg-gradient-to-r from-red-400 to-rose-300'
+                        : fiveHourSummary.ratio >= 0.8
+                          ? 'bg-gradient-to-r from-amber-300 to-yellow-200'
+                          : 'bg-gradient-to-r from-emerald-300 to-teal-200'
+                    }`}
+                    style={{ width: `${Math.max(2, fiveHourSummary.ratio * 100)}%` }}
+                  />
+                </div>
+                <div className="flex items-center justify-between mt-1.5 text-[10px] text-indigo-100/70">
+                  <span>{fiveHourSummary.limitedKeys} 个有限额 Key</span>
+                  <span>{fiveHourSummary.availableKeyCount} 个可用</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Model Overview with Quota Limits — Redesigned */}
         {platforms.length > 0 && (
           <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
@@ -638,24 +766,39 @@ Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
                                           </span>
                                         </div>
 
-                                        {/* Progress bars row */}
-                                        <div className="grid grid-cols-3 gap-2">
-                                          {/* 5h */}
-                                          <div>
-                                            <div className="flex items-baseline justify-between mb-0.5">
-                                              <span className="text-[9px] text-gray-400 dark:text-gray-500">5h</span>
-                                              <span className={`text-[10px] font-mono ${over5h ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}`}>
-                                                {u.five_hour.count}/{formatLimit(m.per_5hour)}
-                                              </span>
+                                        {/* ★ 5h — primary, full-width prominent row */}
+                                        <div className={`rounded-md p-2 mb-1.5 transition-colors ${
+                                          over5h
+                                            ? 'bg-red-100/70 dark:bg-red-900/20 ring-1 ring-red-300/50 dark:ring-red-700/40'
+                                            : r5h > 0.8
+                                              ? 'bg-amber-50/70 dark:bg-amber-900/10'
+                                              : 'bg-indigo-50/40 dark:bg-indigo-900/10'
+                                        }`}>
+                                          <div className="flex items-baseline justify-between mb-1">
+                                            <div className="flex items-center gap-1.5">
+                                              <span className={`inline-block w-1.5 h-1.5 rounded-full ${over5h ? 'bg-red-500' : r5h > 0.8 ? 'bg-amber-500' : 'bg-indigo-500'}`} />
+                                              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-600 dark:text-gray-300">5h 限额</span>
                                             </div>
-                                            <div className="w-full h-1 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
-                                              <div
-                                                className={`h-full transition-all ${barColor(r5h, over5h)}`}
-                                                style={{ width: m.per_5hour > 0 ? `${r5h * 100}%` : '0%' }}
-                                              />
-                                            </div>
+                                            <span className={`text-xs font-mono font-bold tabular-nums ${over5h ? 'text-red-600 dark:text-red-400' : r5h > 0.8 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-700 dark:text-gray-200'}`}>
+                                              {u.five_hour.count}<span className="text-gray-400 dark:text-gray-500 font-normal">/{formatLimit(m.per_5hour)}</span>
+                                            </span>
                                           </div>
+                                          <div className="w-full h-2 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
+                                            <div
+                                              className={`h-full rounded-full transition-all duration-500 ${
+                                                over5h
+                                                  ? 'bg-gradient-to-r from-red-500 to-rose-400'
+                                                  : r5h > 0.8
+                                                    ? 'bg-gradient-to-r from-amber-400 to-yellow-300'
+                                                    : 'bg-gradient-to-r from-indigo-500 to-violet-400'
+                                              }`}
+                                              style={{ width: m.per_5hour > 0 ? `${Math.max(over5h ? 100 : r5h * 100, 2)}%` : '0%' }}
+                                            />
+                                          </div>
+                                        </div>
 
+                                        {/* Day / Month — compact secondary row */}
+                                        <div className="grid grid-cols-2 gap-2">
                                           {/* Day */}
                                           <div>
                                             <div className="flex items-baseline justify-between mb-0.5">
