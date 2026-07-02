@@ -177,12 +177,19 @@ fn ensure_max_tokens(body_bytes: &[u8], target_path: &str) -> Vec<u8> {
     match serde_json::from_slice::<serde_json::Value>(body_bytes) {
         Ok(mut json) => {
             if let Some(obj) = json.as_object_mut() {
-                if !obj.contains_key("max_tokens") {
+                let needs_fix = match obj.get("max_tokens") {
+                    None => true,
+                    Some(val) if val.is_null() => true,
+                    Some(val) => {
+                        val.as_u64().map_or(true, |n| n == 0 || n > 65536)
+                    }
+                };
+                if needs_fix {
                     obj.insert(
                         "max_tokens".to_string(),
                         serde_json::Value::Number(4096.into()),
                     );
-                    info!("Injected default max_tokens=4096 into request body");
+                    info!("Injected default max_tokens=4096 into request body (was missing or invalid)");
                     return serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
                 }
             }
