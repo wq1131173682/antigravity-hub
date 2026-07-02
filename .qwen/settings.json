@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Agent(Explore)"
+      "Agent(Explore)",
+      "Skill(qc-helper)",
+      "Bash(npm run *)"
     ]
   },
   "$version": 4
