@@ -135,19 +135,26 @@ impl ModelKeyTracker {
     }
 
     /// Record a successful API call — sliding-window timestamps.
+    /// Rolling 5-hour window = 5 * 3600 seconds
+    const FIVE_HOUR_SECS: i64 = 5 * 3600;
+    /// Rolling 1-day window = 24 * 3600 seconds
+    const DAY_SECS: i64 = 86400;
+    /// Rolling 31-day window (covers all calendar months including those with 31 days)
+    const MONTH_SECS: i64 = 31 * 86400;  // 2,678,400
+
     pub fn record_call(&mut self) {
         let now = chrono::Utc::now().timestamp();
-        self.five_hour.record(now, 5 * 3600);
-        self.day.record(now, 86400);
-        self.month.record(now, 2_592_000);
+        self.five_hour.record(now, Self::FIVE_HOUR_SECS);
+        self.day.record(now, Self::DAY_SECS);
+        self.month.record(now, Self::MONTH_SECS);
     }
 
     /// Clean expired entries in all windows using the current time.
     pub fn clean_all_windows(&mut self) {
         let now = chrono::Utc::now().timestamp();
-        self.five_hour.clean_expired(now, 5 * 3600);
-        self.day.clean_expired(now, 86400);
-        self.month.clean_expired(now, 2_592_000);
+        self.five_hour.clean_expired(now, Self::FIVE_HOUR_SECS);
+        self.day.clean_expired(now, Self::DAY_SECS);
+        self.month.clean_expired(now, Self::MONTH_SECS);
     }
 
     /// Get which windows are exceeded (based on model limits).
@@ -345,9 +352,13 @@ pub fn load_quota_state_internal() -> Result<QuotaWindowState, String> {
 }
 
 fn save_quota_state_inner(state: &QuotaWindowState) -> Result<(), String> {
-    let path = get_data_dir()?.join(QUOTA_WINDOW_FILE);
+    let dir = get_data_dir()?;
+    let path = dir.join(QUOTA_WINDOW_FILE);
     let content = serde_json::to_string_pretty(state).map_err(|e| format!("serialize quota windows failed: {}", e))?;
-    fs::write(&path, content).map_err(|e| format!("write quota windows failed: {}", e))
+    // Atomic write: write to temp file first, then rename to avoid data corruption on crash
+    let temp_path = dir.join(format!("{}.tmp", QUOTA_WINDOW_FILE));
+    fs::write(&temp_path, &content).map_err(|e| format!("write quota windows temp failed: {}", e))?;
+    fs::rename(&temp_path, &path).map_err(|e| format!("rename quota windows failed: {}", e))
 }
 
 fn get_data_dir() -> Result<PathBuf, String> {
@@ -416,9 +427,9 @@ pub fn filter_available_keys(
                 Some(t) => {
                     // Refresh the in-memory view of expired timestamps so we
                     // don't reject a key whose window has just rolled over.
-                    t.five_hour.clean_expired(now, 5 * 3600);
-                    t.day.clean_expired(now, 86400);
-                    t.month.clean_expired(now, 2_592_000);
+                    t.five_hour.clean_expired(now, ModelKeyTracker::FIVE_HOUR_SECS);
+                    t.day.clean_expired(now, ModelKeyTracker::DAY_SECS);
+                    t.month.clean_expired(now, ModelKeyTracker::MONTH_SECS);
                     t.is_available()
                 }
             }
@@ -451,9 +462,9 @@ pub fn get_all_window_status() -> Result<Vec<serde_json::Value>, String> {
     // Clean all windows before returning for accurate display
     let now = chrono::Utc::now().timestamp();
     for t in &mut state.trackers {
-        t.five_hour.clean_expired(now, 5 * 3600);
-        t.day.clean_expired(now, 86400);
-        t.month.clean_expired(now, 2_592_000);
+        t.five_hour.clean_expired(now, ModelKeyTracker::FIVE_HOUR_SECS);
+        t.day.clean_expired(now, ModelKeyTracker::DAY_SECS);
+        t.month.clean_expired(now, ModelKeyTracker::MONTH_SECS);
     }
     let statuses: Vec<serde_json::Value> = state.trackers.iter().map(|t| {
         let limits = t.get_limits().ok().unwrap_or(UsageLimits {
@@ -484,9 +495,9 @@ pub fn get_key_usage(key_id: &str, model_id: &str) -> Result<serde_json::Value, 
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     if let Some(t) = state.trackers.iter_mut().find(|t| t.key_id == key_id && t.model_id == model_id) {
         let now = chrono::Utc::now().timestamp();
-        t.five_hour.clean_expired(now, 5 * 3600);
-        t.day.clean_expired(now, 86400);
-        t.month.clean_expired(now, 2_592_000);
+        t.five_hour.clean_expired(now, ModelKeyTracker::FIVE_HOUR_SECS);
+        t.day.clean_expired(now, ModelKeyTracker::DAY_SECS);
+        t.month.clean_expired(now, ModelKeyTracker::MONTH_SECS);
         let limits = t.get_limits().ok().unwrap_or(UsageLimits {
             max_per_5hrs: 0, max_per_day: 0, max_per_month: 0,
         });
@@ -522,9 +533,9 @@ pub fn get_model_usage(model_id: &str) -> Result<Vec<serde_json::Value>, String>
     // Clean all trackers for fresh count
     let now = chrono::Utc::now().timestamp();
     for t in &mut state.trackers.iter_mut().filter(|t| t.model_id == model_id) {
-        t.five_hour.clean_expired(now, 5 * 3600);
-        t.day.clean_expired(now, 86400);
-        t.month.clean_expired(now, 2_592_000);
+        t.five_hour.clean_expired(now, ModelKeyTracker::FIVE_HOUR_SECS);
+        t.day.clean_expired(now, ModelKeyTracker::DAY_SECS);
+        t.month.clean_expired(now, ModelKeyTracker::MONTH_SECS);
     }
     let usages: Vec<serde_json::Value> = state.trackers.iter()
         .filter(|t| t.model_id == model_id)
@@ -614,9 +625,9 @@ pub fn clean_expired_windows() -> Result<(), String> {
     let mut state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp();
     for t in &mut state.trackers {
-        t.five_hour.clean_expired(now, 5 * 3600);
-        t.day.clean_expired(now, 86400);
-        t.month.clean_expired(now, 2_592_000);
+        t.five_hour.clean_expired(now, ModelKeyTracker::FIVE_HOUR_SECS);
+        t.day.clean_expired(now, ModelKeyTracker::DAY_SECS);
+        t.month.clean_expired(now, ModelKeyTracker::MONTH_SECS);
     }
     // Flush dirty state if enough time has passed
     if QUOTA_DIRTY.load(Ordering::Relaxed) {

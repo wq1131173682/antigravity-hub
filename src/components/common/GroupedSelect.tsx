@@ -90,14 +90,12 @@ export default function GroupedSelect({
     }, [isOpen]);
 
     const handleSelect = (optionValue: string) => {
-        console.log('[GroupedSelect] handleSelect called:', optionValue);
         onChange(optionValue);
         setIsOpen(false);
     };
 
     const handleCustomInputSubmit = () => {
         if (customInput.trim()) {
-            console.log('[GroupedSelect] Custom input submitted:', customInput.trim());
             onChange(customInput.trim());
             setCustomInput('');
             setIsOpen(false);

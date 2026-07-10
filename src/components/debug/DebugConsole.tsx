@@ -225,7 +225,6 @@ const DebugConsole: React.FC<DebugConsoleProps> = ({ embedded = false }) => {
 
                     <button
                         onClick={() => {
-                            console.log('Clear button clicked');
                             clearLogs();
                         }}
                         className="p-1.5 rounded-md text-zinc-400 dark:text-zinc-500 hover:text-red-500 dark:hover:text-red-400 hover:bg-zinc-100 dark:hover:bg-white/5 transition-all"

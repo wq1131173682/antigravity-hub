@@ -8,6 +8,20 @@ use rand::seq::SliceRandom;
 
 use tracing::{info, warn, error};
 
+/// Helper: build an HTTP error response without `.unwrap()`.
+/// Returns an axum Response with the given status code and body text.
+fn error_response(status: u16, body: String) -> axum::response::Response {
+    axum::response::Response::builder()
+        .status(status)
+        .body(axum::body::Body::from(body))
+        // If builder() itself fails (e.g., invalid status code), fall back to 500.
+        .unwrap_or_else(|_| {
+            axum::response::Response::new(axum::body::Body::from(
+                format!("Internal error (status={})", status),
+            ))
+        })
+}
+
 /// Shared HTTP client with 300s timeout for LLM API calls
 static SHARED_PROXY_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
@@ -120,7 +134,13 @@ pub async fn start_proxy() -> Result<(), String> {
 
 /// Stop the proxy server
 pub fn stop_proxy() -> Result<(), String> {
-    let mut lock = SHUTDOWN_TX.lock().map_err(|e| format!("Failed to lock shutdown: {}", e))?;
+    let mut lock = match SHUTDOWN_TX.lock() {
+        Ok(l) => l,
+        Err(poisoned) => {
+            // If poisoned, recover by taking the inner value
+            poisoned.into_inner()
+        }
+    };
     if let Some(tx) = lock.take() {
         tx.send(true).map_err(|_| "Failed to send shutdown signal".to_string())?;
         PROXY_RUNNING.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -133,7 +153,9 @@ pub fn stop_proxy() -> Result<(), String> {
 
 /// Get proxy status
 pub fn get_proxy_status() -> ProxyStatus {
-    let host = PROXY_HOST.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let host = PROXY_HOST.lock()
+        .map(|h| h.clone())
+        .unwrap_or_else(|e| e.into_inner().clone());
     ProxyStatus {
         running: PROXY_RUNNING.load(std::sync::atomic::Ordering::Relaxed),
         port: PROXY_PORT.load(std::sync::atomic::Ordering::Relaxed),
@@ -155,47 +177,51 @@ struct AppState {
     client: Client,
 }
 
-/// Extract model name from request body JSON
-fn extract_model_name(body_bytes: &[u8]) -> Option<String> {
-    serde_json::from_slice::<serde_json::Value>(body_bytes).ok()
-        .and_then(|v| v.get("model")?.as_str().map(String::from))
-}
-
-/// Inject `max_tokens` into the request body if missing.
-/// Some upstream APIs (e.g. custom OpenAI-compatible backends) require `max_tokens`
-/// explicitly, but many chat clients omit it. We inject a reasonable default.
-fn ensure_max_tokens(body_bytes: &[u8], target_path: &str) -> Vec<u8> {
+/// Parse JSON body once and return both the model_name and the modified body bytes
+/// with max_tokens injected if needed. Returns (model_name_opt, modified_body_bytes).
+fn parse_and_prepare_body(
+    body_bytes: &[u8],
+    target_path: &str,
+) -> (Option<String>, Vec<u8>) {
     // Only inject for completion/message endpoints
     let needs_max_tokens = target_path.contains("/chat/completions")
         || target_path.contains("/v1/messages")
         || target_path.contains("/completions");
 
     if !needs_max_tokens {
-        return body_bytes.to_vec();
+        // Still try to extract model name (single parse)
+        let model_name = serde_json::from_slice::<serde_json::Value>(body_bytes).ok()
+            .and_then(|v| v.get("model")?.as_str().map(String::from));
+        return (model_name, body_bytes.to_vec());
     }
 
+    // Parse once and extract both model_name and potentially inject max_tokens
     match serde_json::from_slice::<serde_json::Value>(body_bytes) {
         Ok(mut json) => {
-            if let Some(obj) = json.as_object_mut() {
-                let needs_fix = match obj.get("max_tokens") {
-                    None => true,
-                    Some(val) if val.is_null() => true,
-                    Some(val) => {
-                        val.as_u64().map_or(true, |n| n == 0 || n > 65536)
-                    }
-                };
-                if needs_fix {
+            let model_name = json.get("model").and_then(|v| v.as_str().map(String::from));
+
+            let needs_fix = match json.get("max_tokens") {
+                None => true,
+                Some(val) if val.is_null() => true,
+                Some(val) => {
+                    val.as_u64().map_or(true, |n| n == 0 || n > 65536)
+                }
+            };
+            if needs_fix {
+                if let Some(obj) = json.as_object_mut() {
                     obj.insert(
                         "max_tokens".to_string(),
                         serde_json::Value::Number(4096.into()),
                     );
-                    info!("Injected default max_tokens=4096 into request body (was missing or invalid)");
-                    return serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
                 }
+                info!("Injected default max_tokens=4096 into request body (was missing or invalid)");
+                let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
+                return (model_name, modified);
             }
-            body_bytes.to_vec()
+
+            (model_name, body_bytes.to_vec())
         }
-        Err(_) => body_bytes.to_vec(),
+        Err(_) => (None, body_bytes.to_vec()),
     }
 }
 
@@ -212,7 +238,7 @@ async fn proxy_handler(
     // Split path into platform prefix and remaining API path
     let (platform_prefix, remaining_path) = match path.split_once('/') {
         Some((prefix, rest)) => (prefix.to_string(), format!("/{}", rest)),
-        None => (path.to_string(), "".to_string()),
+        None => (path.to_string(), String::new()),
     };
 
     // Look up the platform by path_prefix
@@ -222,7 +248,7 @@ async fn proxy_handler(
     let (base_url, platform_id, auto_switch, target_path) = match platform_lookup {
         Some((base, id, auto)) => {
             // Normal: platform prefix matched, use the split remaining path
-            (base, id, auto, remaining_path.clone())
+            (base, id, auto, remaining_path)
         }
         None => {
             // Fallback: no platform matches this prefix => use the first configured platform
@@ -237,27 +263,31 @@ async fn proxy_handler(
                 }
                 None => {
                     warn!("Unknown platform prefix: {} (no platforms configured)", platform_prefix);
-                    return axum::response::Response::builder()
-                        .status(404)
-                        .body(axum::body::Body::from(format!(
-                            "Unknown platform: {}. Check your proxy path prefix.", platform_prefix
-                        )))
-                        .unwrap();
+                    return error_response(404, format!(
+                        "Unknown platform: {}. Check your proxy path prefix.", platform_prefix
+                    ));
                 }
             }
         }
     };
 
+    // Check for path-specific base URL overrides (e.g., /agnesapi at the API root, not under /v1)
+    let effective_base_url = resolve_base_url(&platform_id, &target_path, &base_url);
+
     // Build the target URL with dedup for version-like path segments (e.g., /v1)
-    let target_url_str = deduplicate_url_path(&base_url, &target_path);
+    let mut target_url_str = deduplicate_url_path(&effective_base_url, &target_path);
+    // Preserve query parameters from the original request (e.g., ?video_id=xxx)
+    if let Some(query) = uri.query() {
+        if !query.is_empty() {
+            target_url_str.push('?');
+            target_url_str.push_str(query);
+        }
+    }
     let target_url = match url::Url::parse(&target_url_str) {
         Ok(u) => u,
         Err(e) => {
             error!("Invalid target URL {}: {}", target_url_str, e);
-            return axum::response::Response::builder()
-                .status(500)
-                .body(axum::body::Body::from(format!("Invalid target URL: {}", e)))
-                .unwrap();
+            return error_response(500, format!("Invalid target URL: {}", e));
         }
     };
 
@@ -266,18 +296,13 @@ async fn proxy_handler(
         Ok(b) => b,
         Err(e) => {
             error!("Failed to read request body: {}", e);
-            return axum::response::Response::builder()
-                .status(400)
-                .body(axum::body::Body::from(format!("Failed to read body: {}", e)))
-                .unwrap();
+            return error_response(400, format!("Failed to read body: {}", e));
         }
     };
 
-    // Try to extract model name from request body
-    let model_name = extract_model_name(&body_bytes);
-
-    // Inject default max_tokens if missing (some upstream APIs require it)
-    let body_bytes: axum::body::Bytes = ensure_max_tokens(&body_bytes, &target_path).into();
+    // Parse once: extract model name AND inject max_tokens in a single pass
+    let (model_name, body_bytes) = parse_and_prepare_body(&body_bytes, &target_path);
+    let body_bytes: axum::body::Bytes = body_bytes.into();
 
     // Try forwarding the request with key rotation
     let result = forward_with_retry(
@@ -296,10 +321,7 @@ async fn proxy_handler(
         Ok(response) => response,
         Err(e) => {
             error!("Proxy error for {}: {}", target_url_str, e);
-            axum::response::Response::builder()
-                .status(502)
-                .body(axum::body::Body::from(format!("Proxy error: {}", e)))
-                .unwrap()
+            error_response(502, format!("Proxy error: {}", e))
         }
     }
 }
@@ -311,6 +333,34 @@ fn get_platform_info(prefix: &str) -> Option<(String, String, bool)> {
     let platform = config.platforms.iter().find(|p| p.path_prefix == prefix)?;
     let auto_switch = config.auto_switch;
     Some((platform.base_url.clone(), platform.id.clone(), auto_switch))
+}
+
+/// Resolve the effective base URL for a given target path, taking into account
+/// any path-specific base URL overrides defined in the platform config.
+/// E.g., if the platform's base_url is "https://apihub.agnes-ai.com/v1" and
+/// there's an override for path "/agnesapi" with base_url "https://apihub.agnes-ai.com",
+/// then requests to "/agnesapi/..." will use the override base_url (without /v1).
+fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str) -> String {
+    use crate::modules::config;
+    if let Ok(config) = config::load_app_config() {
+        if let Some(platform) = config.platforms.iter().find(|p| p.id == platform_id) {
+            for override_entry in &platform.base_url_overrides {
+                // Match if target_path starts with the override prefix
+                if target_path == &override_entry.path_prefix
+                    || target_path.starts_with(&format!("{}/", override_entry.path_prefix))
+                {
+                    info!(
+                        "Using base URL override for path prefix '{}': '{}' (override '{}')",
+                        override_entry.path_prefix,
+                        override_entry.base_url,
+                        default_base_url
+                    );
+                    return override_entry.base_url.clone();
+                }
+            }
+        }
+    }
+    default_base_url.to_string()
 }
 
 /// Get the first configured platform (fallback when no prefix matches)
@@ -329,7 +379,11 @@ fn get_first_platform() -> Option<(String, String, bool)> {
 /// the raw concatenation is returned unchanged.
 fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
     let base = base_url.trim_end_matches('/');
+    // If target_path is empty, just return the base URL
     let path = target_path.trim_start_matches('/');
+    if path.is_empty() {
+        return base.to_string();
+    }
 
     if let Some((first_seg, rest_path)) = path.split_once('/') {
         // Only deduplicate version-like segments: v1, v2, v3, v2023...
@@ -425,21 +479,14 @@ async fn forward_with_retry(
     let max_retries = if auto_switch { 5 } else { 1 };
     let mut last_error = String::new();
 
-    // Resolve model_id from model_name
-    let resolved_model = model_name.as_ref().and_then(|name| {
+    // Resolve model_id from model_name (done once outside the loop)
+    let model_id: Option<String> = model_name.as_ref().and_then(|name| {
         crate::modules::model_manager::list_models(platform_id).ok()?
             .into_iter().find(|m| m.model_name == *name)
+            .map(|m| m.id)
     });
 
-    let model_id = resolved_model.as_ref().map(|m| m.id.clone());
     let model_identifier = model_name.clone().unwrap_or_else(|| "unknown".to_string());
-
-    // Get keys to try
-    let keys_to_try = get_keys_to_try(platform_id, model_name);
-
-    if keys_to_try.is_empty() {
-        return Err("No active API keys available for this platform".to_string());
-    }
 
     // Pre-load key values into a map to avoid repeated list_keys calls
     let key_value_map: std::collections::HashMap<String, String> = {
@@ -448,13 +495,34 @@ async fn forward_with_retry(
     };
 
     for attempt in 0..max_retries {
+        // Refresh keys_to_try on each attempt (except the first) so that
+        // keys disabled by a 500 error on a previous attempt are excluded.
+        let keys_to_try = if attempt == 0 {
+            get_keys_to_try(platform_id, model_name.clone())
+        } else {
+            // After a failure, re-fetch available keys to skip disabled ones
+            get_keys_to_try(platform_id, model_name.clone())
+        };
+
+        if keys_to_try.is_empty() {
+            return Err("No active API keys available for this platform".to_string());
+        }
+
+        // Pick the next key (cycling through available keys; after a failure
+        // the list is refreshed, so we try attempt % len to pick a new key).
         let key_idx = attempt % keys_to_try.len();
         let key_id = &keys_to_try[key_idx];
 
         // Look up key value from pre-loaded map (avoids file I/O per retry)
-        let api_key_value = key_value_map.get(key_id)
-            .ok_or_else(|| format!("Key not found: {}", key_id))?
-            .clone();
+        let api_key_value = match key_value_map.get(key_id) {
+            Some(val) => val.clone(),
+            None => {
+                // Key was deleted between retries, skip to next attempt
+                last_error = format!("Key not found: {}", key_id);
+                info!("Key '{}' not found in key map, skipping to next attempt", key_id);
+                continue;
+            }
+        };
 
         // Build the forwarded request
         let mut req_builder = client.request(method.clone(), target_url.as_str());
@@ -495,8 +563,8 @@ async fn forward_with_retry(
         // 429: rate limited — wait with exponential backoff, then retry SAME key
         // Do NOT switch keys for 429; the key is still valid, just temporarily throttled
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            warn!("429 from {}, {}={}, model={}, will retry same key",
-                target_url, format!("key[{}]", key_idx), key_id, model_identifier);
+            warn!("429 from {}, key[{}]={}, model={}, will retry same key",
+                target_url, key_idx, key_id, model_identifier);
             if let Some(mid) = &model_id {
                 let _ = crate::modules::quota_window::record_429_error(key_id, mid, platform_id);
             }
@@ -526,8 +594,13 @@ async fn forward_with_retry(
 
             // Emit key-switched event so frontend can refresh quota display
             if attempt < max_retries - 1 {
-                let next_idx = (attempt + 1) % keys_to_try.len();
-                let next_key_id = keys_to_try[next_idx].clone();
+                // After record_500, the key is disabled, so get_keys_to_try on the
+                // next iteration will exclude it. Pick the next available key from
+                // the refreshed list (which will be fetched at the top of the loop).
+                let next_key_id = keys_to_try
+                    .get((key_idx + 1) % keys_to_try.len())
+                    .cloned()
+                    .unwrap_or_default();
                 let platform_name = crate::modules::config::load_app_config()
                     .ok()
                     .and_then(|c| c.platforms.into_iter().find(|p| p.id == platform_id))

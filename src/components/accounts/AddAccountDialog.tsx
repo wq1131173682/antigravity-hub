@@ -427,7 +427,6 @@ function AddAccountDialog({ onAdd, showText = true }: AddAccountDialogProps) {
             <button
                 className="px-2.5 lg:px-4 py-2 bg-white dark:bg-base-100 text-gray-700 dark:text-gray-300 text-sm font-medium rounded-lg hover:bg-gray-50 dark:hover:bg-base-200 transition-colors flex items-center gap-2 shadow-sm border border-gray-200/50 dark:border-base-300 relative z-[100]"
                 onClick={() => {
-                    console.log('AddAccountDialog button clicked');
                     setIsOpen(true);
                 }}
                 title={!showText ? t('accounts.add_account') : undefined}

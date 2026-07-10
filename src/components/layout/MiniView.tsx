@@ -26,7 +26,6 @@ interface ProxyRequestLog {
 export default function MiniView() {
     const { setMiniView } = useViewStore();
     const { currentAccount, refreshQuota, fetchCurrentAccount } = useAccountStore();
-    // const { config } = useConfigStore(); REMOVED - config no longer has auto_refresh
     const { t } = useTranslation();
     const [isRefreshing, setIsRefreshing] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -41,7 +40,6 @@ export default function MiniView() {
             if (!isTauri()) return;
             try {
                 unlistenFn = await listen<ProxyRequestLog>('proxy://request', (event) => {
-                    console.log(event)
                     setLatestLog(event.payload);
                 });
             } catch (e) {
@@ -73,8 +71,6 @@ export default function MiniView() {
         };
         fetchVersion();
     }, []);
-
-    // Auto-refresh logic (removed - config fields no longer exist)
 
     // Enter mini mode & Auto-resize based on content
     useEffect(() => {

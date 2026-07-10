@@ -1,3 +1,8 @@
+export interface PathOverride {
+  path_prefix: string;
+  base_url: string;
+}
+
 export interface Platform {
   id: string;
   name: string;
@@ -5,6 +10,7 @@ export interface Platform {
   path_prefix: string;
   notes?: string;
   created_at: number;
+  base_url_overrides?: PathOverride[];
 }
 
 export interface Model {
