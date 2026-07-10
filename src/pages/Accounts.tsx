@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import type { Model } from '../types/platform';
 import { showToast } from '../components/common/ToastContainer';
+import ModalDialog from '../components/common/ModalDialog';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
@@ -302,6 +303,12 @@ function Accounts() {
   const [editingModel, setEditingModel] = useState<Model | null>(null);
   const [assigningModelId, setAssigningModelId] = useState<string | null>(null);
   const [showKeyValues, setShowKeyValues] = useState<Set<string>>(new Set());
+  // Delete confirmation modal state
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    type: 'platform' | 'key' | 'model';
+    id: string;
+    platformId?: string;
+  } | null>(null);
 
   useEffect(() => { fetchPlatforms(); }, []);
   useEffect(() => {
@@ -329,36 +336,29 @@ function Accounts() {
     });
   };
 
-  const handleDeletePlatform = async (id: string) => {
-    if (!window.confirm(t('accounts.confirm_delete_platform'))) return;
+  const handleDeleteConfirm = async () => {
+    if (!deleteConfirm) return;
     try {
-      await deletePlatform(id);
-      if (selectedPlatformId === id) setSelectedPlatformId(null);
+      const { type, id, platformId } = deleteConfirm;
+      if (type === 'platform') {
+        await deletePlatform(id);
+        if (selectedPlatformId === id) setSelectedPlatformId(null);
+      } else if (type === 'key' && platformId) {
+        await deleteKey(platformId, id);
+      } else if (type === 'model' && selectedPlatformId) {
+        await deleteModel(selectedPlatformId, id);
+      }
       showToast(t('common.success'), 'success');
-    } catch (e) { showToast(`${t('common.error')}: ${e}`, 'error'); }
-  };
-
-  const handleDeleteKey = async (keyId: string) => {
-    if (!selectedPlatformId) return;
-    if (!window.confirm(t('accounts.confirm_delete_key'))) return;
-    try {
-      await deleteKey(selectedPlatformId, keyId);
-      showToast(t('common.success'), 'success');
-    } catch (e) { showToast(`${t('common.error')}: ${e}`, 'error'); }
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    } finally {
+      setDeleteConfirm(null);
+    }
   };
 
   const handleToggleKey = async (keyId: string, disabled: boolean) => {
     try {
       await setKeyStatus(keyId, !disabled);
-      showToast(t('common.success'), 'success');
-    } catch (e) { showToast(`${t('common.error')}: ${e}`, 'error'); }
-  };
-
-  const handleDeleteModel = async (modelId: string) => {
-    if (!selectedPlatformId) return;
-    if (!window.confirm(t('accounts.confirm_delete_model'))) return;
-    try {
-      await deleteModel(selectedPlatformId, modelId);
       showToast(t('common.success'), 'success');
     } catch (e) { showToast(`${t('common.error')}: ${e}`, 'error'); }
   };
@@ -395,12 +395,11 @@ function Accounts() {
               <div className="flex items-center gap-2 min-w-0">
                 <Server className="w-4 h-4 shrink-0" />
                 <span className="text-sm font-medium truncate">{p.name}</span>
-              </div>
-              <button
-                className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-all shrink-0"
-                onClick={e => { e.stopPropagation(); handleDeletePlatform(p.id); }}
-                title={t('common.delete')}
-              ><Trash2 className="w-3.5 h-3.5" /></button>
+              </div>                              <button
+                                className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-all shrink-0"
+                                onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'platform', id: p.id }); }}
+                                title={t('common.delete')}
+                              ><Trash2 className="w-3.5 h-3.5" /></button>
             </div>
           ))}
         </div>
@@ -462,7 +461,7 @@ function Accounts() {
                             <button className="p-1.5 text-gray-400 hover:text-purple-500 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors" onClick={() => setAssigningModelId(model.id)} title={t('accounts.assign_key')}>
                               <Link2 className="w-3.5 h-3.5" />
                             </button>
-                            <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => handleDeleteModel(model.id)} title={t('common.delete')}>
+                            <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => setDeleteConfirm({ type: 'model', id: model.id })} title={t('common.delete')}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
@@ -566,7 +565,7 @@ function Accounts() {
                               }`} onClick={() => handleToggleKey(k.id, k.disabled)} title={k.disabled ? t('accounts.enable_key') : t('accounts.disable_key')}>
                                 {k.disabled ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
                               </button>
-                              <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => handleDeleteKey(k.id)} title={t('common.delete')}>
+                              <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => selectedPlatformId && setDeleteConfirm({ type: 'key', id: k.id, platformId: selectedPlatformId })} title={t('common.delete')}>
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
@@ -598,6 +597,29 @@ function Accounts() {
         </>
       )}
       <EditModelQuotaDialog open={showEditQuota} onClose={() => { setShowEditQuota(false); setEditingModel(null); }} model={editingModel} />
+
+      {/* Delete Confirmation Modal */}
+      <ModalDialog
+        isOpen={deleteConfirm !== null}
+        title={
+          deleteConfirm?.type === 'platform'
+            ? t('accounts.confirm_delete_platform')
+            : deleteConfirm?.type === 'key'
+              ? t('accounts.confirm_delete_key')
+              : t('accounts.confirm_delete_model')
+        }
+        message={
+          deleteConfirm?.type === 'platform'
+            ? t('accounts.delete_platform_warning', '此操作将同时删除该平台下的所有 Key 和模型，不可恢复。')
+            : t('accounts.delete_item_warning', '此操作不可恢复。')
+        }
+        type="confirm"
+        isDestructive={true}
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setDeleteConfirm(null)}
+        confirmText={t('common.delete')}
+        cancelText={t('common.cancel')}
+      />
     </div>
   );
 }

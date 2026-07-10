@@ -644,9 +644,7 @@ function Dashboard() {
                         /{p.path_prefix}
                       </span>
                       <span className="text-[10px] text-gray-400 dark:text-gray-500">{platformModels.length} models</span>
-                    </div>
-
-                    {/* Model cards grid */}
+                    </div>                        {/* Model cards grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-3">
                       {platformModels.map(m => {
                         const usageEntries = modelUsage[m.id] || [];
@@ -654,6 +652,7 @@ function Dashboard() {
                         const availableCount = usageEntries.filter(u => u.is_available).length;
                         const totalCount = usageEntries.length;
                         const allExhausted = usageLoaded && availableCount === 0;
+                        const exceededCount = usageEntries.filter(u => !u.is_available).length;
 
                         // Sort entries: available first, then exhausted/disabled
                         const sortedEntries = [...usageEntries].sort((a, b) => {
@@ -688,13 +687,20 @@ function Dashboard() {
                                     {m.display_name || m.model_name}
                                   </div>
                                 </div>
+                                {/* Exceeded key badge */}
+                                {usageLoaded && exceededCount > 0 && (
+                                  <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[10px] font-bold flex-shrink-0 mr-1">
+                                    <AlertTriangle className="w-3 h-3" />
+                                    {exceededCount}
+                                  </div>
+                                )}
                                 {/* Availability badge */}
                                 {usageLoaded ? (
                                   <div
                                     className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
                                       allExhausted
                                         ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
-                                        : availableCount < totalCount
+                                        : exceededCount > 0
                                           ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
                                           : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
                                     }`}
@@ -854,16 +860,37 @@ Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
 
         {/* No Platforms Hint */}
         {platforms.length === 0 && (
-          <div className="bg-white dark:bg-base-100 rounded-xl p-8 shadow-sm border border-gray-100 dark:border-base-200 text-center">
-            <Server className="w-12 h-12 mx-auto text-gray-300 dark:text-gray-600 mb-3" />
-            <p className="text-gray-500 dark:text-gray-400 text-sm">{t('dashboard.no_platforms')}</p>
+          <div className="bg-white dark:bg-base-100 rounded-xl p-10 shadow-sm border-2 border-dashed border-gray-200 dark:border-base-300 text-center">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 flex items-center justify-center ring-1 ring-blue-200/50 dark:ring-blue-800/30">
+              <Server className="w-8 h-8 text-blue-400 dark:text-blue-500" />
+            </div>
+            <h3 className="text-base font-semibold text-gray-700 dark:text-gray-300 mb-2">
+              {t('dashboard.no_platforms_title', '还没有配置平台')}
+            </h3>
+            <p className="text-sm text-gray-400 dark:text-gray-500 max-w-sm mx-auto leading-relaxed mb-6">
+              {t('dashboard.no_platforms_desc', '添加你的 API 平台和 Key，然后启动代理即可开始使用统一接口。')}
+            </p>
             <button
-              className="mt-4 px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 transition-colors"
+              className="px-5 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white text-sm font-medium rounded-xl hover:from-blue-600 hover:to-indigo-600 transition-all shadow-lg shadow-blue-500/20 active:scale-95"
               onClick={() => navigate('/accounts')}
             >
-              <Plus className="w-4 h-4 inline mr-1" />
+              <Plus className="w-4 h-4 inline mr-1.5" />
               {t('accounts.add_platform')}
             </button>
+            <div className="mt-6 flex items-center justify-center gap-4 text-xs text-gray-400 dark:text-gray-500">
+              <span className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
+                {t('dashboard.step_add_platform', '添加平台')}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+                {t('dashboard.step_add_key', '添加 Key')}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
+                {t('dashboard.step_start_proxy', '启动代理')}
+              </span>
+            </div>
           </div>
         )}
 
