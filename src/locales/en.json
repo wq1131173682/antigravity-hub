@@ -1436,24 +1436,5 @@
         "placeholder_max_ips": "0 = Unlimited",
         "hint_max_ips": "0 = Unlimited",
         "hint_curfew": "Leave empty to disable. Based on server time."
-    },
-    "codex": {
-        "title": "Codex CLI Integration",
-        "description": "Apply Antigravity Hub proxy configuration to Codex CLI. Codex CLI will route all API requests through the local proxy for key rotation and model management.",
-        "check_status": "Check Codex CLI Status",
-        "checking": "Checking Codex CLI status...",
-        "check_failed": "Failed to check Codex CLI status",
-        "installed": "Codex CLI is installed",
-        "not_installed": "Codex CLI not found. Install it first.",
-        "already_configured": "Already configured to use Antigravity Hub",
-        "has_backup": "Previous backup found. You can restore it.",
-        "select_platform": "Select Platform",
-        "select_model": "Select Model",
-        "no_models": "No models available for this platform",
-        "config_preview": "Configuration Preview",
-        "apply": "Apply to Codex CLI",
-        "apply_success": "Codex CLI configuration applied successfully!",
-        "restore": "Restore Backup",
-        "restore_success": "Codex CLI configuration restored from backup."
     }
 }

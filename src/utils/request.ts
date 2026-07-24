@@ -94,11 +94,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_debug_console_logs': { url: '/api/debug/logs', method: 'GET' },
   'clear_debug_console_logs': { url: '/api/debug/logs/clear', method: 'POST' },
 
-  // Codex CLI Integration
-  'check_codex_status': { url: '/api/codex/status', method: 'GET' },
-  'apply_codex_config': { url: '/api/codex/apply', method: 'POST' },
-  'restore_codex_config': { url: '/api/codex/restore', method: 'POST' },
-
   // CLI Sync
   'get_cli_sync_status': { url: '/api/proxy/cli/status', method: 'POST' },
   'execute_cli_sync': { url: '/api/proxy/cli/sync', method: 'POST' },

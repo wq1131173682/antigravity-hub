@@ -429,33 +429,6 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
     window.set_theme(tauri_theme).map_err(|e| e.to_string())
 }
 
-// ============================================================================
-// Codex CLI Integration Commands
-// ============================================================================
-
-/// Check Codex CLI status
-#[tauri::command]
-pub async fn check_codex_status() -> Result<crate::modules::codex_integration::CodexStatus, String> {
-    Ok(crate::modules::codex_integration::check_codex_status())
-}
-
-/// Apply Antigravity Hub proxy config to Codex CLI
-#[tauri::command]
-pub async fn apply_codex_config(
-    proxy_host: String,
-    proxy_port: u16,
-    path_prefix: String,
-    model_name: String,
-) -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    crate::modules::codex_integration::apply_codex_config(&proxy_host, proxy_port, &path_prefix, &model_name)
-}
-
-/// Restore Codex CLI config from backup
-#[tauri::command]
-pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    crate::modules::codex_integration::restore_codex_config()
-}
-
 /// Get the primary LAN IP address (for displaying when proxy binds to 0.0.0.0)
 #[tauri::command]
 pub fn get_lan_ip() -> Result<String, String> {

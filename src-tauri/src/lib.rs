@@ -169,10 +169,6 @@ pub fn run() {
             commands::get_data_dir_path,
             commands::show_main_window,
             commands::set_window_theme,
-            // Codex CLI Integration
-            commands::check_codex_status,
-            commands::apply_codex_config,
-            commands::restore_codex_config,
             // Utility
             commands::get_lan_ip,
             // Debug console
