@@ -1436,5 +1436,9 @@
         "placeholder_max_ips": "0 = Unlimited",
         "hint_max_ips": "0 = Unlimited",
         "hint_curfew": "Leave empty to disable. Based on server time."
+    },
+    "codex": {
+        "apply_to_codex": "Apply to Codex CLI",
+        "apply_success": "Codex CLI configuration applied successfully!"
     }
 }
