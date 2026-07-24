@@ -887,24 +887,6 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
     obj.remove("previous_response_id");
     obj.remove("store");
 
-    // Filter tools: Chat Completions only supports "function" and "custom" types.
-    // Responses API supports additional types like "file_search", "code_interpreter",
-    // "web_search", "computer_use" etc. which must be removed.
-    if let Some(tools) = obj.get_mut("tools") {
-        if let Some(tools_array) = tools.as_array_mut() {
-            tools_array.retain(|tool| {
-                tool.get("type")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t == "function" || t == "custom")
-                    .unwrap_or(false)
-            });
-            // If no tools remain after filtering, remove the field entirely
-            if tools_array.is_empty() {
-                obj.remove("tools");
-            }
-        }
-    }
-
     Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
 }
 
