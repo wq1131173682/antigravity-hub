@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
+import { useConfigStore } from '../stores/useConfigStore';
 import type { Model } from '../types/platform';
 import { showToast } from '../components/common/ToastContainer';
 import ModalDialog from '../components/common/ModalDialog';
+import * as codexService from '../services/codexService';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  X
+  Terminal, X
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -455,6 +457,26 @@ function Accounts() {
                             <span className="text-xs text-gray-400 font-mono">{model.model_name}</span>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              className="p-1.5 text-gray-400 hover:text-emerald-500 rounded-lg hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors"
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                try {
+                                  const { proxy_host, proxy_port } = useConfigStore.getState().config || { proxy_host: '127.0.0.1', proxy_port: 8045 };
+                                  await codexService.applyCodexConfig(
+                                    proxy_host || '127.0.0.1',
+                                    proxy_port || 8045,
+                                    model.model_name
+                                  );
+                                  showToast(t('codex.apply_success'), 'success');
+                                } catch (e) {
+                                  showToast(`${t('common.error')}: ${e}`, 'error');
+                                }
+                              }}
+                              title={t('codex.apply_to_codex')}
+                            >
+                              <Terminal className="w-3.5 h-3.5" />
+                            </button>
                             <button className="p-1.5 text-gray-400 hover:text-blue-500 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors" onClick={() => { setEditingModel(model); setShowEditQuota(true); }} title={t('accounts.edit_model_quotas')}>
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>

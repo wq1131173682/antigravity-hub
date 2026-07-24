@@ -1401,5 +1401,24 @@
         "placeholder_max_ips": "0 = 不限制",
         "hint_max_ips": "0 表示不限制",
         "hint_curfew": "留空则禁用。基于服务器时间。"
+    },
+    "codex": {
+        "title": "Codex CLI 集成",
+        "description": "将 Antigravity Hub 代理配置一键应用到 Codex CLI。Codex CLI 的所有 API 请求将通过本地代理进行密钥轮换和模型管理。",
+        "check_status": "检测 Codex CLI 状态",
+        "checking": "正在检测 Codex CLI 状态...",
+        "check_failed": "检测 Codex CLI 状态失败",
+        "installed": "Codex CLI 已安装",
+        "not_installed": "未检测到 Codex CLI，请先安装",
+        "already_configured": "已配置为使用 Antigravity Hub",
+        "has_backup": "检测到之前的备份文件，可以恢复",
+        "select_platform": "选择平台",
+        "select_model": "选择模型",
+        "no_models": "该平台没有可用模型",
+        "config_preview": "配置预览",
+        "apply": "应用到 Codex CLI",
+        "apply_success": "Codex CLI 配置应用成功！",
+        "restore": "恢复备份",
+        "restore_success": "Codex CLI 配置已从备份恢复"
     }
 }
