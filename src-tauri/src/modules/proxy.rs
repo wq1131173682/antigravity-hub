@@ -276,11 +276,30 @@ async fn proxy_handler(
     let transformed_path = if platform_prefix == "agnes" {
         let t = transform_agnes_path(&target_path);
         if t != target_path {
-            info!("Agnes: path mapped '{}' → '{}'", target_path, t);
+                            info!("Agnes: path mapped '{}' → '{}'", target_path, t);
         }
         t
     } else {
         target_path.clone()
+    };
+
+    // ── Responses API compatibility ──
+    // Codex CLI uses the OpenAI Responses API (/v1/responses), but most
+    // upstream providers only support Chat Completions (/v1/chat/completions).
+    // We detect and translate the API format transparently so the proxy
+    // works with Codex CLI and any provider.
+    let is_responses_api = transformed_path == "/v1/responses"
+        || transformed_path.starts_with("/v1/responses/");
+    let transformed_path = if is_responses_api {
+        let new_path = if transformed_path == "/v1/responses" {
+            "/v1/chat/completions".to_string()
+        } else {
+            transformed_path.replacen("/v1/responses", "/v1/chat/completions", 1)
+        };
+        info!("Responses API: path mapped '{}' → '{}'", target_path, new_path);
+        new_path
+    } else {
+        transformed_path
     };
 
     let effective_base_url = resolve_base_url(&platform_id, &transformed_path, &base_url);
@@ -335,6 +354,17 @@ async fn proxy_handler(
         }
     }
 
+    // ── Responses API body transformation ──
+    // Translate request body from Responses API format to Chat Completions format.
+    // Codex CLI sends {"model":"...","input":"..."} but upstream expects
+    // {"model":"...","messages":[{"role":"user","content":"..."}]}
+    if is_responses_api {
+        if let Some(transformed) = transform_responses_to_chat_completions(&body_bytes) {
+            info!("Responses API: request body translated ({} bytes → {} bytes)", body_bytes.len(), transformed.len());
+            body_bytes = transformed.into();
+        }
+    }
+
     // Try forwarding the request with key rotation
     let result = forward_with_retry(
         &state.client,
@@ -346,6 +376,7 @@ async fn proxy_handler(
         &platform_prefix,
         auto_switch,
         model_name,
+        is_responses_api,
     ).await;
 
     match result {
@@ -506,6 +537,7 @@ async fn forward_with_retry(
     platform_prefix: &str,
     auto_switch: bool,
     model_name: Option<String>,
+    is_responses_api: bool,
 ) -> Result<axum::response::Response, String> {
     let max_retries = if auto_switch { 5 } else { 1 };
     let mut last_error = String::new();
@@ -758,6 +790,21 @@ async fn forward_with_retry(
             }
         }
 
+        // ── Responses API response translation ──
+        // Translate the response body from Chat Completions format back to
+        // Responses API format so Codex CLI can understand it.
+        let body_bytes = if is_responses_api {
+            match transform_chat_completions_to_responses(&body_bytes) {
+                Some(transformed) => {
+                    info!("Responses API: response body translated ({} bytes → {} bytes)", body_bytes.len(), transformed.len());
+                    transformed.into()
+                }
+                None => body_bytes,
+            }
+        } else {
+            body_bytes
+        };
+
         let body = axum::body::Body::from(body_bytes);
         return response_builder
             .body(body)
@@ -766,6 +813,166 @@ async fn forward_with_retry(
 
     Err(format!("All keys exhausted for platform '{}': {}", platform_prefix, last_error))
 }
+
+// ── Responses API ↔ Chat Completions API translation ──
+// Codex CLI uses the OpenAI Responses API (/v1/responses), but most
+// upstream providers only support Chat Completions (/v1/chat/completions).
+// These functions translate between the two formats transparently.
+
+/// Translate a Responses API request body to Chat Completions API format.
+///
+/// Responses API format:  {"model":"...","input":"...","max_output_tokens":...}
+/// Chat Completions format: {"model":"...","messages":[...],"max_tokens":...}
+fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
+    let obj = json.as_object_mut()?;
+
+    // Translate `input` → `messages`
+    if let Some(input) = obj.remove("input") {
+        let messages = match input {
+            serde_json::Value::String(s) => {
+                vec![serde_json::json!({"role": "user", "content": s})]
+            }
+            serde_json::Value::Array(items) => {
+                items.into_iter().map(|item| {
+                    match item {
+                        serde_json::Value::String(s) => {
+                            serde_json::json!({"role": "user", "content": s})
+                        }
+                        serde_json::Value::Object(m) => {
+                            if m.contains_key("role") {
+                                // Already has role — likely a message object
+                                serde_json::Value::Object(m)
+                            } else if let Some(content) = m.get("content") {
+                                let mut msg = serde_json::json!({"role": "user"});
+                                msg["content"] = content.clone();
+                                msg
+                            } else {
+                                serde_json::json!({"role": "user", "content": serde_json::Value::Object(m)})
+                            }
+                        }
+                        other => {
+                            serde_json::json!({"role": "user", "content": other})
+                        }
+                    }
+                }).collect()
+            }
+            _ => {
+                vec![serde_json::json!({"role": "user", "content": input})]
+            }
+        };
+        obj.insert("messages".to_string(), serde_json::Value::Array(messages));
+    }
+
+    // Translate `instructions` → system message (prepended to messages)
+    if let Some(instructions) = obj.remove("instructions") {
+        if let Some(instructions_str) = instructions.as_str() {
+            let empty_array = serde_json::Value::Array(vec![]);
+            let mut messages = obj.remove("messages").unwrap_or(empty_array);
+            if let Some(msg_array) = messages.as_array_mut() {
+                msg_array.insert(0, serde_json::json!({"role": "system", "content": instructions_str}));
+            }
+            obj.insert("messages".to_string(), messages);
+        }
+    }
+
+    // Translate `max_output_tokens` → `max_tokens`
+    if let Some(max_output) = obj.remove("max_output_tokens") {
+        if !obj.contains_key("max_tokens") {
+            obj.insert("max_tokens".to_string(), max_output);
+        }
+    }
+
+    // Remove Responses API-specific fields that don't exist in Chat Completions
+    obj.remove("previous_response_id");
+    obj.remove("store");
+
+    // Filter tools: Chat Completions only supports "function" and "custom" types.
+    // Responses API supports additional types like "file_search", "code_interpreter",
+    // "web_search", "computer_use" etc. which must be removed.
+    if let Some(tools) = obj.get_mut("tools") {
+        if let Some(tools_array) = tools.as_array_mut() {
+            tools_array.retain(|tool| {
+                tool.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "function" || t == "custom")
+                    .unwrap_or(false)
+            });
+            // If no tools remain after filtering, remove the field entirely
+            if tools_array.is_empty() {
+                obj.remove("tools");
+            }
+        }
+    }
+
+    Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
+}
+
+/// Translate a Chat Completions API response body to Responses API format.
+///
+/// Chat Completions response format:
+///   {"id":"chatcmpl-...","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"..."}}],"usage":{"prompt_tokens":N,"completion_tokens":N}}
+/// Responses API format:
+///   {"id":"resp_...","object":"response","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"..."}]}],"usage":{"input_tokens":N,"output_tokens":N}}
+fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
+    let obj = json.as_object_mut()?;
+
+    // Change `object` from "chat.completion" to "response"
+    if let Some(object) = obj.get("object") {
+        if object == "chat.completion" {
+            obj.insert("object".to_string(), serde_json::json!("response"));
+        }
+    }
+
+    // Translate `choices` → `output`
+    if let Some(choices) = obj.remove("choices") {
+        if let Some(choices_array) = choices.as_array() {
+            let output: Vec<serde_json::Value> = choices_array.iter().map(|choice| {
+                if let Some(message) = choice.get("message") {
+                    let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
+                    let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                    serde_json::json!({
+                        "type": "message",
+                        "role": role,
+                        "content": [
+                            {"type": "output_text", "text": content}
+                        ]
+                    })
+                } else {
+                    serde_json::Value::Null
+                }
+            }).filter(|v| !v.is_null()).collect();
+
+            obj.insert("output".to_string(), serde_json::Value::Array(output));
+        }
+    }
+
+    // Translate usage: prompt_tokens → input_tokens, completion_tokens → output_tokens
+    if let Some(usage) = obj.get_mut("usage") {
+        if let Some(usage_obj) = usage.as_object() {
+            let mut new_usage = serde_json::Map::new();
+            if let Some(prompt) = usage_obj.get("prompt_tokens") {
+                new_usage.insert("input_tokens".to_string(), prompt.clone());
+            }
+            if let Some(completion) = usage_obj.get("completion_tokens") {
+                new_usage.insert("output_tokens".to_string(), completion.clone());
+            }
+            if let Some(total) = usage_obj.get("total_tokens") {
+                new_usage.insert("total_tokens".to_string(), total.clone());
+            }
+            if !new_usage.is_empty() {
+                *usage = serde_json::Value::Object(new_usage);
+            }
+        }
+    }
+
+    // Remove Chat Completions-specific fields
+    obj.remove("choices");
+
+    Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
+}
+
 
 // ── Agnes platform compatibility functions ──
 
