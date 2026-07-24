@@ -83,7 +83,7 @@ pub fn check_codex_status() -> CodexStatus {
         match std::fs::read_to_string(&cfg_path) {
             Ok(content) => {
                 let preview = Some(content.chars().take(500).collect::<String>());
-                let is_ag = content.contains("antigravity") || content.contains("Antigravity");
+                let is_ag = content.contains("Managed by Antigravity Hub");
                 (preview, is_ag)
             }
             Err(_) => (None, false),
@@ -180,7 +180,9 @@ pub fn apply_codex_config(
     // The built-in default is "https://api.openai.com/v1", so we keep /v1.
     // The path_prefix is the platform's routing path (e.g., "sensenova").
     // See: https://github.com/openai/codex/blob/main/codex-rs/config/src/config_toml.rs
-    let openai_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
+    // If proxy_host is "0.0.0.0" (bind-all), use 127.0.0.1 as the connect address.
+    let connect_host = if proxy_host == "0.0.0.0" { "127.0.0.1" } else { proxy_host };
+    let openai_base_url = format!("http://{}:{}/{}/v1", connect_host, proxy_port, path_prefix);
 
     // We'll construct the new config. Try to preserve existing top-level keys
     // that aren't related to api/model configuration.
