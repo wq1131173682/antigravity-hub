@@ -463,9 +463,11 @@ function Accounts() {
                                 e.stopPropagation();
                                 try {
                                   const { proxy_host, proxy_port } = useConfigStore.getState().config || { proxy_host: '127.0.0.1', proxy_port: 8045 };
+                                  const pathPrefix = selectedPlatform?.path_prefix || 'openai';
                                   await codexService.applyCodexConfig(
                                     proxy_host || '127.0.0.1',
                                     proxy_port || 8045,
+                                    pathPrefix,
                                     model.model_name
                                   );
                                   showToast(t('codex.apply_success'), 'success');
