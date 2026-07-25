@@ -763,6 +763,34 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
     let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
     let obj = json.as_object_mut()?;
 
+    // Helper: convert a pending function_call item into a Chat Completions tool_call object
+    let fn_call_to_tool_call = |fc: &serde_json::Value| -> serde_json::Value {
+        let id = fc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let arguments = fc.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}").to_string();
+        serde_json::json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": arguments
+            }
+        })
+    };
+
+    // Helper: flush pending function_calls into an assistant message with tool_calls
+    let flush_fn_calls = |pending: &mut Vec<serde_json::Value>, messages: &mut Vec<serde_json::Value>| {
+        if pending.is_empty() {
+            return;
+        }
+        let tool_calls: Vec<serde_json::Value> = pending.drain(..).map(|fc| fn_call_to_tool_call(&fc)).collect();
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": tool_calls
+        }));
+    };
+
     // Translate `input` → `messages`
     if let Some(input) = obj.remove("input") {
         let messages = match input {
@@ -770,28 +798,59 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
                 vec![serde_json::json!({"role": "user", "content": s})]
             }
             serde_json::Value::Array(items) => {
-                items.into_iter().map(|item| {
+                let mut messages: Vec<serde_json::Value> = Vec::new();
+                let mut pending_function_calls: Vec<serde_json::Value> = Vec::new();
+
+                for item in items {
                     match item {
                         serde_json::Value::String(s) => {
-                            serde_json::json!({"role": "user", "content": s})
+                            flush_fn_calls(&mut pending_function_calls, &mut messages);
+                            messages.push(serde_json::json!({"role": "user", "content": s}));
                         }
                         serde_json::Value::Object(m) => {
-                            if m.contains_key("role") {
-                                // Already has role — likely a message object
-                                serde_json::Value::Object(m)
+                            let item_type = m.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            let has_role = m.contains_key("role");
+
+                            if item_type == "function_call_output" {
+                                // ── Tool result: function_call_output → tool role message ──
+                                flush_fn_calls(&mut pending_function_calls, &mut messages);
+                                let call_id = m.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                                let output = m.get("output").and_then(|o| o.as_str()).unwrap_or("").to_string();
+                                messages.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": output
+                                }));
+                            } else if item_type == "function_call" {
+                                // ── function_call: buffer for grouping with next function_call_output ──
+                                pending_function_calls.push(serde_json::Value::Object(m));
+                            } else if has_role {
+                                // ── Regular message with role (user/assistant/system) ──
+                                flush_fn_calls(&mut pending_function_calls, &mut messages);
+                                messages.push(serde_json::Value::Object(m));
                             } else if let Some(content) = m.get("content") {
+                                // ── Object with content but no role → assume user message ──
+                                flush_fn_calls(&mut pending_function_calls, &mut messages);
                                 let mut msg = serde_json::json!({"role": "user"});
                                 msg["content"] = content.clone();
-                                msg
+                                messages.push(msg);
                             } else {
-                                serde_json::json!({"role": "user", "content": serde_json::Value::Object(m)})
+                                // ── Unknown object → fallback to user message ──
+                                flush_fn_calls(&mut pending_function_calls, &mut messages);
+                                messages.push(serde_json::json!({"role": "user", "content": serde_json::Value::Object(m)}));
                             }
                         }
                         other => {
-                            serde_json::json!({"role": "user", "content": other})
+                            flush_fn_calls(&mut pending_function_calls, &mut messages);
+                            messages.push(serde_json::json!({"role": "user", "content": other}));
                         }
                     }
-                }).collect()
+                }
+
+                // Flush any remaining pending function calls at the end
+                flush_fn_calls(&mut pending_function_calls, &mut messages);
+
+                messages
             }
             _ => {
                 vec![serde_json::json!({"role": "user", "content": input})]
@@ -847,9 +906,9 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
 /// Translate a Chat Completions API response body to Responses API format.
 ///
 /// Chat Completions response format:
-///   {"id":"chatcmpl-...","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"..."}}],"usage":{...}}
+///   {"id":"chatcmpl-...","object":"chat.completion","choices":[{"message":{"role":"assistant","content":"...","tool_calls":[...]}}],"usage":{...}}
 /// Responses API format:
-///   {"id":"resp_...","object":"response","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"..."}]}],"usage":{...}}
+///   {"id":"resp_...","object":"response","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"..."}]}, {"type":"function_call",...}],"usage":{...}}
 fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<u8>> {
     let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
     let obj = json.as_object_mut()?;
@@ -864,21 +923,62 @@ fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<u8>>
     // Translate `choices` → `output`
     if let Some(choices) = obj.remove("choices") {
         if let Some(choices_array) = choices.as_array() {
-            let output: Vec<serde_json::Value> = choices_array.iter().map(|choice| {
+            let mut output: Vec<serde_json::Value> = Vec::new();
+
+            for choice in choices_array {
                 if let Some(message) = choice.get("message") {
                     let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
-                    let content = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    serde_json::json!({
-                        "type": "message",
-                        "role": role,
-                        "content": [
-                            {"type": "output_text", "text": content}
-                        ]
-                    })
-                } else {
-                    serde_json::Value::Null
+
+                    // ── Text content (may be null when tool_calls is present) ──
+                    let has_text = message.get("content").and_then(|c| c.as_str()).map_or(false, |s| !s.is_empty());
+                    if has_text {
+                        if let Some(content_str) = message.get("content").and_then(|c| c.as_str()) {
+                            output.push(serde_json::json!({
+                                "type": "message",
+                                "role": role,
+                                "content": [
+                                    {"type": "output_text", "text": content_str}
+                                ]
+                            }));
+                        }
+                    }
+
+                    // ── Tool calls ──
+                    // Chat Completions tool_calls → Responses API function_call output items
+                    if let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
+                        for tc in tool_calls {
+                            let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                            let name = tc.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("");
+                            let arguments = tc.get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("{}");
+                            output.push(serde_json::json!({
+                                "type": "function_call",
+                                "id": id,
+                                "call_id": id,
+                                "name": name,
+                                "arguments": arguments
+                            }));
+                        }
+                    }
+
+                    // ── Reasoning / thinking content ──
+                    // Some providers return reasoning_content in the Chat Completions response.
+                    // Translate it to a reasoning output item in Responses API format.
+                    if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
+                        if !reasoning.is_empty() {
+                            output.push(serde_json::json!({
+                                "type": "reasoning",
+                                "reasoning": reasoning
+                            }));
+                        }
+                    }
                 }
-            }).filter(|v| !v.is_null()).collect();
+            }
 
             obj.insert("output".to_string(), serde_json::Value::Array(output));
         }
