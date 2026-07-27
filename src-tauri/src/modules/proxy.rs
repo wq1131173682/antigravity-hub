@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 
+use futures::StreamExt;
 use tracing::{info, warn, error};
 
 /// Helper: build an HTTP error response without `.unwrap()`.
@@ -225,6 +226,69 @@ fn parse_and_prepare_body(
     }
 }
 
+/// Handle `/v1/models` requests — return the models configured in Antigravity Hub
+/// in OpenAI-compatible format.
+///
+/// OpenAI format:
+/// ```json
+/// {
+///   "object": "list",
+///   "data": [
+///     {"id": "model-name", "object": "model", "created": 1234567890, "owned_by": "platform-id"}
+///   ]
+/// }
+/// ```
+fn handle_models_request() -> axum::response::Response {
+    use crate::modules::config;
+    use crate::modules::model_manager;
+
+    let mut data: Vec<serde_json::Value> = Vec::new();
+
+    // Iterate over all configured platforms
+    match config::load_app_config() {
+        Ok(cfg) => {
+            info!("handle_models_request: loaded config with {} platforms", cfg.platforms.len());
+            for platform in &cfg.platforms {
+                match model_manager::list_models(&platform.id) {
+                    Ok(models) => {
+                        info!("handle_models_request: platform '{}' has {} models", platform.id, models.len());
+                        for model in &models {
+                            data.push(serde_json::json!({
+                                "id": model.model_name,
+                                "object": "model",
+                                "created": model.created_at,
+                                "owned_by": platform.id,
+                            }));
+                        }
+                    }
+                    Err(e) => {
+                        warn!("handle_models_request: list_models error for platform '{}': {}", platform.id, e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("handle_models_request: load_app_config failed: {}", e);
+        }
+    }
+
+    info!("handle_models_request: returning {} models total", data.len());
+
+    let response_body = serde_json::json!({
+        "object": "list",
+        "data": data,
+    });
+
+    let body_bytes = serde_json::to_vec(&response_body).unwrap_or_default();
+    axum::response::Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body_bytes))
+        .unwrap_or_else(|_| {
+            axum::response::Response::new(axum::body::Body::from("{\"error\":\"internal error\"}"))
+        })
+}
+
 /// Handle all incoming proxy requests
 async fn proxy_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
@@ -289,6 +353,15 @@ async fn proxy_handler(
     } else {
         target_path.clone()
     };
+
+    // ── Model list (/v1/models) ──
+    // Codex CLI calls /v1/models to discover available models. Instead of
+    // forwarding to the upstream provider (which may not return the configured
+    // models), we intercept and return the models configured in Antigravity Hub.
+    if target_path == "/v1/models" || target_path == "/v1/models/" {
+        info!("Intercepting /v1/models request, returning configured models");
+        return handle_models_request();
+    }
 
     // Check for path-specific base URL overrides (e.g., /agnesapi at the API root, not under /v1)
     let effective_base_url = resolve_base_url(&platform_id, &target_path, &base_url);
@@ -687,15 +760,25 @@ async fn forward_with_retry(
         }
 
         if is_streaming {
-            // Pass-through: the body is consumed as a stream by the client.
-            // Tokens inside SSE chunks can't be reliably summed (the final
-            // `usage` chunk comes at the very end), so we just count the
-            // request and let the client see the streamed usage itself.
             crate::modules::token_stats::record_streaming_request();
-            let body = axum::body::Body::from_stream(resp.bytes_stream());
-            return response_builder
-                .body(body)
-                .map_err(|e| format!("Failed to build response: {}", e));
+            if is_responses_api {
+                // Translate SSE stream from Chat Completions format to
+                // Responses API format on-the-fly so Codex CLI can parse it.
+                // The upstream returns Chat Completions SSE chunks, but Codex
+                // CLI expects Responses API SSE events.
+                let body = axum::body::Body::from_stream(
+                    transform_stream_to_responses(resp.bytes_stream())
+                );
+                return response_builder
+                    .body(body)
+                    .map_err(|e| format!("Failed to build response: {}", e));
+            } else {
+                // Pass-through for non-Responses API streaming.
+                let body = axum::body::Body::from_stream(resp.bytes_stream());
+                return response_builder
+                    .body(body)
+                    .map_err(|e| format!("Failed to build response: {}", e));
+            }
         }
 
         // Non-streaming: buffer the body so we can inspect `usage` before
@@ -778,6 +861,57 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
         })
     };
 
+    // Helper: convert a single Responses API content part to Chat Completions format.
+    // Responses API content types: input_text, input_image, input_file, input_audio, output_text
+    // Chat Completions content types: text, image_url, file, audio
+    let convert_content_part = |part: &mut serde_json::Value| {
+        if let Some(obj) = part.as_object_mut() {
+            let part_type = obj.get("type").and_then(|t| t.as_str()).map(|s| s.to_string());
+            match part_type.as_deref() {
+                Some("input_text") => {
+                    obj["type"] = serde_json::Value::String("text".to_string());
+                }
+                Some("input_image") => {
+                    obj["type"] = serde_json::Value::String("image_url".to_string());
+                    // image_url might be a string (raw URL) or an object {url: string}
+                    if let Some(image_url) = obj.get("image_url") {
+                        if image_url.is_string() {
+                            let url = image_url.as_str().unwrap_or("").to_string();
+                            obj["image_url"] = serde_json::json!({"url": url});
+                        }
+                    }
+                }
+                Some("input_file") | Some("input_audio") => {
+                    // Strip "input_" prefix: input_file → file, input_audio → audio
+                    if let Some(rest) = part_type.as_deref().and_then(|t| t.strip_prefix("input_")) {
+                        obj["type"] = serde_json::Value::String(rest.to_string());
+                    }
+                }
+                Some("output_text") => {
+                    // output_text → text (in input context, e.g. assistant messages)
+                    obj["type"] = serde_json::Value::String("text".to_string());
+                }
+                _ => {}
+            }
+        }
+    };
+
+    // Helper: convert content array in a message from Responses API format to Chat Completions format
+    let convert_message_content = |msg: &mut serde_json::Value| {
+        if let Some(obj) = msg.as_object_mut() {
+            if let Some(content) = obj.get_mut("content") {
+                match content {
+                    serde_json::Value::Array(arr) => {
+                        for part in arr.iter_mut() {
+                            convert_content_part(part);
+                        }
+                    }
+                    _ => {} // string content is fine as-is
+                }
+            }
+        }
+    };
+
     // Helper: flush pending function_calls into an assistant message with tool_calls
     let flush_fn_calls = |pending: &mut Vec<serde_json::Value>, messages: &mut Vec<serde_json::Value>| {
         if pending.is_empty() {
@@ -827,12 +961,23 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
                             } else if has_role {
                                 // ── Regular message with role (user/assistant/system) ──
                                 flush_fn_calls(&mut pending_function_calls, &mut messages);
-                                messages.push(serde_json::Value::Object(m));
+                                // Convert Responses API content types (input_text, input_image)
+                                // to Chat Completions types (text, image_url) for upstream compatibility
+                                let mut msg = serde_json::Value::Object(m);
+                                // Remove Responses API-specific fields that are not valid in Chat Completions
+                                if let Some(obj) = msg.as_object_mut() {
+                                    obj.remove("type");
+                                    obj.remove("input");
+                                    obj.remove("from_messages");
+                                }
+                                convert_message_content(&mut msg);
+                                messages.push(msg);
                             } else if let Some(content) = m.get("content") {
                                 // ── Object with content but no role → assume user message ──
                                 flush_fn_calls(&mut pending_function_calls, &mut messages);
                                 let mut msg = serde_json::json!({"role": "user"});
                                 msg["content"] = content.clone();
+                                convert_message_content(&mut msg);
                                 messages.push(msg);
                             } else {
                                 // ── Unknown object → fallback to user message ──
@@ -857,6 +1002,27 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
             }
         };
         obj.insert("messages".to_string(), serde_json::Value::Array(messages));
+        // Clean up other Responses API fields that might be in the request body
+        obj.remove("from_messages");
+    } else if let Some(from_messages) = obj.remove("from_messages") {
+        // `from_messages` is a simpler Responses API format that uses Chat Completions-style
+        // messages directly. Just rename to `messages` and convert content types.
+        if let Some(arr) = from_messages.as_array() {
+            let mut messages: Vec<serde_json::Value> = Vec::new();
+            for mut msg in arr.clone() {
+                // Remove Responses API-specific fields
+                if let Some(obj) = msg.as_object_mut() {
+                    obj.remove("type");
+                    obj.remove("input");
+                    obj.remove("from_messages");
+                }
+                convert_message_content(&mut msg);
+                messages.push(msg);
+            }
+            obj.insert("messages".to_string(), serde_json::Value::Array(messages));
+        } else {
+            obj.insert("messages".to_string(), from_messages);
+        }
     }
 
     // Translate `instructions` → system message (prepended to messages)
@@ -878,20 +1044,98 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
         }
     }
 
-    // Filter tools: Chat Completions only supports "function" and "custom" types.
-    // Responses API supports additional types like "file_search", "code_interpreter",
-    // "web_search", "computer_use" etc. which must be removed.
+    // Convert tools from Responses API format to Chat Completions format.
+    // Responses API tool format:
+    //   {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+    // Chat Completions tool format:
+    //   {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+    // Responses API supports additional types: file_search, code_interpreter, web_search,
+    // computer_use, custom — these must be removed since Chat Completions only supports
+    // "function".
     if let Some(tools) = obj.get_mut("tools") {
         if let Some(tools_array) = tools.as_array_mut() {
-            tools_array.retain(|tool| {
-                tool.get("type")
+            let mut converted: Vec<serde_json::Value> = Vec::new();
+            for mut tool in tools_array.drain(..) {
+                let tool_type = tool.get("type")
                     .and_then(|t| t.as_str())
-                    .map(|t| t == "function" || t == "custom")
-                    .unwrap_or(false)
-            });
-            // If no tools remain after filtering, remove the field entirely
-            if tools_array.is_empty() {
+                    .unwrap_or("")
+                    .to_string();
+
+                if tool_type == "function" {
+                    // Convert Responses API format to Chat Completions format
+                    if let Some(tool_obj) = tool.as_object_mut() {
+                        // Check if the function properties are at the top level (Responses API format)
+                        let has_top_level_name = tool_obj.contains_key("name");
+                        let has_function_nesting = tool_obj.contains_key("function");
+
+                        if has_top_level_name && !has_function_nesting {
+                            // Move name, description, parameters into a nested "function" object
+                            let mut fn_obj = serde_json::Map::new();
+                            if let Some(name) = tool_obj.remove("name") {
+                                fn_obj.insert("name".to_string(), name);
+                            }
+                            if let Some(desc) = tool_obj.remove("description") {
+                                fn_obj.insert("description".to_string(), desc);
+                            }
+                            if let Some(params) = tool_obj.remove("parameters") {
+                                fn_obj.insert("parameters".to_string(), params);
+                            }
+                            if !fn_obj.is_empty() {
+                                tool_obj.insert("function".to_string(), serde_json::Value::Object(fn_obj));
+                            }
+                        }
+                    }
+                    converted.push(tool);
+                } else {
+                    // Remove non-function tool types (file_search, code_interpreter,
+                    // web_search, computer_use, custom, etc.)
+                    info!("Removing unsupported tool type '{}' from Responses API request", tool_type);
+                }
+            }
+            if converted.is_empty() {
                 obj.remove("tools");
+            } else {
+                *tools = serde_json::Value::Array(converted);
+            }
+        }
+    }
+
+    // ── Post-processing: validate messages and clean up Responses API fields ──
+
+    // Rename "developer" role to "system" for upstream compatibility.
+    // The "developer" role is a newer OpenAI concept that most third-party
+    // providers (Sensenova, Agnes, etc.) don't support, but it is semantically
+    // equivalent to "system" — same positioning in the context window.
+    if let Some(messages) = obj.get_mut("messages") {
+        if let Some(arr) = messages.as_array_mut() {
+            for msg in arr.iter_mut() {
+                if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                    if role == "developer" {
+                        if let Some(obj) = msg.as_object_mut() {
+                            obj.insert("role".to_string(), serde_json::Value::String("system".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Ensure every remaining message has a valid role (fallback to "user" if missing/invalid)
+    let valid_roles: std::collections::HashSet<&str> = ["user", "assistant", "system", "tool"]
+        .iter().cloned().collect();
+    if let Some(messages) = obj.get_mut("messages") {
+        if let Some(arr) = messages.as_array_mut() {
+            for (idx, msg) in arr.iter_mut().enumerate() {
+                let role_valid = msg.get("role")
+                    .and_then(|r| r.as_str())
+                    .map(|r| valid_roles.contains(r))
+                    .unwrap_or(false);
+                if !role_valid {
+                    warn!("transform: messages[{}] has invalid role, setting to 'user'", idx);
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.insert("role".to_string(), serde_json::Value::String("user".to_string()));
+                    }
+                }
             }
         }
     }
@@ -899,6 +1143,16 @@ fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<u8>>
     // Remove Responses API-specific fields that don't exist in Chat Completions
     obj.remove("previous_response_id");
     obj.remove("store");
+
+    // Log the transformed request body for debugging
+    if let Ok(log_body) = serde_json::to_string_pretty(&json) {
+        if log_body.len() < 2000 {
+            info!("transform: transformed request body:\n{}", log_body);
+        } else {
+            let preview: String = log_body.chars().take(1000).collect();
+            info!("transform: transformed request body (truncated):\n{}", preview);
+        }
+    }
 
     Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
 }
@@ -1007,4 +1261,325 @@ fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<u8>>
     obj.remove("choices");
 
     Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
+}
+
+/// Translate a Chat Completions streaming SSE response to Responses API SSE format.
+///
+/// Reads SSE chunks from the upstream stream, translates each chunk on-the-fly,
+/// and emits Responses API format events. This allows Codex CLI to receive
+/// streaming responses in the format it expects.
+///
+/// Chat Completions streaming SSE:
+///   data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+///   data: [DONE]
+///
+/// Responses API streaming SSE:
+///   event: response.created
+///   data: {"type":"response.created","response":{"id":"resp_xxx","status":"in_progress"}}
+///   event: response.output_text.delta
+///   data: {"type":"response.output_text.delta","delta":"Hello","item_id":"...","output_index":0}
+///   event: response.done
+///   data: {"type":"response.done","response":{"id":"resp_xxx","status":"completed"}}
+///   data: [DONE]
+fn transform_stream_to_responses(
+    upstream_stream: impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(64);
+
+    // ── Helper: emit an SSE event ──
+    let tx_clone = tx.clone();
+    let emit_sse = move |event_type: &str, data: &serde_json::Value| {
+        let sse = format!(
+            "event: {}\ndata: {}\n\n",
+            event_type,
+            serde_json::to_string(data).unwrap_or_default()
+        );
+        let _ = tx_clone.blocking_send(Ok(axum::body::Bytes::from(sse)));
+    };
+
+    // ── Helper: emit a raw data line ──
+    let tx_clone = tx.clone();
+    let emit_data = move |data: &str| {
+        let sse = format!("data: {}\n\n", data);
+        let _ = tx_clone.blocking_send(Ok(axum::body::Bytes::from(sse)));
+    };
+
+    tokio::spawn(async move {
+        // Track state across chunks
+        let mut response_id: String = String::new();
+        let mut item_id: String = String::new();
+        let mut output_index: u32 = 0;
+        let mut has_sent_created = false;
+        let mut has_sent_output_item = false;
+        let mut has_sent_content_part = false;
+        let mut text_buffer = String::new();
+        // Track tool call state by delta index
+        let mut tool_call_ids: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut tool_call_names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut tool_call_args: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+
+        // ── Main stream processing loop ──
+        futures::pin_mut!(upstream_stream);
+
+        while let Some(chunk_result) = upstream_stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            };
+
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            let lines: Vec<&str> = chunk_str.split('\n').collect();
+
+            for line in &lines {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Extract data: prefix
+                let data = match line.strip_prefix("data: ") {
+                    Some(d) => d.trim(),
+                    None => continue,
+                };
+
+                // End of stream marker — forward as-is
+                if data == "[DONE]" {
+                    emit_data("[DONE]");
+                    continue;
+                }
+
+                // Parse the JSON chunk
+                let json: serde_json::Value = match serde_json::from_str(data) {
+                    Ok(j) => j,
+                    Err(_) => continue,
+                };
+
+                // Extract/assign response ID from the first chunk
+                if response_id.is_empty() {
+                    response_id = if let Some(id) = json.get("id").and_then(|i| i.as_str()) {
+                        format!("resp_{}", id.trim_start_matches("chatcmpl-"))
+                    } else {
+                        format!("resp_{}", uuid::Uuid::new_v4())
+                    };
+                }
+
+                // Process choices
+                let choices = match json.get("choices").and_then(|c| c.as_array()) {
+                    Some(arr) => arr,
+                    None => continue,
+                };
+
+                for choice in choices {
+                    let delta = match choice.get("delta") {
+                        Some(d) => d,
+                        None => continue,
+                    };
+                    let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
+
+                    // ── Emit response.created on first meaningful delta ──
+                    if !has_sent_created {
+                        has_sent_created = true;
+                        emit_sse("response.created", &serde_json::json!({
+                            "type": "response.created",
+                            "response": {
+                                "id": response_id,
+                                "status": "in_progress"
+                            }
+                        }));
+                    }
+
+                    // ── Text content ──
+                    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
+                        if !content.is_empty() {
+                            // Lazy-init text output item
+                            if !has_sent_output_item {
+                                has_sent_output_item = true;
+                                item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("001"));
+                                emit_sse("response.output_item.added", &serde_json::json!({
+                                    "type": "response.output_item.added",
+                                    "item": {
+                                        "id": item_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": []
+                                    },
+                                    "output_index": output_index
+                                }));
+                            }
+                            if !has_sent_content_part {
+                                has_sent_content_part = true;
+                                emit_sse("response.content_part.added", &serde_json::json!({
+                                    "type": "response.content_part.added",
+                                    "part": {
+                                        "type": "output_text",
+                                        "text": ""
+                                    },
+                                    "item_id": item_id,
+                                    "output_index": output_index
+                                }));
+                            }
+
+                            // Accumulate text and emit delta
+                            text_buffer.push_str(content);
+                            emit_sse("response.output_text.delta", &serde_json::json!({
+                                "type": "response.output_text.delta",
+                                "delta": content,
+                                "item_id": item_id,
+                                "output_index": output_index
+                            }));
+                        }
+                    }
+
+                    // ── Reasoning / thinking content ──
+                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                        if !reasoning.is_empty() {
+                            emit_sse("response.reasoning.delta", &serde_json::json!({
+                                "type": "response.reasoning.delta",
+                                "delta": reasoning,
+                                "output_index": output_index
+                            }));
+                        }
+                    }
+
+                    // ── Tool calls ──
+                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                        for tc in tool_calls {
+                            let tc_index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+                            let tc_id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                            let tc_name = tc.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let tc_args = tc.get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .unwrap_or("")
+                                .to_string();
+
+                            // If this is the first chunk for this tool call, emit output_item.added
+                            if !tool_call_ids.contains_key(&tc_index) && !tc_id.is_empty() {
+                                tool_call_ids.insert(tc_index, tc_id.clone());
+                                tool_call_names.insert(tc_index, tc_name.clone());
+                                tool_call_args.insert(tc_index, String::new());
+                                emit_sse("response.output_item.added", &serde_json::json!({
+                                    "type": "response.output_item.added",
+                                    "item": {
+                                        "id": tc_id,
+                                        "type": "function_call",
+                                        "call_id": tc_id,
+                                        "name": tc_name
+                                    },
+                                    "output_index": output_index + 1
+                                }));
+                            }
+
+                            // Accumulate tool call arguments
+                            if let Some(args_buf) = tool_call_args.get_mut(&tc_index) {
+                                if !tc_args.is_empty() {
+                                    args_buf.push_str(&tc_args);
+                                    emit_sse("response.function_call_arguments.delta", &serde_json::json!({
+                                        "type": "response.function_call_arguments.delta",
+                                        "delta": tc_args,
+                                        "item_id": tool_call_ids.get(&tc_index).cloned().unwrap_or_default(),
+                                        "output_index": output_index
+                                    }));
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Finish reason — emit done events ──
+                    if let Some(reason) = finish_reason {
+                        if reason == "stop" || reason == "length" || reason == "tool_calls" || reason == "content_filter" {
+                            // Emit content_part.done if we had text
+                            if has_sent_content_part {
+                                emit_sse("response.output_text.done", &serde_json::json!({
+                                    "type": "response.output_text.done",
+                                    "item_id": item_id,
+                                    "output_index": output_index
+                                }));
+                            }
+
+                            // Emit function_call_arguments.done for each tool call
+                            let mut tc_indices: Vec<u32> = tool_call_ids.keys().copied().collect();
+                            tc_indices.sort();
+                            for tc_idx in &tc_indices {
+                                if let Some(tc_id) = tool_call_ids.get(tc_idx) {
+                                    emit_sse("response.function_call_arguments.done", &serde_json::json!({
+                                        "type": "response.function_call_arguments.done",
+                                        "item_id": tc_id,
+                                        "output_index": output_index
+                                    }));
+                                }
+                            }
+
+                            // Emit output_item.done for the text message
+                            if has_sent_output_item && has_sent_content_part {
+                                emit_sse("response.output_item.done", &serde_json::json!({
+                                    "type": "response.output_item.done",
+                                    "item": {
+                                        "id": item_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [
+                                            {
+                                                "type": "output_text",
+                                                "text": text_buffer
+                                            }
+                                        ]
+                                    },
+                                    "output_index": output_index
+                                }));
+                            }
+
+                            // Emit output_item.done for each tool call
+                            for tc_idx in &tc_indices {
+                                if let Some(tc_id) = tool_call_ids.get(tc_idx) {
+                                    let tc_name = tool_call_names.get(tc_idx).cloned().unwrap_or_default();
+                                    let tc_args = tool_call_args.get(tc_idx).cloned().unwrap_or_default();
+                                    emit_sse("response.output_item.done", &serde_json::json!({
+                                        "type": "response.output_item.done",
+                                        "item": {
+                                            "id": tc_id,
+                                            "type": "function_call",
+                                            "call_id": tc_id,
+                                            "name": tc_name,
+                                            "arguments": tc_args
+                                        },
+                                        "output_index": output_index + 1
+                                    }));
+                                }
+                            }
+
+                            // Emit response.done
+                            emit_sse("response.done", &serde_json::json!({
+                                "type": "response.done",
+                                "response": {
+                                    "id": response_id,
+                                    "status": "completed"
+                                }
+                            }));
+
+                            // Reset state for potential follow-up chunks
+                            has_sent_output_item = false;
+                            has_sent_content_part = false;
+                            text_buffer.clear();
+                            tool_call_ids.clear();
+                            tool_call_names.clear();
+                            tool_call_args.clear();
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Convert the mpsc receiver into a futures::stream::Stream
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
 }

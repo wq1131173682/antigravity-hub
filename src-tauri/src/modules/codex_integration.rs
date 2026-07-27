@@ -73,7 +73,8 @@ pub fn check_codex_status() -> CodexStatus {
         match std::fs::read_to_string(&cfg_path) {
             Ok(content) => {
                 let preview = Some(content.chars().take(500).collect::<String>());
-                let is_ag = content.contains("antigravity") || content.contains("Antigravity");
+                let is_ag = content.contains("antigravity") || content.contains("Antigravity")
+                    || content.contains("model_providers");
                 (preview, is_ag)
             }
             Err(_) => (None, false),
@@ -121,10 +122,11 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
 
 /// Write Antigravity Hub proxy configuration to Codex CLI's config.toml.
 ///
-/// Compatibility: preserves the existing Codex CLI config structure including
-/// `[model_providers.xxx]` sections with `wire_api`, `name`, and other fields.
-/// Only modifies the `base_url` in the provider section plus `model_provider`
-/// and `model` at the top level.
+/// Uses a custom provider entry in `[model_providers.<path_prefix>]` with
+/// `base_url` pointing to the Antigravity Hub proxy. Sets
+/// `preferred_auth_method = "apikey"` so Codex CLI uses API Key auth
+/// (stored in auth.json) instead of ChatGPT login — this avoids the
+/// "cannot open ChatGPT" issue when using a proxy endpoint.
 ///
 /// # Arguments
 /// * `proxy_host` - Proxy host (e.g., "127.0.0.1")
@@ -176,9 +178,26 @@ pub fn apply_codex_config(
     // Responses API ↔ Chat Completions translation transparently.
     let proxy_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
 
+    // ── Set top-level keys ──
+    // Use the path_prefix as the provider name (custom provider, not built-in
+    // "openai"). This avoids the ChatGPT login flow — Codex CLI will use
+    // API Key auth instead.
+    config.insert(
+        "model_provider".to_string(),
+        toml::Value::String(path_prefix.to_string()),
+    );
+    config.insert(
+        "model".to_string(),
+        toml::Value::String(model_name.to_string()),
+    );
+    config.insert(
+        "preferred_auth_method".to_string(),
+        toml::Value::String("apikey".to_string()),
+    );
+
     // ── Update [model_providers.<path_prefix>] section ──
-    // Create or update the provider entry. Preserve existing fields like
-    // wire_api, name, model_reasoning_effort, etc.
+    // Define the custom provider with base_url pointing to the proxy.
+    // Codex CLI requires: name, base_url, wire_api = "responses".
     let model_providers = config
         .entry("model_providers".to_string())
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -189,24 +208,20 @@ pub fn apply_codex_config(
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
 
         if let Some(provider_table) = provider.as_table_mut() {
-            // Set base_url to point to the Antigravity Hub proxy
-            // Preserve all other fields (wire_api, name, etc.)
+            provider_table.insert(
+                "name".to_string(),
+                toml::Value::String(path_prefix.to_string()),
+            );
             provider_table.insert(
                 "base_url".to_string(),
                 toml::Value::String(proxy_base_url.clone()),
             );
+            provider_table.insert(
+                "wire_api".to_string(),
+                toml::Value::String("responses".to_string()),
+            );
         }
     }
-
-    // ── Set top-level keys ──
-    config.insert(
-        "model_provider".to_string(),
-        toml::Value::String(path_prefix.to_string()),
-    );
-    config.insert(
-        "model".to_string(),
-        toml::Value::String(model_name.to_string()),
-    );
 
     // Serialize and write
     let output = toml::to_string_pretty(&config)
@@ -215,7 +230,7 @@ pub fn apply_codex_config(
     // Add a header comment
     let final_content = format!(
         "# Codex CLI Configuration\n\
-         # Managed by Antigravity Hub v5.0.0\n\
+         # Managed by Antigravity Hub\n\
          # Applied at: {}\n\
          # To revert, delete this file or restore the backup.\n\n{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),

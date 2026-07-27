@@ -1438,6 +1438,22 @@
         "hint_curfew": "Leave empty to disable. Based on server time."
     },
     "codex": {
+        "title": "Codex CLI Integration",
+        "description": "Apply proxy configuration to Codex CLI with one click, routing all requests through Antigravity Hub for key rotation and management.",
+        "check_status": "Check Codex Status",
+        "checking": "Checking Codex CLI status...",
+        "check_failed": "Check failed. Please verify Codex CLI is installed.",
+        "installed": "Codex CLI is installed",
+        "not_installed": "Codex CLI installation not found",
+        "already_configured": "Already configured to use Antigravity Hub",
+        "has_backup": "Backup configuration available for restore",
+        "select_platform": "Select Platform",
+        "select_model": "Select Model",
+        "no_models": "No models available",
+        "config_preview": "Config Preview",
+        "apply": "Apply",
+        "restore": "Restore Backup",
+        "restore_success": "Codex CLI configuration restored from backup successfully!",
         "apply_to_codex": "Apply to Codex CLI",
         "apply_success": "Codex CLI configuration applied successfully!"
     }

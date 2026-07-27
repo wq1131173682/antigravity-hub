@@ -1403,6 +1403,22 @@
         "hint_curfew": "留空则禁用。基于服务器时间。"
     },
     "codex": {
+        "title": "Codex CLI 集成",
+        "description": "将当前代理配置一键应用到 Codex CLI，使其所有请求通过 Antigravity Hub 进行路由和密钥轮换。",
+        "check_status": "检查 Codex 状态",
+        "checking": "正在检查 Codex CLI 状态...",
+        "check_failed": "检查失败，请确认 Codex CLI 是否已安装",
+        "installed": "Codex CLI 已安装",
+        "not_installed": "未检测到 Codex CLI 安装",
+        "already_configured": "已配置为使用 Antigravity Hub",
+        "has_backup": "存在备份配置，可一键恢复",
+        "select_platform": "选择平台",
+        "select_model": "选择模型",
+        "no_models": "暂无可选模型",
+        "config_preview": "配置预览",
+        "apply": "一键应用",
+        "restore": "恢复备份",
+        "restore_success": "Codex CLI 配置已从备份恢复成功！",
         "apply_to_codex": "应用至 Codex CLI",
         "apply_success": "Codex CLI 配置已应用成功！"
     }

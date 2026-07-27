@@ -107,6 +107,11 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'execute_opencode_clear': { url: '/api/proxy/opencode/clear', method: 'POST' },
   'get_opencode_config_content': { url: '/api/proxy/opencode/config', method: 'POST' },
 
+  // Codex CLI
+  'check_codex_status': { url: '/api/codex/status', method: 'GET' },
+  'apply_codex_config': { url: '/api/codex/apply', method: 'POST' },
+  'restore_codex_config': { url: '/api/codex/restore', method: 'POST' },
+
   // Stats
   'get_token_stats_hourly': { url: '/api/stats/token/hourly', method: 'GET' },
   'get_token_stats_daily': { url: '/api/stats/token/daily', method: 'GET' },
