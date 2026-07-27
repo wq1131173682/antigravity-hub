@@ -1289,20 +1289,29 @@ fn transform_stream_to_responses(
     let model_owned = model.to_string();
 
     // ── Helper: emit a data-only SSE line (Responses API uses `data: {json}\n\n` format) ──
+    // Use try_send (non-blocking) instead of blocking_send because we're in a
+    // tokio async context. blocking_send would block the tokio worker thread
+    // and can cause stream stalls or deadlocks.
     let tx_clone = tx.clone();
     let emit_data_sse = move |data: &serde_json::Value| {
         let sse = format!(
             "data: {}\n\n",
             serde_json::to_string(data).unwrap_or_default()
         );
-        let _ = tx_clone.blocking_send(Ok(axum::body::Bytes::from(sse)));
+        let result = tx_clone.try_send(Ok(axum::body::Bytes::from(sse)));
+        if let Err(e) = result {
+            warn!("transform_stream: try_send failed (data event): {:?}", e);
+        }
     };
 
     // ── Helper: emit a raw data line (for [DONE]) ──
     let tx_clone = tx.clone();
     let emit_raw = move |data: &str| {
         let sse = format!("data: {}\n\n", data);
-        let _ = tx_clone.blocking_send(Ok(axum::body::Bytes::from(sse)));
+        let result = tx_clone.try_send(Ok(axum::body::Bytes::from(sse)));
+        if let Err(e) = result {
+            warn!("transform_stream: try_send failed (raw event): {:?}", e);
+        }
     };
 
     tokio::spawn(async move {
@@ -1559,7 +1568,16 @@ struct StreamState {
 
 impl StreamState {
     fn flush_done_events(&mut self, emit: &impl Fn(&serde_json::Value)) {
+        // Correct event order per Responses API spec:
+        // 1. output_text.done → 2. content_part.done → 3. output_item.done
         if self.has_sent_content_part {
+            emit(&serde_json::json!({
+                "type": "response.output_text.done",
+                "item_id": self.item_id,
+                "output_index": self.output_index,
+                "content_index": self.content_index,
+                "text": self.text_buffer
+            }));
             emit(&serde_json::json!({
                 "type": "response.content_part.done",
                 "item_id": self.item_id,
@@ -1569,13 +1587,6 @@ impl StreamState {
             }));
         }
         if self.has_sent_output_item && self.has_sent_content_part {
-            emit(&serde_json::json!({
-                "type": "response.output_text.done",
-                "item_id": self.item_id,
-                "output_index": self.output_index,
-                "content_index": self.content_index,
-                "text": self.text_buffer
-            }));
             emit(&serde_json::json!({
                 "type": "response.output_item.done",
                 "output_index": self.output_index,
