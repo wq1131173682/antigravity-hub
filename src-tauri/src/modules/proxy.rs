@@ -1382,7 +1382,7 @@ fn transform_stream_to_responses(
                     };
                 }
 
-                if st.model_name == model_owned && st.model_name.is_empty() {
+                if st.model_name.is_empty() {
                     if let Some(m) = json.get("model").and_then(|m| m.as_str()) {
                         st.model_name = m.to_string();
                     }
@@ -1470,8 +1470,38 @@ fn transform_stream_to_responses(
                     }
 
                     // ── Reasoning / thinking content ──
+                    // Some providers (DeepSeek, Qwen, etc.) send reasoning_content
+                    // BEFORE the actual content. We need to ensure the output item
+                    // and content part flags are set so flush_done_events works
+                    // correctly even when only reasoning_content is sent.
                     if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
                         if !reasoning.is_empty() {
+                            // Ensure output item and content part are initialized
+                            if !st.has_sent_output_item {
+                                st.has_sent_output_item = true;
+                                st.item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                                emit_data_sse(&serde_json::json!({
+                                    "type": "response.output_item.added",
+                                    "output_index": st.output_index,
+                                    "item": {
+                                        "id": st.item_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": []
+                                    }
+                                }));
+                            }
+                            if !st.has_sent_content_part {
+                                st.has_sent_content_part = true;
+                                emit_data_sse(&serde_json::json!({
+                                    "type": "response.content_part.added",
+                                    "item_id": st.item_id,
+                                    "output_index": st.output_index,
+                                    "content_index": st.content_index,
+                                    "part": {"type": "output_text", "text": ""}
+                                }));
+                            }
+                            st.text_buffer.push_str(reasoning);
                             emit_data_sse(&serde_json::json!({
                                 "type": "response.output_text.delta",
                                 "delta": reasoning,
