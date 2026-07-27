@@ -1,4 +1,4 @@
-# Logs
+﻿# Logs
 logs
 .logs
 *.log
@@ -15,8 +15,7 @@ dist-ssr
 dist
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+.vscode
 .idea
 .DS_Store
 *.suo
@@ -38,56 +37,35 @@ environment/
 # Python virtual environments and test files
 .venv*/
 venv/
-# *.py
 __pycache__/
 *.pyc
 
-# Reference projects (for development only)
-
-DOCKER_DEPLOYMENT.md
 pnpm-lock.yaml
 
+# Agent config (not part of core app)
 .agents
 .omo
 .qwen
-.vscode
 
-# Deployment & publishing (not needed for core development)
+# Non-core: removed from git tracking
+# Auxiliary files that are not part of the desktop app core code or build pipeline.
 Casks/
 deploy/
 web_site/
-
-# ── Non-core: removed from git tracking (keep on disk) ──
-# Documentation, scripts, Docker, CI/CD, and other auxiliary files
-# that are not part of the desktop app core code or build pipeline.
-
-# CI/CD
-.github/
-workflows/
-
-# Documentation
-docs/
-README.md
-README_EN.md
-SETUP_NOTES.md
-knowledge.md
-
-# Docker (backend services, not desktop app)
 docker/
-.dockerignore
-
-# Helper scripts (not core build)
+docs/
+workflows/
 scripts/
+.github/
+.dockerignore
+test.rs
 install.ps1
 install.sh
-
-# Agent/editor config (not core)
-AGENTS.md
+knowledge.md
 QWEN.md
-.omo/
-.qwen/
-.vscode/
+README_EN.md
+SETUP_NOTES.md
+DOCKER_DEPLOYMENT.md
 
-# Test file (not core)
-test.rs
+# Temporary test files
 src/pages/test.txt
