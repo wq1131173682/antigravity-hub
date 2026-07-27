@@ -56,3 +56,38 @@ pnpm-lock.yaml
 Casks/
 deploy/
 web_site/
+
+# ── Non-core: removed from git tracking (keep on disk) ──
+# Documentation, scripts, Docker, CI/CD, and other auxiliary files
+# that are not part of the desktop app core code or build pipeline.
+
+# CI/CD
+.github/
+workflows/
+
+# Documentation
+docs/
+README.md
+README_EN.md
+SETUP_NOTES.md
+knowledge.md
+
+# Docker (backend services, not desktop app)
+docker/
+.dockerignore
+
+# Helper scripts (not core build)
+scripts/
+install.ps1
+install.sh
+
+# Agent/editor config (not core)
+AGENTS.md
+QWEN.md
+.omo/
+.qwen/
+.vscode/
+
+# Test file (not core)
+test.rs
+src/pages/test.txt
