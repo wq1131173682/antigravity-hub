@@ -51,3 +51,8 @@ pnpm-lock.yaml
 .omo
 .qwen
 .vscode
+
+# Deployment & publishing (not needed for core development)
+Casks/
+deploy/
+web_site/

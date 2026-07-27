@@ -1330,6 +1330,10 @@ fn transform_stream_to_responses(
             has_sent_content_part: false,
             text_buffer: String::new(),
             is_completed: false,
+            reasoning_buffer: String::new(),
+            reasoning_item_id: String::new(),
+            has_sent_reasoning: false,
+            reasoning_output_index: 0,
             tool_call_ids: std::collections::HashMap::new(),
             tool_call_names: std::collections::HashMap::new(),
             tool_call_args: std::collections::HashMap::new(),
@@ -1471,44 +1475,29 @@ fn transform_stream_to_responses(
 
                     // ── Reasoning / thinking content ──
                     // Some providers (DeepSeek, Qwen, etc.) send reasoning_content
-                    // BEFORE the actual content. We need to ensure the output item
-                    // and content part flags are set so flush_done_events works
-                    // correctly even when only reasoning_content is sent.
+                    // BEFORE the actual content. We handle reasoning separately from
+                    // the regular text output — it is emitted as a reasoning output
+                    // item with type "reasoning", NOT mixed into output_text.
                     if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
                         if !reasoning.is_empty() {
-                            // Ensure output item and content part are initialized
-                            if !st.has_sent_output_item {
-                                st.has_sent_output_item = true;
-                                st.item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                            // Emit reasoning output item on first reasoning chunk
+                            if !st.has_sent_reasoning {
+                                st.has_sent_reasoning = true;
+                                // Reasoning output_index goes after the text output item
+                                // (which has output_index=0) and before tool calls
+                                st.reasoning_output_index = if st.has_sent_output_item { 1 } else { 0 };
+                                st.reasoning_item_id = format!("reason_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
                                 emit_data_sse(&serde_json::json!({
                                     "type": "response.output_item.added",
-                                    "output_index": st.output_index,
+                                    "output_index": st.reasoning_output_index,
                                     "item": {
-                                        "id": st.item_id,
-                                        "type": "message",
-                                        "role": "assistant",
-                                        "content": []
+                                        "id": st.reasoning_item_id,
+                                        "type": "reasoning",
+                                        "reasoning": ""
                                     }
                                 }));
                             }
-                            if !st.has_sent_content_part {
-                                st.has_sent_content_part = true;
-                                emit_data_sse(&serde_json::json!({
-                                    "type": "response.content_part.added",
-                                    "item_id": st.item_id,
-                                    "output_index": st.output_index,
-                                    "content_index": st.content_index,
-                                    "part": {"type": "output_text", "text": ""}
-                                }));
-                            }
-                            st.text_buffer.push_str(reasoning);
-                            emit_data_sse(&serde_json::json!({
-                                "type": "response.output_text.delta",
-                                "delta": reasoning,
-                                "item_id": st.item_id,
-                                "output_index": st.output_index,
-                                "content_index": st.content_index
-                            }));
+                            st.reasoning_buffer.push_str(reasoning);
                         }
                     }
 
@@ -1589,6 +1578,11 @@ struct StreamState {
     has_sent_content_part: bool,
     text_buffer: String,
     is_completed: bool,
+    /// Reasoning/thinking content stored separately from text_buffer
+    reasoning_buffer: String,
+    reasoning_item_id: String,
+    has_sent_reasoning: bool,
+    reasoning_output_index: u32,
     tool_call_ids: std::collections::HashMap<u32, String>,
     tool_call_names: std::collections::HashMap<u32, String>,
     tool_call_args: std::collections::HashMap<u32, String>,
@@ -1626,6 +1620,18 @@ impl StreamState {
                 }
             }));
         }
+        // ── Reasoning output item done ──
+        if self.has_sent_reasoning && !self.reasoning_buffer.is_empty() {
+            emit(&serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": self.reasoning_output_index,
+                "item": {
+                    "id": self.reasoning_item_id,
+                    "type": "reasoning",
+                    "reasoning": self.reasoning_buffer
+                }
+            }));
+        }
         let mut tc_indices: Vec<u32> = self.tool_call_ids.keys().copied().collect();
         tc_indices.sort();
         let mut tc_idx_counter = 0u32;
@@ -1657,6 +1663,19 @@ impl StreamState {
         }
         self.is_completed = true;
         let mut output: Vec<serde_json::Value> = Vec::new();
+
+        // ── Reasoning output ──
+        // Reasoning/thinking content comes FIRST in the output array (before
+        // the message text), matching the non-streaming response format.
+        if self.has_sent_reasoning && !self.reasoning_buffer.is_empty() {
+            output.push(serde_json::json!({
+                "id": self.reasoning_item_id,
+                "type": "reasoning",
+                "reasoning": self.reasoning_buffer
+            }));
+        }
+
+        // ── Text message output ──
         if self.has_sent_output_item {
             output.push(serde_json::json!({
                 "id": self.item_id, "type": "message", "role": "assistant",
