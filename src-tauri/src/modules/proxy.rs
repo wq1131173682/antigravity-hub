@@ -1576,6 +1576,83 @@ fn transform_stream_to_responses(
                 }
             }
         }
+
+        // ── Stream ended — flush pending done events ──
+        // Some upstream providers close the stream without sending a final
+        // chunk with finish_reason. In that case we must emit the done events
+        // anyway so the client (Codex CLI) doesn't wait indefinitely.
+        if has_sent_created && response_id.is_empty() {
+            // No response was created, nothing to flush
+        } else if has_sent_created {
+            // Emit content_part.done if we had text
+            if has_sent_content_part {
+                emit_sse("response.output_text.done", &serde_json::json!({
+                    "type": "response.output_text.done",
+                    "item_id": item_id,
+                    "output_index": output_index
+                }));
+            }
+
+            // Emit function_call_arguments.done for each tool call
+            let mut tc_indices: Vec<u32> = tool_call_ids.keys().copied().collect();
+            tc_indices.sort();
+            for tc_idx in &tc_indices {
+                if let Some(tc_id) = tool_call_ids.get(tc_idx) {
+                    emit_sse("response.function_call_arguments.done", &serde_json::json!({
+                        "type": "response.function_call_arguments.done",
+                        "item_id": tc_id,
+                        "output_index": output_index
+                    }));
+                }
+            }
+
+            // Emit output_item.done for the text message
+            if has_sent_output_item && has_sent_content_part {
+                emit_sse("response.output_item.done", &serde_json::json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": text_buffer
+                            }
+                        ]
+                    },
+                    "output_index": output_index
+                }));
+            }
+
+            // Emit output_item.done for each tool call
+            for tc_idx in &tc_indices {
+                if let Some(tc_id) = tool_call_ids.get(tc_idx) {
+                    let tc_name = tool_call_names.get(tc_idx).cloned().unwrap_or_default();
+                    let tc_args = tool_call_args.get(tc_idx).cloned().unwrap_or_default();
+                    emit_sse("response.output_item.done", &serde_json::json!({
+                        "type": "response.output_item.done",
+                        "item": {
+                            "id": tc_id,
+                            "type": "function_call",
+                            "call_id": tc_id,
+                            "name": tc_name,
+                            "arguments": tc_args
+                        },
+                        "output_index": output_index + 1
+                    }));
+                }
+            }
+
+            // Emit response.done
+            emit_sse("response.done", &serde_json::json!({
+                "type": "response.done",
+                "response": {
+                    "id": response_id,
+                    "status": "completed"
+                }
+            }));
+        }
     });
 
     // Convert the mpsc receiver into a futures::stream::Stream
