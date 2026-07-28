@@ -48,6 +48,25 @@ pub fn set_proxy_host(host: String) -> Result<(), String> {
     save_app_config(&config)
 }
 
+/// Update upstream proxy URL in config file AND the runtime proxy client.
+/// Pass `None` or empty string to clear the proxy (direct connection).
+pub fn set_upstream_proxy_url(proxy_url: Option<String>) -> Result<(), String> {
+    let normalized = proxy_url.filter(|u| !u.trim().is_empty());
+    // Persist to config file
+    let mut config = load_app_config()?;
+    config.upstream_proxy_url = normalized.clone();
+    save_app_config(&config)?;
+    // Update runtime proxy client immediately
+    crate::modules::proxy::update_proxy_client(normalized);
+    Ok(())
+}
+
+/// Get the current upstream proxy URL from config.
+pub fn get_upstream_proxy_url() -> Result<Option<String>, String> {
+    let config = load_app_config()?;
+    Ok(config.upstream_proxy_url)
+}
+
 /// Save application configuration
 pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     let data_dir = platform_manager::get_data_dir()?;

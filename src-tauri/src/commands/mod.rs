@@ -283,6 +283,19 @@ pub async fn get_proxy_status() -> Result<modules::proxy::ProxyStatus, String> {
     Ok(modules::proxy::get_proxy_status())
 }
 
+/// Set upstream proxy URL for outgoing API requests.
+/// Pass empty string to clear (direct connection).
+#[tauri::command]
+pub async fn set_upstream_proxy_url(proxy_url: Option<String>) -> Result<(), String> {
+    modules::config::set_upstream_proxy_url(proxy_url)
+}
+
+/// Get the current upstream proxy URL.
+#[tauri::command]
+pub async fn get_upstream_proxy_url() -> Result<Option<String>, String> {
+    modules::config::get_upstream_proxy_url()
+}
+
 // ============================================================================
 // Config Commands
 // ============================================================================

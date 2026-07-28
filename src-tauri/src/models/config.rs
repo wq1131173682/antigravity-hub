@@ -15,6 +15,11 @@ pub struct AppConfig {
     /// Auto-switch keys on 429/500
     #[serde(default = "default_true")]
     pub auto_switch: bool,
+    /// Upstream proxy URL (e.g. "http://127.0.0.1:7890").
+    /// When set, the proxy's outgoing requests to upstream APIs will go through this proxy.
+    /// When None/empty, direct connection is used (no proxy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy_url: Option<String>,
     /// List of configured platforms
     #[serde(default)]
     pub platforms: Vec<Platform>,
@@ -40,6 +45,7 @@ impl AppConfig {
             proxy_port: 8080,
             proxy_host: "127.0.0.1".to_string(),
             auto_switch: true,
+            upstream_proxy_url: None,
             platforms: Vec::new(),
         }
     }

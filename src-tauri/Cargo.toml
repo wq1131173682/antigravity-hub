@@ -1,6 +1,6 @@
 [package]
 name = "antigravity_tools"
-version = "5.1.7"
+version = "5.1.8"
 description = "Multi-platform API Account Manager - Simplified Edition"
 authors = ["you"]
 license = "CC-BY-NC-SA-4.0"
@@ -23,7 +23,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
 chrono = "0.4"
 dirs = "5.0"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream", "system-proxy"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 tracing-log = "0.2"

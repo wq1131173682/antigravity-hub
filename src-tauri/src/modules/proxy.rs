@@ -1,8 +1,7 @@
-﻿use std::sync::Arc;
+﻿use std::sync::{Mutex, RwLock};
 use tokio::sync::watch;
 use serde::Serialize;
 use reqwest::Client;
-use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
 
@@ -26,14 +25,52 @@ fn error_response(status: u16, body: String) -> axum::response::Response {
         })
 }
 
-/// Shared HTTP client with 300s timeout for LLM API calls
-static SHARED_PROXY_CLIENT: Lazy<Client> = Lazy::new(|| {
-    Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .no_proxy()
-        .build()
-        .expect("Failed to create HTTP client")
+/// Shared HTTP client with 300s timeout for LLM API calls.
+/// Wrapped in RwLock so the proxy URL can be changed at runtime.
+/// Default: direct connection (no proxy).
+static PROXY_CLIENT: Lazy<RwLock<Client>> = Lazy::new(|| {
+    RwLock::new(build_http_client(None))
 });
+
+/// Build an HTTP client with an optional proxy URL.
+/// When `proxy_url` is None or empty, direct connection is used.
+fn build_http_client(proxy_url: Option<&str>) -> Client {
+    let mut builder = Client::builder()
+        .timeout(std::time::Duration::from_secs(300));
+    if let Some(url) = proxy_url {
+        if !url.is_empty() {
+            match reqwest::Proxy::all(url) {
+                Ok(proxy) => {
+                    info!("Using upstream proxy: {}", url);
+                    builder = builder.proxy(proxy);
+                }
+                Err(e) => {
+                    warn!("Invalid proxy URL '{}': {}, falling back to direct connection", url, e);
+                }
+            }
+        }
+    }
+    builder.build().expect("Failed to create HTTP client")
+}
+
+/// Initialize the proxy client from config (called on app startup).
+/// Overwrites the current client with one built from the given proxy URL.
+pub fn init_proxy_client(proxy_url: Option<String>) {
+    if let Ok(mut client) = PROXY_CLIENT.write() {
+        *client = build_http_client(proxy_url.as_deref());
+    }
+}
+
+/// Update the proxy client at runtime with a new proxy URL.
+/// When `proxy_url` is None or empty, reverts to direct connection.
+/// The proxy server does NOT need to be restarted — the new client is used
+/// immediately for subsequent requests.
+pub fn update_proxy_client(proxy_url: Option<String>) {
+    info!("Updating proxy client, proxy_url={:?}", proxy_url);
+    if let Ok(mut client) = PROXY_CLIENT.write() {
+        *client = build_http_client(proxy_url.as_deref());
+    }
+}
 
 /// Proxy server status
 #[derive(Debug, Clone, Serialize)]
@@ -169,16 +206,8 @@ pub fn get_proxy_status() -> ProxyStatus {
 
 /// Create the Axum router with proxy handler
 fn create_router() -> axum::Router {
-    let client = SHARED_PROXY_CLIENT.clone();
-    let state = Arc::new(AppState { client });
-
     axum::Router::new()
         .route("/*path", axum::routing::any(proxy_handler))
-        .with_state(state)
-}
-
-struct AppState {
-    client: Client,
 }
 
 /// Parse JSON body once and return both the model_name and the modified body bytes
@@ -311,7 +340,6 @@ fn handle_models_request() -> axum::response::Response {
 
 /// Handle all incoming proxy requests
 async fn proxy_handler(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     method: axum::http::Method,
     uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
@@ -431,8 +459,9 @@ async fn proxy_handler(
     let body_bytes: axum::body::Bytes = body_bytes.into();
 
     // Try forwarding the request with key rotation
+    let client = PROXY_CLIENT.read().unwrap().clone();
     let result = forward_with_retry(
-        &state.client,
+        client,
         &method,
         &target_url,
         &headers,
@@ -593,7 +622,7 @@ fn list_active_key_ids(platform_id: &str) -> Vec<String> {
 /// Forward request with automatic key rotation on 429/500.
 /// Tracks quota per (model_id, key_id).
 async fn forward_with_retry(
-    client: &Client,
+    client: Client,
     method: &axum::http::Method,
     target_url: &url::Url,
     original_headers: &axum::http::HeaderMap,

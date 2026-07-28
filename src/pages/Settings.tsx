@@ -1,6 +1,6 @@
 import { version } from '../../package.json';
 import { useState, useEffect } from 'react';
-import { Save, RefreshCw, Server, Globe } from 'lucide-react';
+import { Save, RefreshCw, Server, Globe, Shield } from 'lucide-react';
 import CodexIntegration from '../components/settings/CodexIntegration';
 import { request as invoke } from '../utils/request';
 import { useConfigStore } from '../stores/useConfigStore';
@@ -13,6 +13,7 @@ function Settings() {
   const [portInput, setPortInput] = useState('8080');
   const [hostInput, setHostInput] = useState('127.0.0.1');
   const [autoSwitch, setAutoSwitch] = useState(true);
+  const [proxyUrlInput, setProxyUrlInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [portError, setPortError] = useState('');
 
@@ -21,6 +22,7 @@ function Settings() {
       setPortInput(String(config.proxy_port ?? 8080));
       setHostInput(config.proxy_host ?? '127.0.0.1');
       setAutoSwitch(config.auto_switch ?? true);
+      setProxyUrlInput(config.upstream_proxy_url ?? '');
     }
   }, [config]);
 
@@ -44,6 +46,9 @@ function Settings() {
 
       // Save host
       await invoke('set_proxy_host', { host: hostInput });
+
+      // Save upstream proxy URL
+      await invoke('set_upstream_proxy_url', { proxyUrl: proxyUrlInput.trim() || null });
 
       // Load updated config from backend
       loadConfig();
@@ -126,6 +131,36 @@ function Settings() {
                 />
                 <div className="w-9 h-5 bg-gray-200 dark:bg-base-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-500" />
               </label>
+            </div>
+          </div>
+        </div>
+
+        {/* Upstream Proxy Settings */}
+        <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
+          <div className="flex items-center gap-2 mb-4">
+            <Shield className="w-4 h-4 text-green-500" />
+            <h2 className="font-semibold text-gray-900 dark:text-base-content">
+              上游代理 / Upstream Proxy
+            </h2>
+          </div>
+          <div className="space-y-4">
+            {/* Upstream Proxy URL */}
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="text-sm text-gray-600 dark:text-gray-400">代理地址 / Proxy URL</label>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  代理服务器发出的请求通过此地址转发。留空则直连，不需要重启代理，保存后立即生效
+                </p>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <input
+                  type="text"
+                  className="w-52 px-3 py-1.5 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:outline-none focus:ring-2 focus:ring-blue-500 border-gray-200 dark:border-base-300 font-mono"
+                  value={proxyUrlInput}
+                  onChange={(e) => { setProxyUrlInput(e.target.value); }}
+                  placeholder="http://127.0.0.1:7890"
+                />
+              </div>
             </div>
           </div>
         </div>

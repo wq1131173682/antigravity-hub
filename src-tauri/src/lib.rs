@@ -31,6 +31,8 @@ pub fn run() {
             if let Ok(cfg) = modules::config::load_app_config() {
                 modules::proxy::init_proxy_port(cfg.proxy_port);
                 modules::proxy::init_proxy_host(cfg.proxy_host);
+                // Initialize proxy client with upstream proxy URL (if configured)
+                modules::proxy::init_proxy_client(cfg.upstream_proxy_url);
             }
 
             // Start background scheduler for cleanup
@@ -152,6 +154,8 @@ pub fn run() {
             commands::start_proxy,
             commands::stop_proxy,
             commands::get_proxy_status,
+            commands::set_upstream_proxy_url,
+            commands::get_upstream_proxy_url,
             // Config
             commands::load_config,
             commands::save_config,
