@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use tracing::info;
 
 /// Codex CLI configuration directory and file constants
@@ -57,6 +57,50 @@ fn backup_path() -> PathBuf {
     path
 }
 
+/// Check whether the parsed TOML config points to Antigravity Hub.
+/// Looks for a `model_providers.<path_prefix>.base_url` that contains
+/// "127.0.0.1" or "localhost" with the proxy port, or a top-level
+/// `model_provider` that references a custom provider via the presence
+/// of a local proxy URL in the config.
+fn is_antigravity_config(config: &toml::Table) -> bool {
+    // Check top-level model_provider is set to a non-standard value
+    if let Some(provider) = config.get("model_provider").and_then(|v| v.as_str()) {
+        if provider != "openai" && provider != "anthropic" && provider != "google" {
+            // Check if there's a model_providers section with this provider
+            if let Some(providers) = config.get("model_providers").and_then(|v| v.as_table()) {
+                if let Some(provider_entry) = providers.get(provider).and_then(|v| v.as_table()) {
+                    if let Some(base_url) = provider_entry.get("base_url").and_then(|v| v.as_str()) {
+                        if base_url.contains("127.0.0.1") || base_url.contains("localhost") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Validate proxy configuration parameters.
+fn validate_params(proxy_host: &str, proxy_port: u16, path_prefix: &str, model_name: &str) -> Result<(), String> {
+    if proxy_host.is_empty() {
+        return Err("Proxy host cannot be empty".to_string());
+    }
+    if proxy_port == 0 {
+        return Err("Proxy port must be between 1 and 65535".to_string());
+    }
+    if path_prefix.is_empty() {
+        return Err("Path prefix cannot be empty".to_string());
+    }
+    if path_prefix.contains('/') || path_prefix.contains('\\') || path_prefix.contains(' ') {
+        return Err("Path prefix must not contain slashes, backslashes, or spaces".to_string());
+    }
+    if model_name.is_empty() {
+        return Err("Model name cannot be empty".to_string());
+    }
+    Ok(())
+}
+
 // ── Public API ──
 
 /// Check Codex CLI installation status and current configuration.
@@ -73,8 +117,10 @@ pub fn check_codex_status() -> CodexStatus {
         match std::fs::read_to_string(&cfg_path) {
             Ok(content) => {
                 let preview = Some(content.chars().take(500).collect::<String>());
-                let is_ag = content.contains("antigravity") || content.contains("Antigravity")
-                    || content.contains("model_providers");
+                let is_ag = content.parse::<toml::Table>()
+                    .ok()
+                    .map(|table| is_antigravity_config(&table))
+                    .unwrap_or(false);
                 (preview, is_ag)
             }
             Err(_) => (None, false),
@@ -88,23 +134,12 @@ pub fn check_codex_status() -> CodexStatus {
         config_path: if config_exists {
             Some(cfg_path.to_string_lossy().to_string())
         } else {
-            Some(cfg_path.to_string_lossy().to_string())
+            None
         },
         has_backup,
         current_config_preview,
         is_antigravity_configured,
     }
-}
-
-/// Read the current config.toml content as a string.
-pub fn read_codex_config() -> Result<Option<String>, String> {
-    let path = config_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-    std::fs::read_to_string(&path)
-        .map(Some)
-        .map_err(|e| format!("Failed to read Codex config: {}", e))
 }
 
 /// Backup existing config.toml to {config}.antigravity.bak
@@ -120,7 +155,7 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
     Ok(Some(dst.to_string_lossy().to_string()))
 }
 
-/// Write Antigravity Hub proxy configuration to Codex CLI's config.toml.
+/// Write Antigravity Hub proxy configuration to Codex CLI'"'"'s config.toml.
 ///
 /// Uses a custom provider entry in `[model_providers.<path_prefix>]` with
 /// `base_url` pointing to the Antigravity Hub proxy. Sets
@@ -139,13 +174,15 @@ pub fn apply_codex_config(
     path_prefix: &str,
     model_name: &str,
 ) -> Result<ApplyResult, String> {
+    // ── Input validation ──
+    validate_params(proxy_host, proxy_port, path_prefix, model_name)?;
+
     let codex_dir = resolve_codex_home();
 
     // Ensure ~/.codex/ directory exists
     if !codex_dir.exists() {
         std::fs::create_dir_all(&codex_dir)
-            .map_err(|e| format!("Failed to create Codex directory {:?}: {}", codex_dir, e))?;
-        info!("Created Codex directory: {:?}", codex_dir);
+            .map_err(|e| format!("Failed to create Codex directory: {}", e))?;
     }
 
     let cfg_path = config_path();
