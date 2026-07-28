@@ -233,7 +233,8 @@ preferred_auth_method = "apikey"
 
 [model_providers.${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}]
 name = "${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}"
-base_url = "http://${config?.proxy_host || '127.0.0.1'}:${config?.proxy_port || 8045}/${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}/v1"
+base_url = "http://127.0.0.1:${config?.proxy_port || 8045}/${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}/v1"
+env_key = "${((platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai').toUpperCase()}_API_KEY"
 wire_api = "responses"`}
           </pre>
           {/* Context Size Indicator */}

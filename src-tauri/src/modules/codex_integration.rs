@@ -222,12 +222,15 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
 /// can display the correct context size for each model.
 ///
 /// # Arguments
-/// * `proxy_host` - Proxy host (e.g., "127.0.0.1")
+/// * `proxy_host` - Ignored; always uses 127.0.0.1 for the Codex base URL
+///                   (proxy_host is the bind address, e.g. 0.0.0.0, but Codex
+///                   Desktop must connect via localhost).
 /// * `proxy_port` - Proxy port (e.g., 8045)
 /// * `path_prefix` - Platform path prefix for routing (e.g., "sensenova", "openai")
 /// * `model_name` - The model ID to set as default (e.g., "claude-sonnet-4-6-thinking")
 /// * `model_max_input_tokens` - Context window size for the selected model (e.g., 1048576 for 1M)
 /// * `all_platform_models` - All models for this platform, used to populate the model catalog
+#[allow(unused_variables)]
 pub fn apply_codex_config(
     proxy_host: &str,
     proxy_port: u16,
@@ -273,9 +276,11 @@ pub fn apply_codex_config(
         .unwrap_or_default();
 
     // Build the proxy base URL
+    // Always use 127.0.0.1 for the Codex base URL — proxy_host is the bind
+    // address (e.g. 0.0.0.0), but Codex Desktop must connect via localhost.
     // Codex CLI appends /v1/responses internally — the proxy handles the
     // Responses API ↔ Chat Completions translation transparently.
-    let proxy_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
+    let proxy_base_url = format!("http://127.0.0.1:{}/{}/v1", proxy_port, path_prefix);
 
     // ── Write model catalog JSON ──
     // Create the model-catalogs directory
@@ -342,6 +347,14 @@ pub fn apply_codex_config(
             provider_table.insert(
                 "base_url".to_string(),
                 toml::Value::String(proxy_base_url.clone()),
+            );
+            // env_key tells Codex Desktop which environment variable holds
+            // the API key.  Without this, ChatGPT/Codex Desktop may crash on
+            // startup.  The user sets this env var to their proxy API key.
+            let env_key_name = format!("{}_API_KEY", path_prefix.to_uppercase());
+            provider_table.insert(
+                "env_key".to_string(),
+                toml::Value::String(env_key_name),
             );
             provider_table.insert(
                 "wire_api".to_string(),
