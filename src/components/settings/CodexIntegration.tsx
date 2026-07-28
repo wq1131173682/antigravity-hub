@@ -185,19 +185,30 @@ export default function CodexIntegration() {
             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">
               {t('codex.select_model')}
             </label>
-            <select
-              className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-emerald-500 outline-none border-gray-200 dark:border-base-300"
-              value={selectedModelName}
-              onChange={(e) => setSelectedModelName(e.target.value)}
-            >
-              {modelsLoading && <option value="" disabled>{t('common.loading')}</option>}
-              {!modelsLoading && platformModels.length === 0 && (
-                <option value="" disabled>{t('codex.no_models')}</option>
-              )}
-              {!modelsLoading && platformModels.map((m) => (
-                <option key={m.id} value={m.model_name}>{m.display_name || m.model_name}</option>
-              ))}
-            </select>
+            {modelsLoading ? (
+              <select className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-emerald-500 outline-none border-gray-200 dark:border-base-300" disabled>
+                <option>{t('common.loading')}</option>
+              </select>
+            ) : platformModels.length > 0 ? (
+              <select
+                className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-emerald-500 outline-none border-gray-200 dark:border-base-300"
+                value={selectedModelName}
+                onChange={(e) => setSelectedModelName(e.target.value)}
+              >
+                <option value="">{t('codex.select_model')}...</option>
+                {platformModels.map((m) => (
+                  <option key={m.id} value={m.model_name}>{m.display_name || m.model_name}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-emerald-500 outline-none border-gray-200 dark:border-base-300 font-mono"
+                value={selectedModelName}
+                onChange={(e) => setSelectedModelName(e.target.value)}
+                placeholder="gpt-4o"
+              />
+            )}
           </div>
         </div>
 
