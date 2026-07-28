@@ -9,7 +9,7 @@ import * as codexService from '../services/codexService';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  Terminal, X
+  Terminal, X, RefreshCw
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -23,10 +23,11 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
   const [limit5h, setLimit5h] = useState('10000');
   const [limitDay, setLimitDay] = useState('50000');
   const [limitMonth, setLimitMonth] = useState('1000000');
+  const [maxInputTokens, setMaxInputTokens] = useState('1048576');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) { setModelName(''); setDisplayName(''); setLimit5h('10000'); setLimitDay('50000'); setLimitMonth('1000000'); }
+    if (open) { setModelName(''); setDisplayName(''); setLimit5h('10000'); setLimitDay('50000'); setLimitMonth('1000000'); setMaxInputTokens('1048576'); }
   }, [open]);
 
   const handleSave = async () => {
@@ -34,7 +35,8 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
     setSaving(true);
     try {
       await addModel(platformId, modelName.trim(), displayName.trim() || modelName.trim(),
-        Number(limit5h), Number(limitDay), Number(limitMonth));
+        Number(limit5h), Number(limitDay), Number(limitMonth),
+        maxInputTokens.trim() ? Number(maxInputTokens) : null);
       showToast(t('common.success'), 'success');
       onClose();
     } catch (e) {
@@ -73,6 +75,12 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
               <input type="number" min="0" className="w-full px-2 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={limitMonth} onChange={e => setLimitMonth(e.target.value)} />
             </div>
           </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens, 留空不设置)</span>
+            </label>
+            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+          </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
           <button className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-base-300 rounded-lg transition-colors" onClick={onClose}>{t('common.cancel')}</button>
@@ -92,6 +100,7 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
   const [limit5h, setLimit5h] = useState('0');
   const [limitDay, setLimitDay] = useState('0');
   const [limitMonth, setLimitMonth] = useState('0');
+  const [maxInputTokens, setMaxInputTokens] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -99,6 +108,7 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
       setLimit5h(String(model.per_5hour ?? 0));
       setLimitDay(String(model.per_day ?? 0));
       setLimitMonth(String(model.per_month ?? 0));
+      setMaxInputTokens(model.max_input_tokens ? String(model.max_input_tokens) : '');
     }
   }, [open, model]);
 
@@ -106,7 +116,8 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
     if (!model) return;
     setSaving(true);
     try {
-      await updateModelLimits(model.id, Number(limit5h), Number(limitDay), Number(limitMonth));
+      await updateModelLimits(model.id, Number(limit5h), Number(limitDay), Number(limitMonth),
+        maxInputTokens.trim() ? Number(maxInputTokens) : null);
       showToast(t('common.success'), 'success');
       onClose();
     } catch (e) {
@@ -136,6 +147,12 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
               <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('quota.per_month')}</label>
               <input type="number" min="0" className="w-full px-2 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={limitMonth} onChange={e => setLimitMonth(e.target.value)} />
             </div>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens, 留空不设置)</span>
+            </label>
+            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
@@ -295,7 +312,8 @@ function Accounts() {
     platforms, keys, models, modelUsage, modelKeyIds,
     fetchPlatforms, fetchKeys, fetchModels, fetchModelUsage,
     deletePlatform, deleteKey, setKeyStatus,
-    deleteModel, disassociateKeyFromModel
+    deleteModel, disassociateKeyFromModel,
+    refreshModelsFromUpstream
   } = usePlatformStore();
   const [selectedPlatformId, setSelectedPlatformId] = useState<string | null>(null);
   const [showAddPlatform, setShowAddPlatform] = useState(false);
@@ -427,6 +445,22 @@ function Accounts() {
                 </button>
                 <button className="px-3 py-1.5 bg-blue-500 text-white text-xs font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm" onClick={() => setShowAddModel(true)}>
                   <Layers className="w-3.5 h-3.5" /> {t('accounts.add_model')}
+                </button>
+                <button className="px-3 py-1.5 bg-emerald-500 text-white text-xs font-medium rounded-lg hover:bg-emerald-600 transition-colors flex items-center gap-1.5 shadow-sm" onClick={async () => {
+                  if (!selectedPlatformId) return;
+                  try {
+                    showToast('正在从上游获取模型信息...', 'info');
+                    const updated = await refreshModelsFromUpstream(selectedPlatformId);
+                    if (updated.length > 0) {
+                      showToast(`已更新 ${updated.length} 个模型的上下文大小: ${updated.join(', ')}`, 'success');
+                    } else {
+                      showToast('未从上游获取到新的上下文大小信息', 'info');
+                    }
+                  } catch (e) {
+                    showToast(`从上游获取模型信息失败: ${e}`, 'error');
+                  }
+                }}>
+                  <RefreshCw className="w-3.5 h-3.5" /> 从上游同步
                 </button>
               </div>
             </div>

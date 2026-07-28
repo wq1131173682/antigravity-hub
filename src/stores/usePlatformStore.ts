@@ -26,9 +26,10 @@ interface PlatformState {
 
   // Models
   fetchModels: (platformId: string) => Promise<Model[]>;
-  addModel: (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number) => Promise<void>;
-  updateModelLimits: (modelId: string, per5hour: number, perDay: number, perMonth: number) => Promise<void>;
+  addModel: (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null) => Promise<void>;
+  updateModelLimits: (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null) => Promise<void>;
   deleteModel: (platformId: string, modelId: string) => Promise<void>;
+  refreshModelsFromUpstream: (platformId: string) => Promise<string[]>;
 
   // Model Usage
   fetchModelUsage: (modelId: string) => Promise<void>;
@@ -163,10 +164,10 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     }
   },
 
-  addModel: async (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number) => {
+  addModel: async (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null) => {
     set({ loading: true, error: null });
     try {
-      await platformService.addModel(platformId, modelName, displayName, per5hour, perDay, perMonth);
+      await platformService.addModel(platformId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens);
       await get().fetchModels(platformId);
       set({ loading: false });
     } catch (e) {
@@ -175,9 +176,9 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     }
   },
 
-  updateModelLimits: async (modelId: string, per5hour: number, perDay: number, perMonth: number) => {
+  updateModelLimits: async (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null) => {
     try {
-      await platformService.updateModel(modelId, undefined, undefined, per5hour, perDay, perMonth);
+      await platformService.updateModel(modelId, undefined, undefined, per5hour, perDay, perMonth, maxInputTokens);
       // Refresh all platforms' models to get updated state
       const { platforms, models } = get();
       for (const p of platforms) {
@@ -196,6 +197,18 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     try {
       await platformService.deleteModel(modelId);
       await get().fetchModels(platformId);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  refreshModelsFromUpstream: async (platformId: string) => {
+    try {
+      const updated = await platformService.refreshModelsFromUpstream(platformId);
+      // Refresh models list after update
+      await get().fetchModels(platformId);
+      return updated;
     } catch (e) {
       set({ error: String(e) });
       throw e;

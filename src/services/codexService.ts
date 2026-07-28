@@ -24,12 +24,16 @@ export async function applyCodexConfig(
   proxyPort: number,
   pathPrefix: string,
   modelName: string,
+  modelMaxInputTokens?: number | null,
+  platformId?: string,
 ): Promise<ApplyResult> {
   return await invoke('apply_codex_config', {
     proxyHost,
     proxyPort,
     pathPrefix,
     modelName,
+    modelMaxInputTokens: modelMaxInputTokens ?? null,
+    platformId: platformId ?? '',
   });
 }
 

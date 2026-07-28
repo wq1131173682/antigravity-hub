@@ -24,6 +24,9 @@ pub struct Model {
     pub sort_order: i32,
     /// Created at (unix timestamp)
     pub created_at: i64,
+    /// Maximum input tokens (context window size), e.g. 1048576 for 1M
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
 }
 
 fn default_5hour() -> u32 { 3000 }
@@ -42,6 +45,7 @@ impl Model {
             per_month: default_month(),
             sort_order: 0,
             created_at: chrono::Utc::now().timestamp(),
+            max_input_tokens: None,
         }
     }
 }

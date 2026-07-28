@@ -22,6 +22,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'add_model': { url: '/api/platforms/:platformId/models', method: 'POST' },
   'update_model': { url: '/api/models/:modelId', method: 'PATCH' },
   'delete_model': { url: '/api/models/:modelId', method: 'DELETE' },
+  'refresh_models_from_upstream': { url: '/api/platforms/:platformId/models/refresh', method: 'POST' },
 
   // Key-Model Association
   'get_keys_for_model': { url: '/api/models/:modelId/keys', method: 'GET' },

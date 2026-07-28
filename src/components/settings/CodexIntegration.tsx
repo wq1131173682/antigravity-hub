@@ -61,11 +61,16 @@ export default function CodexIntegration() {
     }
   }, [t]);
 
+  const platformModels = selectedPlatformId ? (models[selectedPlatformId] || []) : [];
+
   const handleApply = useCallback(async () => {
     if (!selectedModelName || !config) return;
 
     const selectedPlatform = platforms.find(p => p.id === selectedPlatformId);
     const pathPrefix = selectedPlatform?.path_prefix || 'openai';
+
+    // Find the selected model to get max_input_tokens
+    const selectedModel = platformModels.find(m => m.model_name === selectedModelName);
 
     setStatus('applying');
     setResult(null);
@@ -75,6 +80,8 @@ export default function CodexIntegration() {
         config.proxy_port || 8045,
         pathPrefix,
         selectedModelName,
+        selectedModel?.max_input_tokens,
+        selectedPlatformId,
       );
       setResult(res);
       setStatus('success');
@@ -86,7 +93,7 @@ export default function CodexIntegration() {
       showToast(`${t('common.error')}: ${e}`, 'error');
       setStatus('error');
     }
-  }, [selectedModelName, config, platforms, selectedPlatformId, t]);
+  }, [selectedModelName, config, platforms, selectedPlatformId, t, platformModels]);
 
   const handleRestore = useCallback(async () => {
     setStatus('applying');
@@ -103,8 +110,6 @@ export default function CodexIntegration() {
       setStatus('error');
     }
   }, [t]);
-
-  const platformModels = selectedPlatformId ? (models[selectedPlatformId] || []) : [];
 
   return (
     <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
@@ -222,6 +227,7 @@ export default function CodexIntegration() {
           </div>
           <pre className="text-xs font-mono text-gray-600 dark:text-gray-400 leading-relaxed whitespace-pre-wrap">
 {`model = "${selectedModelName || '<model>'}"
+model_catalog_json = "~/.codex/model-catalogs/${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}.json"
 model_provider = "${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}"
 preferred_auth_method = "apikey"
 
@@ -230,6 +236,23 @@ name = "${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'op
 base_url = "http://${config?.proxy_host || '127.0.0.1'}:${config?.proxy_port || 8045}/${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}/v1"
 wire_api = "responses"`}
           </pre>
+          {/* Context Size Indicator */}
+          {(() => {
+            const selectedModel = platformModels.find(m => m.model_name === selectedModelName);
+            if (!selectedModel?.max_input_tokens) return null;
+            const ctx = selectedModel.max_input_tokens;
+            const ctxK = Math.round(ctx / 1024);
+            const ctxM = ctx >= 1048576 ? `${(ctx / 1048576).toFixed(0)}M` : null;
+            return (
+              <div className="mt-2 flex items-center gap-2 text-xs">
+                <span className="text-gray-400">上下文 / Context:</span>
+                <span className="font-mono text-emerald-600 dark:text-emerald-400 font-medium">
+                  {ctxM || `${ctxK}K`} ({ctx.toLocaleString()} tokens)
+                </span>
+                <span className="text-gray-400">→ model-catalog.json</span>
+              </div>
+            );
+          })()}
         </div>
 
         {/* Action Buttons */}

@@ -1,6 +1,5 @@
 use std::fs;
 use serde_json;
-use tracing::info;
 
 use crate::models::AppConfig;
 use super::platform_manager;

@@ -101,6 +101,59 @@ fn validate_params(proxy_host: &str, proxy_port: u16, path_prefix: &str, model_n
     Ok(())
 }
 
+/// Model catalog entry for Codex model-catalog JSON.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ModelCatalogEntry {
+    slug: String,
+    display_name: String,
+    description: String,
+    visibility: String,
+    supported_in_api: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_context_window_percent: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_compact_token_limit: Option<u64>,
+    input_modalities: Vec<String>,
+    supports_parallel_tool_calls: bool,
+    supports_search_tool: bool,
+    supports_reasoning_summaries: bool,
+    truncation_policy: serde_json::Value,
+    priority: u32,
+}
+
+impl ModelCatalogEntry {
+    fn from_model(model: &crate::models::Model) -> Self {
+        let ctx = model.max_input_tokens;
+        Self {
+            slug: model.model_name.clone(),
+            display_name: model.display_name.clone(),
+            description: format!("Antigravity Hub / {}", model.display_name),
+            visibility: "list".to_string(),
+            supported_in_api: true,
+            context_window: ctx,
+            max_context_window: ctx,
+            effective_context_window_percent: ctx.map(|_| 95),
+            auto_compact_token_limit: ctx.map(|c| c / 5),
+            input_modalities: vec!["text".to_string(), "image".to_string()],
+            supports_parallel_tool_calls: true,
+            supports_search_tool: true,
+            supports_reasoning_summaries: true,
+            truncation_policy: serde_json::json!({"mode": "tokens", "limit": 10000}),
+            priority: 10,
+        }
+    }
+}
+
+/// Model catalog file (JSON format matching Codex Desktop's model-catalog).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ModelCatalog {
+    models: Vec<ModelCatalogEntry>,
+}
+
 // ── Public API ──
 
 /// Check Codex CLI installation status and current configuration.
@@ -163,16 +216,25 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
 /// (stored in auth.json) instead of ChatGPT login — this avoids the
 /// "cannot open ChatGPT" issue when using a proxy endpoint.
 ///
+/// Also writes a model catalog JSON file (model-catalog format) with
+/// `context_window` and `max_context_window` from the model's config,
+/// and sets `model_catalog_json` in config.toml so Codex Desktop/CLI
+/// can display the correct context size for each model.
+///
 /// # Arguments
 /// * `proxy_host` - Proxy host (e.g., "127.0.0.1")
 /// * `proxy_port` - Proxy port (e.g., 8045)
 /// * `path_prefix` - Platform path prefix for routing (e.g., "sensenova", "openai")
 /// * `model_name` - The model ID to set as default (e.g., "claude-sonnet-4-6-thinking")
+/// * `model_max_input_tokens` - Context window size for the selected model (e.g., 1048576 for 1M)
+/// * `all_platform_models` - All models for this platform, used to populate the model catalog
 pub fn apply_codex_config(
     proxy_host: &str,
     proxy_port: u16,
     path_prefix: &str,
     model_name: &str,
+    model_max_input_tokens: Option<u64>,
+    all_platform_models: Vec<crate::models::Model>,
 ) -> Result<ApplyResult, String> {
     // ── Input validation ──
     validate_params(proxy_host, proxy_port, path_prefix, model_name)?;
@@ -215,10 +277,38 @@ pub fn apply_codex_config(
     // Responses API ↔ Chat Completions translation transparently.
     let proxy_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
 
+    // ── Write model catalog JSON ──
+    // Create the model-catalogs directory
+    let catalog_dir = codex_dir.join("model-catalogs");
+    if !catalog_dir.exists() {
+        std::fs::create_dir_all(&catalog_dir)
+            .map_err(|e| format!("Failed to create model-catalogs directory: {}", e))?;
+    }
+
+    // Build catalog entries from all platform models
+    let catalog_entries: Vec<ModelCatalogEntry> = all_platform_models
+        .iter()
+        .map(|m| ModelCatalogEntry::from_model(m))
+        .collect();
+
+    let catalog = ModelCatalog {
+        models: catalog_entries,
+    };
+
+    let catalog_json = serde_json::to_string_pretty(&catalog)
+        .map_err(|e| format!("Failed to serialize model catalog: {}", e))?;
+
+    let catalog_path = catalog_dir.join(format!("{}.json", path_prefix));
+    std::fs::write(&catalog_path, &catalog_json)
+        .map_err(|e| format!("Failed to write model catalog: {}", e))?;
+
+    info!("Wrote model catalog to {:?} with {} models", catalog_path, all_platform_models.len());
+
     // ── Set top-level keys ──
-    // Use the path_prefix as the provider name (custom provider, not built-in
-    // "openai"). This avoids the ChatGPT login flow — Codex CLI will use
-    // API Key auth instead.
+    config.insert(
+        "model_catalog_json".to_string(),
+        toml::Value::String(catalog_path.to_string_lossy().to_string()),
+    );
     config.insert(
         "model_provider".to_string(),
         toml::Value::String(path_prefix.to_string()),
@@ -264,13 +354,21 @@ pub fn apply_codex_config(
     let output = toml::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Codex config: {}", e))?;
 
-    // Add a header comment
+    // Add a header comment with context size info
+    let ctx_info = match model_max_input_tokens {
+        Some(n) => format!("Context window: {} tokens ({}K)", n, n / 1024),
+        None => "Context window: not configured".to_string(),
+    };
     let final_content = format!(
         "# Codex CLI Configuration\n\
          # Managed by Antigravity Hub\n\
          # Applied at: {}\n\
+         # {}\n\
+         # Model catalog: {}\n\
          # To revert, delete this file or restore the backup.\n\n{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        ctx_info,
+        catalog_path.display(),
         output
     );
 
@@ -282,20 +380,26 @@ pub fn apply_codex_config(
         .map_err(|e| format!("Failed to finalize Codex config: {}", e))?;
 
     info!(
-        "Codex config applied: model_provider={}, model={}, base_url={}, path={:?}",
-        path_prefix, model_name, proxy_base_url, cfg_path
+        "Codex config applied: model_provider={}, model={}, base_url={}, catalog={:?}, path={:?}",
+        path_prefix, model_name, proxy_base_url, catalog_path, cfg_path
     );
+
+    let mut message = format!(
+        "Configuration applied successfully!\n\
+         Provider: {}\n\
+         Model: {}\n\
+         Base URL: {}\n\
+         Config: {}\n\
+         Model catalog: {}",
+        path_prefix, model_name, proxy_base_url, cfg_path.display(), catalog_path.display()
+    );
+    if let Some(ctx) = model_max_input_tokens {
+        message.push_str(&format!("\nContext window: {} ({}K)", ctx, ctx / 1024));
+    }
 
     Ok(ApplyResult {
         success: true,
-        message: format!(
-            "Configuration applied successfully!\n\
-             Provider: {}\n\
-             Model: {}\n\
-             Base URL: {}\n\
-             Config: {}",
-            path_prefix, model_name, proxy_base_url, cfg_path.display()
-        ),
+        message,
         config_path: cfg_path.to_string_lossy().to_string(),
         backup_path: backup_path_str,
     })

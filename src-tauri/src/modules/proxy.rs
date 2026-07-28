@@ -298,12 +298,16 @@ fn handle_models_request() -> axum::response::Response {
                     Ok(models) => {
                         info!("handle_models_request: platform '{}' has {} models", platform.id, models.len());
                         for model in &models {
-                            data.push(serde_json::json!({
+                            let mut entry = serde_json::json!({
                                 "id": model.model_name,
                                 "object": "model",
                                 "created": model.created_at,
                                 "owned_by": platform.id,
-                            }));
+                            });
+                            if let Some(ctx) = model.max_input_tokens {
+                                entry["max_input_tokens"] = serde_json::json!(ctx);
+                            }
+                            data.push(entry);
                         }
                     }
                     Err(e) => {
@@ -335,6 +339,94 @@ fn handle_models_request() -> axum::response::Response {
         .unwrap_or_else(|_| {
             axum::response::Response::new(axum::body::Body::from("{\"error\":\"internal error\"}"))
         })
+}
+
+
+/// Fetch model information from the upstream API for a given platform.
+/// Calls the upstream `/v1/models` endpoint and parses `max_input_tokens` for each model.
+/// Updates the local model config with the fetched info.
+/// Returns the list of models that were updated.
+pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<Vec<String>, String> {
+    use crate::modules::config;
+    use crate::modules::keystore;
+    use crate::modules::model_manager;
+
+    // Load platform info
+    let cfg = config::load_app_config()?;
+    let platform = cfg.platforms.iter()
+        .find(|p| p.id == platform_id)
+        .ok_or_else(|| format!("Platform not found: {}", platform_id))?;
+
+    // Get an active API key
+    let keys = keystore::list_keys(platform_id)?;
+    let active_key = keys.iter()
+        .find(|k| k.is_active())
+        .map(|k| k.key_value.clone())
+        .ok_or_else(|| "No active API keys available for this platform".to_string())?;
+
+    // Build the upstream URL
+    let upstream_url = format!("{}/models", platform.base_url.trim_end_matches('/'));
+
+    info!("Fetching model info from upstream: {}", upstream_url);
+
+    let client = PROXY_CLIENT.read().unwrap().clone();
+    let resp = client.get(&upstream_url)
+        .header("Authorization", format!("Bearer {}", active_key))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch model info from upstream: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Upstream returned HTTP {} for /v1/models", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Failed to parse upstream response: {}", e))?;
+
+    // Parse the model list from the upstream response
+    let upstream_models = body.get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| "Upstream response missing 'data' array".to_string())?;
+
+    let mut updated: Vec<String> = Vec::new();
+
+    // Get local models for this platform
+    let local_models = model_manager::list_models(platform_id)?;
+
+    for upstream_model in upstream_models {
+        let model_id = upstream_model.get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Try to extract max_input_tokens from various field names
+        let max_input_tokens = upstream_model.get("max_input_tokens")
+            .or_else(|| upstream_model.get("max_input_length"))
+            .or_else(|| upstream_model.get("context_window"))
+            .or_else(|| upstream_model.get("max_context_length"))
+            .and_then(|v| v.as_u64());
+
+        if let Some(ctx) = max_input_tokens {
+            // Find matching local model by model_name
+            if let Some(local) = local_models.iter().find(|m| m.model_name == model_id) {
+                if local.max_input_tokens != Some(ctx) {
+                    model_manager::update_model(
+                        &local.id, None, None, None, None, None,
+                        Some(Some(ctx)),
+                    )?;
+                    updated.push(local.model_name.clone());
+                    info!("Updated model '{}' max_input_tokens to {}", local.model_name, ctx);
+                }
+            }
+        }
+    }
+
+    if updated.is_empty() {
+        info!("No models updated for platform '{}' (upstream returned {} models, {} local models)",
+            platform_id, upstream_models.len(), local_models.len());
+    }
+
+    Ok(updated)
 }
 
 

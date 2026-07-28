@@ -46,8 +46,9 @@ export async function addModel(
   per5hour?: number,
   perDay?: number,
   perMonth?: number,
+  maxInputTokens?: number | null,
 ): Promise<Model> {
-  return await invoke('add_model', { platformId, modelName, displayName, per5hour, perDay, perMonth });
+  return await invoke('add_model', { platformId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens });
 }
 
 export async function updateModel(
@@ -57,12 +58,18 @@ export async function updateModel(
   per5hour?: number,
   perDay?: number,
   perMonth?: number,
+  maxInputTokens?: number | null,
 ): Promise<Model> {
-  return await invoke('update_model', { modelId, modelName, displayName, per5hour, perDay, perMonth });
+  return await invoke('update_model', { modelId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens });
 }
 
 export async function deleteModel(modelId: string): Promise<void> {
   return await invoke('delete_model', { modelId });
+}
+
+/** Fetch model info from the upstream API and update local model config. Returns updated model names. */
+export async function refreshModelsFromUpstream(platformId: string): Promise<string[]> {
+  return await invoke('refresh_models_from_upstream', { platformId });
 }
 
 // ============================================================================

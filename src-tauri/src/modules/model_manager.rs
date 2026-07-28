@@ -58,12 +58,14 @@ pub fn add_model(
     per_5hour: Option<u32>,
     per_day: Option<u32>,
     per_month: Option<u32>,
+    max_input_tokens: Option<u64>,
 ) -> Result<Model, String> {
     let mut store = load_store()?;
     let mut model = Model::new(platform_id, model_name, display_name);
     if let Some(v) = per_5hour { model.per_5hour = v; }
     if let Some(v) = per_day { model.per_day = v; }
     if let Some(v) = per_month { model.per_month = v; }
+    model.max_input_tokens = max_input_tokens;
     model.sort_order = store.models.len() as i32;
     store.models.push(model.clone());
     save_store(&store)?;
@@ -78,6 +80,7 @@ pub fn update_model(
     per_5hour: Option<u32>,
     per_day: Option<u32>,
     per_month: Option<u32>,
+    max_input_tokens: Option<Option<u64>>,
 ) -> Result<Model, String> {
     let mut store = load_store()?;
     let model = store.models.iter_mut()
@@ -89,6 +92,7 @@ pub fn update_model(
     if let Some(v) = per_5hour { model.per_5hour = v; }
     if let Some(v) = per_day { model.per_day = v; }
     if let Some(v) = per_month { model.per_month = v; }
+    if let Some(v) = max_input_tokens { model.max_input_tokens = v; }
 
     let result = model.clone();
     save_store(&store)?;

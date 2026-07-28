@@ -23,6 +23,7 @@ export interface Model {
   per_month: number;
   sort_order: number;
   created_at: number;
+  max_input_tokens?: number | null;
 }
 
 export interface ApiKey {
