@@ -1,4 +1,5 @@
-﻿import { useState, useEffect } from 'react';
+import { version } from '../../package.json';
+import { useState, useEffect } from 'react';
 import { Save, RefreshCw, Server, Globe } from 'lucide-react';
 import CodexIntegration from '../components/settings/CodexIntegration';
 import { request as invoke } from '../utils/request';
@@ -183,7 +184,7 @@ function Settings() {
             {t('settings.about.title')}
           </h2>
           <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1">
-            <p>{t('settings.about.version')}: 5.1.7</p>
+            <p>{t('settings.about.version')}: {version}</p>
           </div>
         </div>
 
