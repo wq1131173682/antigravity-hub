@@ -102,6 +102,7 @@ fn validate_params(proxy_host: &str, proxy_port: u16, path_prefix: &str, model_n
 }
 
 /// Model catalog entry for Codex model-catalog JSON.
+/// Matches the format from the Codex Desktop configuration guide.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ModelCatalogEntry {
     slug: String,
@@ -118,9 +119,17 @@ struct ModelCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_compact_token_limit: Option<u64>,
     input_modalities: Vec<String>,
+    supports_image_detail_original: bool,
     supports_parallel_tool_calls: bool,
     supports_search_tool: bool,
+    web_search_tool_type: String,
+    apply_patch_tool_type: String,
+    shell_type: String,
     supports_reasoning_summaries: bool,
+    default_reasoning_summary: String,
+    default_reasoning_level: String,
+    support_verbosity: bool,
+    default_verbosity: String,
     truncation_policy: serde_json::Value,
     priority: u32,
 }
@@ -139,9 +148,17 @@ impl ModelCatalogEntry {
             effective_context_window_percent: ctx.map(|_| 95),
             auto_compact_token_limit: ctx.map(|c| c / 5),
             input_modalities: vec!["text".to_string(), "image".to_string()],
+            supports_image_detail_original: true,
             supports_parallel_tool_calls: true,
             supports_search_tool: true,
+            web_search_tool_type: "text_and_image".to_string(),
+            apply_patch_tool_type: "freeform".to_string(),
+            shell_type: "shell_command".to_string(),
             supports_reasoning_summaries: true,
+            default_reasoning_summary: "auto".to_string(),
+            default_reasoning_level: "medium".to_string(),
+            support_verbosity: true,
+            default_verbosity: "low".to_string(),
             truncation_policy: serde_json::json!({"mode": "tokens", "limit": 10000}),
             priority: 10,
         }
@@ -310,9 +327,13 @@ pub fn apply_codex_config(
     info!("Wrote model catalog to {:?} with {} models", catalog_path, all_platform_models.len());
 
     // ── Set top-level keys ──
+    // Use forward slashes for the path — TOML backslash escaping on Windows
+    // causes issues with Codex Desktop's parser.  Forward slashes work on all
+    // platforms including Windows.
+    let catalog_path_str = catalog_path.to_string_lossy().replace('\\', "/");
     config.insert(
         "model_catalog_json".to_string(),
-        toml::Value::String(catalog_path.to_string_lossy().to_string()),
+        toml::Value::String(catalog_path_str),
     );
     config.insert(
         "model_provider".to_string(),
