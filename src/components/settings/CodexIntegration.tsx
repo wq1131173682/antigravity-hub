@@ -81,7 +81,14 @@ export default function CodexIntegration() {
   }, [t]);
 
   const handleApply = useCallback(async () => {
-    if (!selectedModelName || !config) return;
+    if (!selectedModelName) {
+      showToast(t('codex.select_model_first'), 'warning');
+      return;
+    }
+    if (!config) {
+      showToast(t('codex.config_not_loaded'), 'warning');
+      return;
+    }
 
     const selectedPlatform = platforms.find(p => p.id === selectedPlatformId);
     const pathPrefix = selectedPlatform?.path_prefix || 'openai';

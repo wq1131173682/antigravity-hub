@@ -1456,6 +1456,8 @@
         "restore_success": "Codex CLI configuration restored from backup successfully!",
         "apply_to_codex": "Apply to Codex CLI",
         "apply_success": "Codex CLI configuration applied successfully!",
+        "select_model_first": "Please select a model first.",
+        "config_not_loaded": "Configuration not loaded. Please try again later.",
         "advanced_options": "Advanced Options",
         "reasoning_effort": "Reasoning Effort",
         "reasoning_default": "Default (Model Default)",

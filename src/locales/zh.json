@@ -1421,6 +1421,8 @@
         "restore_success": "Codex CLI 配置已从备份恢复成功！",
         "apply_to_codex": "应用至 Codex CLI",
         "apply_success": "Codex CLI 配置已应用成功！",
+        "select_model_first": "请先选择模型。",
+        "config_not_loaded": "配置未加载，请稍后重试。",
         "advanced_options": "高级选项",
         "reasoning_effort": "推理力度",
         "reasoning_default": "默认（模型默认）",
