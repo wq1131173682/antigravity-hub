@@ -77,8 +77,9 @@ pub async fn add_model(
     per_5hour: Option<u32>,
     per_day: Option<u32>,
     per_month: Option<u32>,
+    max_input_tokens: Option<u64>,
 ) -> Result<Model, String> {
-    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month)
+    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens)
 }
 
 /// Update a model
@@ -90,8 +91,9 @@ pub async fn update_model(
     per_5hour: Option<u32>,
     per_day: Option<u32>,
     per_month: Option<u32>,
+    max_input_tokens: Option<Option<u64>>,
 ) -> Result<Model, String> {
-    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month)
+    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens)
 }
 
 /// Delete a model
@@ -478,6 +480,12 @@ pub async fn apply_codex_config(
 #[tauri::command]
 pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
     crate::modules::codex_integration::restore_codex_config()
+}
+
+/// Refresh models from upstream API for a given platform
+#[tauri::command]
+pub async fn refresh_models_from_upstream(platform_id: String) -> Result<Vec<String>, String> {
+    modules::proxy::refresh_models_from_upstream(&platform_id).await
 }
 
 /// Clear Codex CLI OAuth data (auth.json + sqlite/)

@@ -452,7 +452,6 @@ pub fn clear_codex_auth() -> Result<ApplyResult, String> {
 /// - `OPENAI_ORG_ID` set → May cause routing issues
 /// - `CODEX_HOME` set → Changes where Codex looks for config
 pub fn check_codex_env_conflicts() -> EnvConflictResult {
-    let vars = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "CODEX_HOME"];
     let mut messages = Vec::new();
 
     let has_openai_api_key = if let Ok(val) = std::env::var("OPENAI_API_KEY") {
