@@ -327,13 +327,22 @@ pub fn apply_codex_config(
     info!("Wrote model catalog to {:?} with {} models", catalog_path, all_platform_models.len());
 
     // ── Set top-level keys ──
-    // Use ~/.codex/ relative path — Codex Desktop/CLI expands ~ to the
-    // user's home directory.  Absolute paths (especially Windows paths with
-    // backslashes) cause TOML parsing and cross-platform issues.
-    let catalog_rel_path = format!("~/.codex/model-catalogs/{}.json", path_prefix);
+    // Use the absolute path to the model catalog JSON file.
+    //
+    // Codex Desktop expects `model_catalog_json` to be a path that can be
+    // resolved to a file on disk. On Windows, Codex Desktop does NOT expand
+    // `~` or `~/.codex/` — it needs the full absolute Windows path.
+    //
+    // Ref: https://www.cnblogs.com/surenkid/p/20037840
+    //   Windows: model_catalog_json = 'C:\Users\<用户名>\.codex\model-catalogs\all-models.json'
+    //   macOS/Linux: model_catalog_json = "~/.codex/model-catalogs/all-models.json"
+    //
+    // The `toml` crate's serializer will escape backslashes in basic strings,
+    // producing valid TOML like: "C:\\Users\\11311\\.codex\\model-catalogs\\agnes.json"
+    let catalog_abs_path = catalog_path.to_string_lossy().to_string();
     config.insert(
         "model_catalog_json".to_string(),
-        toml::Value::String(catalog_rel_path),
+        toml::Value::String(catalog_abs_path),
     );
     config.insert(
         "model_provider".to_string(),

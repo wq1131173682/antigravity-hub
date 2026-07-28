@@ -236,6 +236,8 @@ name = "${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'op
 base_url = "http://127.0.0.1:${config?.proxy_port || 8045}/${(platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai'}/v1"
 env_key = "${((platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai').toUpperCase()}_API_KEY"
 wire_api = "responses"`}
+{/* Note: model_catalog_json is resolved to the absolute path on Windows
+    (e.g., C:\\Users\\<username>\\.codex\\model-catalogs\\<prefix>.json) */}
           </pre>
           {/* Context Size Indicator */}
           {(() => {
