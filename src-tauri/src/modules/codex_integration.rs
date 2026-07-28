@@ -68,22 +68,14 @@ fn backup_path() -> PathBuf {
 }
 
 /// Check whether the parsed TOML config points to Antigravity Hub.
-/// Looks for a `model_providers.<path_prefix>.base_url` that contains
-/// "127.0.0.1" or "localhost" with the proxy port, or a top-level
-/// `model_provider` that references a custom provider via the presence
-/// of a local proxy URL in the config.
+/// Looks for a `model_providers.custom.base_url` that contains
+/// "127.0.0.1" or "localhost" with the proxy port.
 fn is_antigravity_config(config: &toml::Table) -> bool {
-    // Check top-level model_provider is set to a non-standard value
-    if let Some(provider) = config.get("model_provider").and_then(|v| v.as_str()) {
-        if provider != "openai" && provider != "anthropic" && provider != "google" {
-            // Check if there's a model_providers section with this provider
-            if let Some(providers) = config.get("model_providers").and_then(|v| v.as_table()) {
-                if let Some(provider_entry) = providers.get(provider).and_then(|v| v.as_table()) {
-                    if let Some(base_url) = provider_entry.get("base_url").and_then(|v| v.as_str()) {
-                        if base_url.contains("127.0.0.1") || base_url.contains("localhost") {
-                            return true;
-                        }
-                    }
+    if let Some(providers) = config.get("model_providers").and_then(|v| v.as_table()) {
+        if let Some(provider_entry) = providers.get("custom").and_then(|v| v.as_table()) {
+            if let Some(base_url) = provider_entry.get("base_url").and_then(|v| v.as_str()) {
+                if base_url.contains("127.0.0.1") || base_url.contains("localhost") {
+                    return true;
                 }
             }
         }
@@ -178,19 +170,21 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
     Ok(Some(dst.to_string_lossy().to_string()))
 }
 
-/// Write Antigravity Hub proxy configuration to Codex CLI'"'"'s config.toml.
+/// Write Antigravity Hub proxy configuration to Codex CLI's config.toml.
 ///
-/// Uses a custom provider entry in `[model_providers.<path_prefix>]` with
-/// `base_url` pointing to the Antigravity Hub proxy. Sets
-/// `preferred_auth_method = "apikey"` so Codex CLI uses API Key auth
-/// (stored in auth.json) instead of ChatGPT login — this avoids the
-/// "cannot open ChatGPT" issue when using a proxy endpoint.
+/// Uses a standard `[model_providers.custom]` entry with `base_url` pointing
+/// to the Antigravity Hub proxy. Always starts fresh — does NOT merge with
+/// existing config, so old provider sections from previous applies are cleared.
+///
+/// Sets `preferred_auth_method = "apikey"` so Codex CLI uses API Key auth
+/// instead of ChatGPT login — this avoids the "cannot open ChatGPT" issue
+/// when using a proxy endpoint.
 ///
 /// # Arguments
 /// * `proxy_host` - Proxy host (e.g., "127.0.0.1")
 /// * `proxy_port` - Proxy port (e.g., 8045)
 /// * `path_prefix` - Platform path prefix for routing (e.g., "sensenova", "openai")
-/// * `model_name` - The model ID to set as default (e.g., "claude-sonnet-4-6-thinking")
+/// * `model_name` - The model ID to set as default (e.g., "gpt-4o")
 pub fn apply_codex_config(
     proxy_host: &str,
     proxy_port: u16,
@@ -225,17 +219,9 @@ pub fn apply_codex_config(
         None
     };
 
-    // Parse existing config to preserve all settings
-    let existing_content = if cfg_path.exists() {
-        std::fs::read_to_string(&cfg_path).ok()
-    } else {
-        None
-    };
-
-    let mut config: toml::Table = existing_content
-        .as_deref()
-        .and_then(|c| c.parse::<toml::Table>().ok())
-        .unwrap_or_default();
+    // ── Start fresh: create a new empty config (do NOT merge with existing) ──
+    // This ensures old provider sections from previous applies are cleared.
+    let mut config = toml::Table::new();
 
     // Build the proxy base URL
     // Codex CLI appends /v1/responses internally — the proxy handles the
@@ -243,12 +229,13 @@ pub fn apply_codex_config(
     let proxy_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
 
     // ── Set top-level keys ──
-    // Use the path_prefix as the provider name (custom provider, not built-in
-    // "openai"). This avoids the ChatGPT login flow — Codex CLI will use
-    // API Key auth instead.
+    // Use "custom" as the standard provider name (per Codex CLI blog recommendation).
+    // This avoids the ChatGPT login flow — Codex CLI will use API Key auth instead.
+    // The provider name is always "custom" regardless of which platform is selected,
+    // so re-applying for a different platform cleanly replaces the old config.
     config.insert(
         "model_provider".to_string(),
-        toml::Value::String(path_prefix.to_string()),
+        toml::Value::String("custom".to_string()),
     );
     config.insert(
         "model".to_string(),
@@ -275,47 +262,46 @@ pub fn apply_codex_config(
         );
     }
 
-    // ── Update [model_providers.<path_prefix>] section ──
-    // Define the custom provider with base_url pointing to the proxy.
-    // Codex CLI requires: name, base_url, wire_api = "responses".
-    let model_providers = config
-        .entry("model_providers".to_string())
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-
-    if let Some(providers_table) = model_providers.as_table_mut() {
-        let provider = providers_table
-            .entry(path_prefix.to_string())
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-
-        if let Some(provider_table) = provider.as_table_mut() {
+    // ── [model_providers.custom] section ──
+    // Always use "custom" as the provider key name. The base_URL includes the
+    // path_prefix so requests are correctly routed to the right platform.
+    let mut provider_table = toml::Table::new();
+    provider_table.insert(
+        "name".to_string(),
+        toml::Value::String("custom".to_string()),
+    );
+    provider_table.insert(
+        "base_url".to_string(),
+        toml::Value::String(proxy_base_url.clone()),
+    );
+    provider_table.insert(
+        "wire_api".to_string(),
+        toml::Value::String("responses".to_string()),
+    );
+    // CRITICAL: Prevents Codex CLI from trying OpenAI OAuth authentication
+    provider_table.insert(
+        "requires_openai_auth".to_string(),
+        toml::Value::Boolean(false),
+    );
+    // Optional: inject API key directly into provider config
+    if let Some(key) = api_key {
+        if !key.is_empty() {
             provider_table.insert(
-                "name".to_string(),
-                toml::Value::String(path_prefix.to_string()),
+                "api_key".to_string(),
+                toml::Value::String(key.to_string()),
             );
-            provider_table.insert(
-                "base_url".to_string(),
-                toml::Value::String(proxy_base_url.clone()),
-            );
-            provider_table.insert(
-                "wire_api".to_string(),
-                toml::Value::String("responses".to_string()),
-            );
-            // CRITICAL: Prevents Codex CLI from trying OpenAI OAuth authentication
-            provider_table.insert(
-                "requires_openai_auth".to_string(),
-                toml::Value::Boolean(false),
-            );
-            // Optional: inject API key directly into provider config
-            if let Some(key) = api_key {
-                if !key.is_empty() {
-                    provider_table.insert(
-                        "api_key".to_string(),
-                        toml::Value::String(key.to_string()),
-                    );
-                }
-            }
         }
     }
+
+    let mut model_providers = toml::Table::new();
+    model_providers.insert(
+        "custom".to_string(),
+        toml::Value::Table(provider_table),
+    );
+    config.insert(
+        "model_providers".to_string(),
+        toml::Value::Table(model_providers),
+    );
 
     // Serialize and write
     let output = toml::to_string_pretty(&config)
@@ -339,19 +325,19 @@ pub fn apply_codex_config(
         .map_err(|e| format!("Failed to finalize Codex config: {}", e))?;
 
     info!(
-        "Codex config applied: model_provider={}, model={}, reasoning_effort={:?}, disable_storage={:?}, has_api_key={}, base_url={}, path={:?}",
-        path_prefix, model_name, reasoning_effort, disable_response_storage, api_key.is_some(), proxy_base_url, cfg_path
+        "Codex config applied: model_provider=custom, model={}, path_prefix={}, reasoning_effort={:?}, disable_storage={:?}, base_url={}, path={:?}",
+        model_name, path_prefix, reasoning_effort, disable_response_storage, proxy_base_url, cfg_path
     );
 
     Ok(ApplyResult {
         success: true,
         message: format!(
-            "Configuration applied successfully!\n\
-             Provider: {}\n\
+            "Codex CLI configuration applied!\n\
+             Provider: custom (routed via /{}/)\n\
              Model: {}\n\
              Reasoning Effort: {}\n\
              Base URL: {}\n\
-             Config: {}",
+             File: {}",
             path_prefix,
             model_name,
             reasoning_effort.unwrap_or("default"),

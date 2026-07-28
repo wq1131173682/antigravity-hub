@@ -372,14 +372,14 @@ export default function CodexIntegration() {
 {(() => {
   const lines = [
     'model = "' + (selectedModelName || '<model>') + '"',
-    'model_provider = "' + pathPrefix + '"',
+    'model_provider = "custom"',
     'preferred_auth_method = "apikey"',
   ];
   if (disableResponseStorage) lines.push('disable_response_storage = true');
   if (reasoningEffort) lines.push('model_reasoning_effort = "' + reasoningEffort + '"');
   lines.push('');
-  lines.push('[model_providers.' + pathPrefix + ']');
-  lines.push('name = "' + pathPrefix + '"');
+  lines.push('[model_providers.custom]');
+  lines.push('name = "custom"');
   lines.push('base_url = "http://' + (config?.proxy_host || '127.0.0.1') + ':' + (config?.proxy_port || 8045) + '/' + pathPrefix + '/v1"');
   lines.push('wire_api = "responses"');
   lines.push('requires_openai_auth = false');
