@@ -342,11 +342,26 @@ fn handle_models_request() -> axum::response::Response {
 }
 
 
+/// Result of refreshing models from upstream
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshModelsResult {
+    pub updated: Vec<String>,
+    pub created: Vec<String>,
+    pub total_upstream: usize,
+    pub total_local_before: usize,
+    pub message: String,
+}
+
 /// Fetch model information from the upstream API for a given platform.
-/// Calls the upstream `/v1/models` endpoint and parses `max_input_tokens` for each model.
-/// Updates the local model config with the fetched info.
-/// Returns the list of models that were updated.
-pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<Vec<String>, String> {
+/// Calls the upstream `/v1/models` (or `/models`) endpoint, parses
+/// `max_input_tokens` / context window for each model, auto-creates new
+/// models that exist upstream but not locally, and updates context size
+/// for existing ones.
+///
+/// Supports multiple URL patterns:
+///   1. `{base_url}/v1/models` (OpenAI-compatible)
+///   2. `{base_url}/models` (fallback)
+pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshModelsResult, String> {
     use crate::modules::config;
     use crate::modules::keystore;
     use crate::modules::model_manager;
@@ -362,71 +377,272 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<Vec<Strin
     let active_key = keys.iter()
         .find(|k| k.is_active())
         .map(|k| k.key_value.clone())
-        .ok_or_else(|| "No active API keys available for this platform".to_string())?;
+        .ok_or_else(|| format!(
+            "No active API keys available for platform '{}'. Please add at least one active API key first.",
+            platform.name
+        ))?;
 
-    // Build the upstream URL
-    let upstream_url = format!("{}/models", platform.base_url.trim_end_matches('/'));
+    let base_url = platform.base_url.trim_end_matches('/').to_string();
 
-    info!("Fetching model info from upstream: {}", upstream_url);
+    // Try multiple URL patterns — some providers use /v1/models, others /models
+    let url_candidates = vec![
+        format!("{}/v1/models", base_url),
+        format!("{}/models", base_url),
+    ];
 
     let client = PROXY_CLIENT.read().unwrap().clone();
-    let resp = client.get(&upstream_url)
-        .header("Authorization", format!("Bearer {}", active_key))
-        .header("Content-Type", "application/json")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch model info from upstream: {}", e))?;
+    let mut last_error = String::new();
+    let mut body: Option<serde_json::Value> = None;
 
-    if !resp.status().is_success() {
-        return Err(format!("Upstream returned HTTP {} for /v1/models", resp.status()));
+    for url in &url_candidates {
+        info!("Trying to fetch models from: {}", url);
+        match client.get(url)
+            .header("Authorization", format!("Bearer {}", active_key))
+            .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            body = Some(json);
+                            break;
+                        }
+                        Err(e) => {
+                            last_error = format!("{} returned valid HTTP but failed to parse JSON: {}", url, e);
+                        }
+                    }
+                } else {
+                    last_error = format!("{} returned HTTP {}", url, resp.status());
+                }
+            }
+            Err(e) => {
+                last_error = format!("{} connection failed: {}", url, e);
+            }
+        }
     }
 
-    let body: serde_json::Value = resp.json().await
-        .map_err(|e| format!("Failed to parse upstream response: {}", e))?;
+    let body = body.ok_or_else(|| {
+        format!(
+            "Failed to fetch models from upstream. Tried:\n  {}\nAll attempts failed. Last error: {}",
+            url_candidates.join("\n  "),
+            last_error
+        )
+    })?;
 
-    // Parse the model list from the upstream response
+    // Parse the model list from the upstream response — support multiple formats
     let upstream_models = body.get("data")
         .and_then(|d| d.as_array())
-        .ok_or_else(|| "Upstream response missing 'data' array".to_string())?;
+        .or_else(|| body.as_array().map(|a| a))
+        .ok_or_else(|| {
+            format!(
+                "Upstream response format not recognized. Expected {{\"data\": [...]}} or an array.\nFirst 200 chars: {}",
+                &serde_json::to_string(&body).unwrap_or_default().chars().take(200).collect::<String>()
+            )
+        })?;
 
     let mut updated: Vec<String> = Vec::new();
+    let mut created: Vec<String> = Vec::new();
+    let total_upstream = upstream_models.len();
 
     // Get local models for this platform
     let local_models = model_manager::list_models(platform_id)?;
+    let total_local_before = local_models.len();
 
     for upstream_model in upstream_models {
         let model_id = upstream_model.get("id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Try to extract max_input_tokens from various field names
+        if model_id.is_empty() {
+            continue;
+        }
+
+        // Try to extract context window from various field names
         let max_input_tokens = upstream_model.get("max_input_tokens")
             .or_else(|| upstream_model.get("max_input_length"))
             .or_else(|| upstream_model.get("context_window"))
             .or_else(|| upstream_model.get("max_context_length"))
             .and_then(|v| v.as_u64());
 
-        if let Some(ctx) = max_input_tokens {
-            // Find matching local model by model_name
-            if let Some(local) = local_models.iter().find(|m| m.model_name == model_id) {
+        // Find matching local model by model_name
+        if let Some(local) = local_models.iter().find(|m| m.model_name == model_id) {
+            // Update context size if it changed
+            if let Some(ctx) = max_input_tokens {
                 if local.max_input_tokens != Some(ctx) {
                     model_manager::update_model(
                         &local.id, None, None, None, None, None,
                         Some(Some(ctx)),
                     )?;
                     updated.push(local.model_name.clone());
-                    info!("Updated model '{}' max_input_tokens to {}", local.model_name, ctx);
+                    info!("Updated model '{}' max_input_tokens: {} → {}",
+                        local.model_name,
+                        local.max_input_tokens.map_or("none".to_string(), |v| v.to_string()),
+                        ctx
+                    );
                 }
             }
+        } else {
+            // Auto-create new model from upstream with reasonable defaults
+            let display_name = upstream_model.get("display_name")
+                .or_else(|| upstream_model.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(model_id)
+                .to_string();
+
+            let _ = model_manager::add_model(
+                platform_id.to_string(),
+                model_id.to_string(),
+                display_name,
+                Some(10000),  // per_5hour: default
+                Some(50000),  // per_day: default
+                Some(100000), // per_month: default
+                max_input_tokens,
+            );
+            created.push(model_id.to_string());
+            info!("Auto-created model '{}' from upstream (context: {:?})", model_id, max_input_tokens);
         }
     }
 
-    if updated.is_empty() {
-        info!("No models updated for platform '{}' (upstream returned {} models, {} local models)",
-            platform_id, upstream_models.len(), local_models.len());
-    }
+    let message = {
+        let mut parts = Vec::new();
+        if !created.is_empty() {
+            parts.push(format!("Created {} new models: {}", created.len(), created.join(", ")));
+        }
+        if !updated.is_empty() {
+            parts.push(format!("Updated context size for {} models: {}", updated.len(), updated.join(", ")));
+        }
+        if created.is_empty() && updated.is_empty() {
+            parts.push(format!("All {} upstream models already in sync ({} local models)", total_upstream, total_local_before));
+        }
+        parts.join("\n")
+    };
 
-    Ok(updated)
+    Ok(RefreshModelsResult {
+        updated,
+        created,
+        total_upstream,
+        total_local_before,
+        message,
+    })
+}
+
+/// Test a model by sending a minimal chat completion request.
+/// Returns the model status (reachable, response time, etc.).
+#[derive(Debug, Clone, Serialize)]
+pub struct TestModelResult {
+    pub success: bool,
+    pub latency_ms: u64,
+    pub model_name: String,
+    pub message: String,
+}
+
+/// Send a minimal chat completion request to test if a model is working.
+/// Uses a short "Hi" prompt with max_tokens=1 for minimal cost.
+pub async fn test_model(
+    platform_id: &str,
+    model_name: &str,
+) -> Result<TestModelResult, String> {
+    use crate::modules::config;
+    use crate::modules::keystore;
+
+    let cfg = config::load_app_config()?;
+    let platform = cfg.platforms.iter()
+        .find(|p| p.id == platform_id)
+        .ok_or_else(|| format!("Platform not found: {}", platform_id))?;
+
+    // Get an active API key
+    let keys = keystore::list_keys(platform_id)?;
+    let active_key = keys.iter()
+        .find(|k| k.is_active())
+        .map(|k| k.key_value.clone())
+        .ok_or_else(|| format!(
+            "No active API keys available for platform '{}'. Please add at least one active API key first.",
+            platform.name
+        ))?;
+
+    let base_url = platform.base_url.trim_end_matches('/').to_string();
+    let url = format!("{}/v1/chat/completions", base_url);
+
+    let request_body = serde_json::json!({
+        "model": model_name,
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_tokens": 1,
+        "stream": false,
+    });
+
+    let client = PROXY_CLIENT.read().unwrap().clone();
+    let start = std::time::Instant::now();
+
+    let resp = client.post(&url)
+        .header("Authorization", format!("Bearer {}", active_key))
+        .header("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(30))
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let status = resp.status();
+
+    if status.is_success() {
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        let model_used = body.get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(model_name);
+
+        let finish = body.pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        Ok(TestModelResult {
+            success: true,
+            latency_ms,
+            model_name: model_used.to_string(),
+            message: format!(
+                "Model '{}' responded in {}ms (finish_reason: {})",
+                model_used, latency_ms, finish
+            ),
+        })
+    } else if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        Ok(TestModelResult {
+            success: false,
+            latency_ms,
+            model_name: model_name.to_string(),
+            message: format!(
+                "Authentication failed (HTTP {}). Check your API key.",
+                status.as_u16()
+            ),
+        })
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        Ok(TestModelResult {
+            success: false,
+            latency_ms,
+            model_name: model_name.to_string(),
+            message: format!(
+                "Model '{}' not found (HTTP 404). The model may not exist or is unavailable.",
+                model_name
+            ),
+        })
+    } else {
+        // Read error body for more details
+        let error_body = resp.text().await.unwrap_or_else(|_| "(unreadable)".to_string());
+        Ok(TestModelResult {
+            success: false,
+            latency_ms,
+            model_name: model_name.to_string(),
+            message: format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                error_body.chars().take(200).collect::<String>()
+            ),
+        })
+    }
 }
 
 

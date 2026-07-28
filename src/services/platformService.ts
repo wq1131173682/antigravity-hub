@@ -67,9 +67,29 @@ export async function deleteModel(modelId: string): Promise<void> {
   return await invoke('delete_model', { modelId });
 }
 
-/** Fetch model info from the upstream API and update local model config. Returns updated model names. */
-export async function refreshModelsFromUpstream(platformId: string): Promise<string[]> {
+export interface RefreshModelsResult {
+  updated: string[];
+  created: string[];
+  total_upstream: number;
+  total_local_before: number;
+  message: string;
+}
+
+export interface TestModelResult {
+  success: boolean;
+  latency_ms: number;
+  model_name: string;
+  message: string;
+}
+
+/** Fetch model info from the upstream API and update local model config. */
+export async function refreshModelsFromUpstream(platformId: string): Promise<RefreshModelsResult> {
   return await invoke('refresh_models_from_upstream', { platformId });
+}
+
+/** Test a model by sending a minimal chat completion request. */
+export async function testModel(platformId: string, modelName: string): Promise<TestModelResult> {
+  return await invoke('test_model', { platformId, modelName });
 }
 
 // ============================================================================

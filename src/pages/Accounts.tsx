@@ -3,13 +3,14 @@ import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
 import type { Model } from '../types/platform';
+import type { TestModelResult } from '../services/platformService';
 import { showToast } from '../components/common/ToastContainer';
 import ModalDialog from '../components/common/ModalDialog';
 import * as codexService from '../services/codexService';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  Terminal, X, RefreshCw
+  Terminal, X, RefreshCw, Wifi, Loader2
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -284,6 +285,50 @@ function AssignKeyDialog({ open, onClose, modelId, platformId }: { open: boolean
 }
 
 // ---------------------------------------------------------------------------
+// Test Model Button component
+// ---------------------------------------------------------------------------
+function TestModelButton({ platformId, modelName, displayName, testModel: testModelFn }: {
+  platformId: string | null;
+  modelName: string;
+  displayName: string;
+  testModel: (platformId: string, modelName: string) => Promise<TestModelResult>;
+}) {
+  const [testing, setTesting] = useState(false);
+
+  const handleTest = async () => {
+    if (!platformId || testing) return;
+    setTesting(true);
+    try {
+      const result = await testModelFn(platformId, modelName);
+      if (result.success) {
+        showToast(`✅ ${displayName}: ${result.latency_ms}ms - ${result.message}`, 'success');
+      } else {
+        showToast(`❌ ${displayName}: ${result.message}`, 'error');
+      }
+    } catch (e) {
+      showToast(`❌ ${displayName}: ${e}`, 'error');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <button
+      className={`p-1.5 rounded-lg transition-colors ${
+        testing
+          ? 'text-blue-400 bg-blue-50 dark:bg-blue-900/20'
+          : 'text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20'
+      }`}
+      onClick={handleTest}
+      disabled={testing}
+      title={`测试模型 ${displayName}`}
+    >
+      {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Quota bar component
 // ---------------------------------------------------------------------------
 function QuotaBar({ used, limit, label }: { used: number; limit: number; label: string }) {
@@ -313,7 +358,7 @@ function Accounts() {
     fetchPlatforms, fetchKeys, fetchModels, fetchModelUsage,
     deletePlatform, deleteKey, setKeyStatus,
     deleteModel, disassociateKeyFromModel,
-    refreshModelsFromUpstream
+    refreshModelsFromUpstream, testModel
   } = usePlatformStore();
   const [selectedPlatformId, setSelectedPlatformId] = useState<string | null>(null);
   const [showAddPlatform, setShowAddPlatform] = useState(false);
@@ -450,11 +495,15 @@ function Accounts() {
                   if (!selectedPlatformId) return;
                   try {
                     showToast('正在从上游获取模型信息...', 'info');
-                    const updated = await refreshModelsFromUpstream(selectedPlatformId);
-                    if (updated.length > 0) {
-                      showToast(`已更新 ${updated.length} 个模型的上下文大小: ${updated.join(', ')}`, 'success');
-                    } else {
-                      showToast('未从上游获取到新的上下文大小信息', 'info');
+                    const result = await refreshModelsFromUpstream(selectedPlatformId);
+                    if (result.created.length > 0) {
+                      showToast(`新建 ${result.created.length} 个模型: ${result.created.join(', ')}`, 'success');
+                    }
+                    if (result.updated.length > 0) {
+                      showToast(`更新 ${result.updated.length} 个模型: ${result.updated.join(', ')}`, 'success');
+                    }
+                    if (result.created.length === 0 && result.updated.length === 0) {
+                      showToast(`已同步，所有 ${result.total_upstream} 个上游模型已是最新状态`, 'info');
                     }
                   } catch (e) {
                     showToast(`从上游获取模型信息失败: ${e}`, 'error');
@@ -513,6 +562,12 @@ function Accounts() {
                             >
                               <Terminal className="w-3.5 h-3.5" />
                             </button>
+                            <TestModelButton
+                              platformId={selectedPlatformId}
+                              modelName={model.model_name}
+                              displayName={model.display_name || model.model_name}
+                              testModel={testModel}
+                            />
                             <button className="p-1.5 text-gray-400 hover:text-blue-500 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors" onClick={() => { setEditingModel(model); setShowEditQuota(true); }} title={t('accounts.edit_model_quotas')}>
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>

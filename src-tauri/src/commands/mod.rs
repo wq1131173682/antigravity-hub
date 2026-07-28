@@ -484,8 +484,14 @@ pub async fn restore_codex_config() -> Result<crate::modules::codex_integration:
 
 /// Refresh models from upstream API for a given platform
 #[tauri::command]
-pub async fn refresh_models_from_upstream(platform_id: String) -> Result<Vec<String>, String> {
+pub async fn refresh_models_from_upstream(platform_id: String) -> Result<crate::modules::proxy::RefreshModelsResult, String> {
     modules::proxy::refresh_models_from_upstream(&platform_id).await
+}
+
+/// Test a model by sending a minimal chat completion request
+#[tauri::command]
+pub async fn test_model(platform_id: String, model_name: String) -> Result<crate::modules::proxy::TestModelResult, String> {
+    modules::proxy::test_model(&platform_id, &model_name).await
 }
 
 /// Clear Codex CLI OAuth data (auth.json + sqlite/)

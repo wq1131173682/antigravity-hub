@@ -29,7 +29,8 @@ interface PlatformState {
   addModel: (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null) => Promise<void>;
   updateModelLimits: (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null) => Promise<void>;
   deleteModel: (platformId: string, modelId: string) => Promise<void>;
-  refreshModelsFromUpstream: (platformId: string) => Promise<string[]>;
+  refreshModelsFromUpstream: (platformId: string) => Promise<platformService.RefreshModelsResult>;
+  testModel: (platformId: string, modelName: string) => Promise<platformService.TestModelResult>;
 
   // Model Usage
   fetchModelUsage: (modelId: string) => Promise<void>;
@@ -205,10 +206,20 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
 
   refreshModelsFromUpstream: async (platformId: string) => {
     try {
-      const updated = await platformService.refreshModelsFromUpstream(platformId);
+      const result = await platformService.refreshModelsFromUpstream(platformId);
       // Refresh models list after update
       await get().fetchModels(platformId);
-      return updated;
+      return result;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  testModel: async (platformId: string, modelName: string) => {
+    try {
+      const result = await platformService.testModel(platformId, modelName);
+      return result;
     } catch (e) {
       set({ error: String(e) });
       throw e;

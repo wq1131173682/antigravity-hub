@@ -124,6 +124,7 @@ pub fn run() {
             commands::update_model,
             commands::delete_model,
             commands::refresh_models_from_upstream,
+            commands::test_model,
             // Key-Model associations
             commands::get_keys_for_model,
             commands::get_models_for_key,
