@@ -833,13 +833,34 @@ async fn forward_with_retry(
         // ── Responses API response translation ──
         // Translate the response body from Chat Completions format back to
         // Responses API format so Codex CLI can understand it.
+        // If translation fails, construct a proper Responses API error response
+        // instead of falling back to the raw Chat Completions format (which
+        // Codex CLI cannot parse).
         let body_bytes = if is_responses_api {
-            crate::modules::codex_translator::transform_chat_completions_to_responses(&body_bytes)
-                .map(|t| {
-                    info!("Responses API: response body translated ({} bytes → {} bytes)", body_bytes.len(), t.len());
-                    t.into()
-                })
-                .unwrap_or(body_bytes)
+            match crate::modules::codex_translator::transform_chat_completions_to_responses(&body_bytes) {
+                Some(translated) => {
+                    info!("Responses API: response body translated ({} bytes → {} bytes)", body_bytes.len(), translated.len());
+                    translated.into()
+                }
+                None => {
+                    // Translation failed — construct a proper Responses API error
+                    // instead of passing through raw Chat Completions format.
+                    warn!("Responses API: failed to translate upstream response, sending error to client");
+                    let error_response = serde_json::json!({
+                        "id": format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
+                        "object": "response",
+                        "created_at": chrono::Utc::now().timestamp(),
+                        "model": model_identifier,
+                        "status": "failed",
+                        "error": {
+                            "code": "response_translation_failed",
+                            "message": "Upstream returned an unparseable response. The provider may use an incompatible format."
+                        },
+                        "output": []
+                    });
+                    serde_json::to_vec(&error_response).unwrap_or_else(|_| body_bytes.to_vec()).into()
+                }
+            }
         } else {
             body_bytes
         };

@@ -1,5 +1,5 @@
-﻿use futures::StreamExt;
-use tracing::{info, warn};
+use futures::StreamExt;
+use tracing::{info, warn, error};
 
 // ── Responses API ↔ Chat Completions API translation ──
 // Codex CLI uses the OpenAI Responses API (/v1/responses), but most
@@ -431,6 +431,11 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
     Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
 }
 
+/// Maximum time (seconds) to wait for the first valid SSE chunk before
+/// forcing stream completion. Prevents hung streams when a non-standard
+/// upstream sends chunks that don't match the expected OpenAI SSE format.
+const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 30;
+
 /// Translate a Chat Completions streaming SSE response to Responses API SSE format.
 ///
 /// Reads SSE chunks from the upstream stream, translates each chunk on-the-fly,
@@ -509,15 +514,66 @@ pub fn transform_stream_to_responses(
             now,
         };
 
-        // ── Main stream processing loop ──
+        // ── Main stream processing loop with timeout ──
         futures::pin_mut!(upstream_stream);
 
-        while let Some(chunk_result) = upstream_stream.next().await {
+        loop {
+            // Apply a timeout: if the stream hasn't produced a valid "choices"
+            // chunk within STREAM_FIRST_CHUNK_TIMEOUT_SECS, force completion.
+            let timeout_duration = if st.has_sent_created {
+                // After first valid chunk, use a longer per-chunk timeout
+                std::time::Duration::from_secs(60)
+            } else {
+                std::time::Duration::from_secs(STREAM_FIRST_CHUNK_TIMEOUT_SECS)
+            };
+
+            let chunk_result = tokio::time::timeout(timeout_duration, upstream_stream.next()).await;
+
             let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
+                Ok(Some(Ok(c))) => c,
+                Ok(Some(Err(e))) => {
                     warn!("transform_stream_to_responses: upstream stream error: {}", e);
+                    // Emit error as a Responses API error event if we haven't completed
+                    if !st.is_completed {
+                        st.send_error_response(&emit_data_sse, &format!("Upstream stream error: {}", e));
+                    }
                     let _ = tx.send(Err(e)).await;
+                    break;
+                }
+                Ok(None) => {
+                    // Stream ended naturally
+                    if st.has_sent_created && !st.is_completed {
+                        info!("transform_stream: upstream stream ended naturally, flushing remaining events");
+                        st.flush_done_events(&emit_data_sse);
+                        st.send_completed(&emit_data_sse, &emit_raw);
+                    } else if !st.is_completed {
+                        // Stream ended before any valid chunk — this can happen
+                        // if the upstream returns an empty body (e.g., 204 No Content
+                        // disguised as a 200) or a non-SSE response.
+                        warn!("transform_stream: upstream stream ended without any valid data");
+                        st.send_completed(&emit_data_sse, &emit_raw);
+                    }
+                    break;
+                }
+                Err(_elapsed) => {
+                    // Timeout: no chunk received within the expected window.
+                    // This can happen if the upstream sends SSE in a non-standard
+                    // format that gets silently skipped by our parser, causing
+                    // the stream to "hang" from the client's perspective.
+                    if st.is_completed {
+                        break;
+                    }
+                    if !st.has_sent_created {
+                        warn!("transform_stream: timeout waiting for first valid chunk ({}s). Upstream may be using non-standard SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS);
+                        // Send a minimal error response so Codex CLI doesn't hang
+                        st.send_error_response(&emit_data_sse, &format!(
+                            "Upstream did not return a valid streaming response within {} seconds. The provider may use an unsupported SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS
+                        ));
+                    } else {
+                        warn!("transform_stream: timeout waiting for next chunk (60s), forcing completion");
+                        st.flush_done_events(&emit_data_sse);
+                        st.send_completed(&emit_data_sse, &emit_raw);
+                    }
                     break;
                 }
             };
@@ -532,7 +588,11 @@ pub fn transform_stream_to_responses(
                 }
                 let data = match line.strip_prefix("data: ") {
                     Some(d) => d.trim(),
-                    None => continue,
+                    None => {
+                        // Log non-SSE lines for debugging non-standard providers
+                        warn!("transform_stream: skipping non-SSE line (no 'data: ' prefix): {:.80}", line);
+                        continue;
+                    }
                 };
 
                 if data == "[DONE]" {
@@ -543,7 +603,10 @@ pub fn transform_stream_to_responses(
 
                 let json: serde_json::Value = match serde_json::from_str(data) {
                     Ok(j) => j,
-                    Err(_) => continue,
+                    Err(_) => {
+                        warn!("transform_stream: skipping non-JSON SSE data: {:.80}", data);
+                        continue;
+                    }
                 };
 
                 if st.response_id.is_empty() {
@@ -560,15 +623,41 @@ pub fn transform_stream_to_responses(
                     }
                 }
 
+                // ── Handle error chunks ──
+                // Some upstream providers send error responses in the SSE stream
+                // (e.g., {"error": {"message": "...", "code": ...}}) instead of
+                // standard choices. We translate these into a Responses API error.
+                let has_error = json.get("error").is_some();
+                if has_error {
+                    let error_msg = json.pointer("/error/message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown upstream error")
+                        .to_string();
+                    let error_code = json.pointer("/error/code")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("unknown");
+                    warn!("transform_stream: upstream error in SSE: [{}] {}", error_code, error_msg);
+                    if !st.is_completed {
+                        st.send_error_response(&emit_data_sse, &format!("Upstream error: {} (code: {})", error_msg, error_code));
+                    }
+                    continue;
+                }
+
                 let choices = match json.get("choices").and_then(|c| c.as_array()) {
                     Some(arr) => arr,
-                    None => continue,
+                    None => {
+                        warn!("transform_stream: skipping SSE chunk without 'choices' or 'error' field: {:.120}", data);
+                        continue;
+                    }
                 };
 
                 for choice in choices {
                     let delta = match choice.get("delta") {
                         Some(d) => d,
-                        None => continue,
+                        None => {
+                            warn!("transform_stream: skipping choice without 'delta' field");
+                            continue;
+                        }
                     };
                     let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
 
@@ -720,10 +809,18 @@ pub fn transform_stream_to_responses(
             }
         }
 
-        // ── Stream ended — flush if not yet completed ──
-        if st.has_sent_created && !st.is_completed {
-            st.flush_done_events(&emit_data_sse);
-            st.send_completed(&emit_data_sse, &emit_raw);
+        // ── Final safety net: ensure stream completion ──
+        if !st.is_completed {
+            if st.has_sent_created {
+                info!("transform_stream: final safety net — forcing stream completion");
+                st.flush_done_events(&emit_data_sse);
+                st.send_completed(&emit_data_sse, &emit_raw);
+            } else {
+                // Stream ended without ever sending "response.created".
+                // This means no valid chunks were recognized at all.
+                error!("transform_stream: stream ended without any valid SSE data (provider may use incompatible format)");
+                st.send_error_response(&emit_data_sse, "Upstream returned no valid streaming data. The provider may use an incompatible SSE format.");
+            }
         }
     });
 
@@ -759,6 +856,52 @@ pub struct StreamState {
 }
 
 impl StreamState {
+    fn send_error_response(&mut self, emit: &impl Fn(&serde_json::Value), error_message: &str) {
+        // Mark as completed first so no subsequent send_completed fires
+        self.is_completed = true;
+
+        // If we already sent response.created, don't send another one.
+        // Just emit a terminal error event to avoid confusing the client.
+        if self.has_sent_created {
+            emit(&serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": self.response_id,
+                    "object": "response",
+                    "created_at": self.now,
+                    "model": self.model_name,
+                    "status": "failed",
+                    "error": {
+                        "code": "proxy_upstream_error",
+                        "message": error_message
+                    }
+                }
+            }));
+            return;
+        }
+        let response_id = if self.response_id.is_empty() {
+            format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))
+        } else {
+            self.response_id.clone()
+        };
+        // No response.created was sent yet — send one with error status
+        emit(&serde_json::json!({
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "created_at": self.now,
+                "model": self.model_name,
+                "status": "failed",
+                "error": {
+                    "code": "proxy_upstream_error",
+                    "message": error_message
+                },
+                "output": []
+            }
+        }));
+    }
+
     fn flush_done_events(&mut self, emit: &impl Fn(&serde_json::Value)) {
         // Correct event order per Responses API spec:
         // 1. output_text.done → 2. content_part.done → 3. output_item.done
