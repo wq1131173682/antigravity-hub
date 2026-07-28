@@ -77,9 +77,8 @@ pub async fn add_model(
     per_5hour: Option<u32>,
     per_day: Option<u32>,
     per_month: Option<u32>,
-    max_input_tokens: Option<u64>,
 ) -> Result<Model, String> {
-    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens)
+    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month)
 }
 
 /// Update a model
@@ -91,9 +90,8 @@ pub async fn update_model(
     per_5hour: Option<u32>,
     per_day: Option<u32>,
     per_month: Option<u32>,
-    max_input_tokens: Option<Option<u64>>,
 ) -> Result<Model, String> {
-    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens)
+    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month)
 }
 
 /// Delete a model
@@ -102,13 +100,6 @@ pub async fn delete_model(model_id: String) -> Result<(), String> {
     let _ = modules::key_model_map::remove_model_associations(&model_id);
     let _ = modules::quota_window::remove_model_trackers(&model_id);
     modules::model_manager::delete_model(&model_id)
-}
-
-/// Fetch model info from the upstream API and update local model config.
-/// Returns the list of model names whose `max_input_tokens` were updated.
-#[tauri::command]
-pub async fn refresh_models_from_upstream(platform_id: String) -> Result<Vec<String>, String> {
-    modules::proxy::refresh_models_from_upstream(&platform_id).await
 }
 
 // ============================================================================
@@ -468,14 +459,18 @@ pub async fn apply_codex_config(
     proxy_port: u16,
     path_prefix: String,
     model_name: String,
-    model_max_input_tokens: Option<u64>,
-    platform_id: String,
+    reasoning_effort: Option<String>,
+    disable_response_storage: Option<bool>,
+    api_key: Option<String>,
 ) -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    // Load all models for this platform to populate the model catalog
-    let all_models = crate::modules::model_manager::list_models(&platform_id)?;
     crate::modules::codex_integration::apply_codex_config(
-        &proxy_host, proxy_port, &path_prefix, &model_name,
-        model_max_input_tokens, all_models,
+        &proxy_host,
+        proxy_port,
+        &path_prefix,
+        &model_name,
+        reasoning_effort.as_deref(),
+        disable_response_storage,
+        api_key.as_deref(),
     )
 }
 
@@ -483,6 +478,18 @@ pub async fn apply_codex_config(
 #[tauri::command]
 pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
     crate::modules::codex_integration::restore_codex_config()
+}
+
+/// Clear Codex CLI OAuth data (auth.json + sqlite/)
+#[tauri::command]
+pub async fn clear_codex_auth() -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    crate::modules::codex_integration::clear_codex_auth()
+}
+
+/// Check for Codex-related environment variable conflicts
+#[tauri::command]
+pub async fn check_codex_env_conflicts() -> Result<crate::modules::codex_integration::EnvConflictResult, String> {
+    Ok(crate::modules::codex_integration::check_codex_env_conflicts())
 }
 
 /// Get the primary LAN IP address (for displaying when proxy binds to 0.0.0.0)

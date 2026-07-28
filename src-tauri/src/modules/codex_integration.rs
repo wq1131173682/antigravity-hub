@@ -30,6 +30,16 @@ pub struct ApplyResult {
     pub backup_path: Option<String>,
 }
 
+/// Result of checking for environment variable conflicts
+#[derive(Debug, serde::Serialize)]
+pub struct EnvConflictResult {
+    pub has_openai_api_key: bool,
+    pub has_openai_base_url: bool,
+    pub has_openai_org_id: bool,
+    pub has_codex_home: bool,
+    pub messages: Vec<String>,
+}
+
 // ── Helpers ──
 
 /// Resolve the Codex CLI home directory.
@@ -101,74 +111,17 @@ fn validate_params(proxy_host: &str, proxy_port: u16, path_prefix: &str, model_n
     Ok(())
 }
 
-/// Model catalog entry for Codex model-catalog JSON.
-/// Matches the format from the Codex Desktop configuration guide.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ModelCatalogEntry {
-    slug: String,
-    display_name: String,
-    description: String,
-    visibility: String,
-    supported_in_api: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context_window: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_context_window: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    effective_context_window_percent: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    auto_compact_token_limit: Option<u64>,
-    input_modalities: Vec<String>,
-    supports_image_detail_original: bool,
-    supports_parallel_tool_calls: bool,
-    supports_search_tool: bool,
-    web_search_tool_type: String,
-    apply_patch_tool_type: String,
-    shell_type: String,
-    supports_reasoning_summaries: bool,
-    default_reasoning_summary: String,
-    default_reasoning_level: String,
-    support_verbosity: bool,
-    default_verbosity: String,
-    truncation_policy: serde_json::Value,
-    priority: u32,
-}
-
-impl ModelCatalogEntry {
-    fn from_model(model: &crate::models::Model) -> Self {
-        let ctx = model.max_input_tokens;
-        Self {
-            slug: model.model_name.clone(),
-            display_name: model.display_name.clone(),
-            description: format!("Antigravity Hub / {}", model.display_name),
-            visibility: "list".to_string(),
-            supported_in_api: true,
-            context_window: ctx,
-            max_context_window: ctx,
-            effective_context_window_percent: ctx.map(|_| 95),
-            auto_compact_token_limit: ctx.map(|c| c / 5),
-            input_modalities: vec!["text".to_string(), "image".to_string()],
-            supports_image_detail_original: true,
-            supports_parallel_tool_calls: true,
-            supports_search_tool: true,
-            web_search_tool_type: "text_and_image".to_string(),
-            apply_patch_tool_type: "freeform".to_string(),
-            shell_type: "shell_command".to_string(),
-            supports_reasoning_summaries: true,
-            default_reasoning_summary: "auto".to_string(),
-            default_reasoning_level: "medium".to_string(),
-            support_verbosity: true,
-            default_verbosity: "low".to_string(),
-            truncation_policy: serde_json::json!({"mode": "tokens", "limit": 10000}),
-            priority: 10,
+/// Validate optional model_reasoning_effort value.
+fn validate_reasoning_effort(effort: Option<&str>) -> Result<(), String> {
+    if let Some(e) = effort {
+        if e != "low" && e != "medium" && e != "high" {
+            return Err(format!(
+                "Invalid model_reasoning_effort '{}'. Must be one of: low, medium, high",
+                e
+            ));
         }
     }
-}
-
-/// Model catalog file (JSON format matching Codex Desktop's model-catalog).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ModelCatalog {
-    models: Vec<ModelCatalogEntry>,
+    Ok(())
 }
 
 // ── Public API ──
@@ -233,31 +186,23 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
 /// (stored in auth.json) instead of ChatGPT login — this avoids the
 /// "cannot open ChatGPT" issue when using a proxy endpoint.
 ///
-/// Also writes a model catalog JSON file (model-catalog format) with
-/// `context_window` and `max_context_window` from the model's config,
-/// and sets `model_catalog_json` in config.toml so Codex Desktop/CLI
-/// can display the correct context size for each model.
-///
 /// # Arguments
-/// * `proxy_host` - Ignored; always uses 127.0.0.1 for the Codex base URL
-///                   (proxy_host is the bind address, e.g. 0.0.0.0, but Codex
-///                   Desktop must connect via localhost).
+/// * `proxy_host` - Proxy host (e.g., "127.0.0.1")
 /// * `proxy_port` - Proxy port (e.g., 8045)
 /// * `path_prefix` - Platform path prefix for routing (e.g., "sensenova", "openai")
 /// * `model_name` - The model ID to set as default (e.g., "claude-sonnet-4-6-thinking")
-/// * `model_max_input_tokens` - Context window size for the selected model (e.g., 1048576 for 1M)
-/// * `all_platform_models` - All models for this platform, used to populate the model catalog
-#[allow(unused_variables)]
 pub fn apply_codex_config(
     proxy_host: &str,
     proxy_port: u16,
     path_prefix: &str,
     model_name: &str,
-    model_max_input_tokens: Option<u64>,
-    all_platform_models: Vec<crate::models::Model>,
+    reasoning_effort: Option<&str>,
+    disable_response_storage: Option<bool>,
+    api_key: Option<&str>,
 ) -> Result<ApplyResult, String> {
     // ── Input validation ──
     validate_params(proxy_host, proxy_port, path_prefix, model_name)?;
+    validate_reasoning_effort(reasoning_effort)?;
 
     let codex_dir = resolve_codex_home();
 
@@ -293,57 +238,14 @@ pub fn apply_codex_config(
         .unwrap_or_default();
 
     // Build the proxy base URL
-    // Always use 127.0.0.1 for the Codex base URL — proxy_host is the bind
-    // address (e.g. 0.0.0.0), but Codex Desktop must connect via localhost.
     // Codex CLI appends /v1/responses internally — the proxy handles the
     // Responses API ↔ Chat Completions translation transparently.
-    let proxy_base_url = format!("http://127.0.0.1:{}/{}/v1", proxy_port, path_prefix);
-
-    // ── Write model catalog JSON ──
-    // Create the model-catalogs directory
-    let catalog_dir = codex_dir.join("model-catalogs");
-    if !catalog_dir.exists() {
-        std::fs::create_dir_all(&catalog_dir)
-            .map_err(|e| format!("Failed to create model-catalogs directory: {}", e))?;
-    }
-
-    // Build catalog entries from all platform models
-    let catalog_entries: Vec<ModelCatalogEntry> = all_platform_models
-        .iter()
-        .map(|m| ModelCatalogEntry::from_model(m))
-        .collect();
-
-    let catalog = ModelCatalog {
-        models: catalog_entries,
-    };
-
-    let catalog_json = serde_json::to_string_pretty(&catalog)
-        .map_err(|e| format!("Failed to serialize model catalog: {}", e))?;
-
-    let catalog_path = catalog_dir.join(format!("{}.json", path_prefix));
-    std::fs::write(&catalog_path, &catalog_json)
-        .map_err(|e| format!("Failed to write model catalog: {}", e))?;
-
-    info!("Wrote model catalog to {:?} with {} models", catalog_path, all_platform_models.len());
+    let proxy_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
 
     // ── Set top-level keys ──
-    // Use the absolute path to the model catalog JSON file.
-    //
-    // Codex Desktop expects `model_catalog_json` to be a path that can be
-    // resolved to a file on disk. On Windows, Codex Desktop does NOT expand
-    // `~` or `~/.codex/` — it needs the full absolute Windows path.
-    //
-    // Ref: https://www.cnblogs.com/surenkid/p/20037840
-    //   Windows: model_catalog_json = 'C:\Users\<用户名>\.codex\model-catalogs\all-models.json'
-    //   macOS/Linux: model_catalog_json = "~/.codex/model-catalogs/all-models.json"
-    //
-    // The `toml` crate's serializer will escape backslashes in basic strings,
-    // producing valid TOML like: "C:\\Users\\11311\\.codex\\model-catalogs\\agnes.json"
-    let catalog_abs_path = catalog_path.to_string_lossy().to_string();
-    config.insert(
-        "model_catalog_json".to_string(),
-        toml::Value::String(catalog_abs_path),
-    );
+    // Use the path_prefix as the provider name (custom provider, not built-in
+    // "openai"). This avoids the ChatGPT login flow — Codex CLI will use
+    // API Key auth instead.
     config.insert(
         "model_provider".to_string(),
         toml::Value::String(path_prefix.to_string()),
@@ -356,6 +258,22 @@ pub fn apply_codex_config(
         "preferred_auth_method".to_string(),
         toml::Value::String("apikey".to_string()),
     );
+
+    // Set disable_response_storage (optional)
+    if let Some(val) = disable_response_storage {
+        config.insert(
+            "disable_response_storage".to_string(),
+            toml::Value::Boolean(val),
+        );
+    }
+
+    // Set model_reasoning_effort (optional)
+    if let Some(effort) = reasoning_effort {
+        config.insert(
+            "model_reasoning_effort".to_string(),
+            toml::Value::String(effort.to_string()),
+        );
+    }
 
     // ── Update [model_providers.<path_prefix>] section ──
     // Define the custom provider with base_url pointing to the proxy.
@@ -378,18 +296,24 @@ pub fn apply_codex_config(
                 "base_url".to_string(),
                 toml::Value::String(proxy_base_url.clone()),
             );
-            // env_key tells Codex Desktop which environment variable holds
-            // the API key.  Without this, ChatGPT/Codex Desktop may crash on
-            // startup.  The user sets this env var to their proxy API key.
-            let env_key_name = format!("{}_API_KEY", path_prefix.to_uppercase());
-            provider_table.insert(
-                "env_key".to_string(),
-                toml::Value::String(env_key_name),
-            );
             provider_table.insert(
                 "wire_api".to_string(),
                 toml::Value::String("responses".to_string()),
             );
+            // CRITICAL: Prevents Codex CLI from trying OpenAI OAuth authentication
+            provider_table.insert(
+                "requires_openai_auth".to_string(),
+                toml::Value::Boolean(false),
+            );
+            // Optional: inject API key directly into provider config
+            if let Some(key) = api_key {
+                if !key.is_empty() {
+                    provider_table.insert(
+                        "api_key".to_string(),
+                        toml::Value::String(key.to_string()),
+                    );
+                }
+            }
         }
     }
 
@@ -397,21 +321,13 @@ pub fn apply_codex_config(
     let output = toml::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Codex config: {}", e))?;
 
-    // Add a header comment with context size info
-    let ctx_info = match model_max_input_tokens {
-        Some(n) => format!("Context window: {} tokens ({}K)", n, n / 1024),
-        None => "Context window: not configured".to_string(),
-    };
+    // Add a header comment
     let final_content = format!(
         "# Codex CLI Configuration\n\
          # Managed by Antigravity Hub\n\
          # Applied at: {}\n\
-         # {}\n\
-         # Model catalog: {}\n\
          # To revert, delete this file or restore the backup.\n\n{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        ctx_info,
-        catalog_path.display(),
         output
     );
 
@@ -423,26 +339,25 @@ pub fn apply_codex_config(
         .map_err(|e| format!("Failed to finalize Codex config: {}", e))?;
 
     info!(
-        "Codex config applied: model_provider={}, model={}, base_url={}, catalog={:?}, path={:?}",
-        path_prefix, model_name, proxy_base_url, catalog_path, cfg_path
+        "Codex config applied: model_provider={}, model={}, reasoning_effort={:?}, disable_storage={:?}, has_api_key={}, base_url={}, path={:?}",
+        path_prefix, model_name, reasoning_effort, disable_response_storage, api_key.is_some(), proxy_base_url, cfg_path
     );
-
-    let mut message = format!(
-        "Configuration applied successfully!\n\
-         Provider: {}\n\
-         Model: {}\n\
-         Base URL: {}\n\
-         Config: {}\n\
-         Model catalog: {}",
-        path_prefix, model_name, proxy_base_url, cfg_path.display(), catalog_path.display()
-    );
-    if let Some(ctx) = model_max_input_tokens {
-        message.push_str(&format!("\nContext window: {} ({}K)", ctx, ctx / 1024));
-    }
 
     Ok(ApplyResult {
         success: true,
-        message,
+        message: format!(
+            "Configuration applied successfully!\n\
+             Provider: {}\n\
+             Model: {}\n\
+             Reasoning Effort: {}\n\
+             Base URL: {}\n\
+             Config: {}",
+            path_prefix,
+            model_name,
+            reasoning_effort.unwrap_or("default"),
+            proxy_base_url,
+            cfg_path.display()
+        ),
         config_path: cfg_path.to_string_lossy().to_string(),
         backup_path: backup_path_str,
     })
@@ -472,4 +387,127 @@ pub fn restore_codex_config() -> Result<ApplyResult, String> {
         config_path: cfg_path.to_string_lossy().to_string(),
         backup_path: None,
     })
+}
+
+/// Clear Codex CLI authentication data (auth.json and sqlite/ directory).
+/// This resolves OAuth conflicts that occur when Codex CLI has previously
+/// logged in with an OpenAI account — residual OAuth tokens can interfere
+/// with custom provider authentication.
+///
+/// After this, Codex CLI will use the API key from config.toml for auth.
+pub fn clear_codex_auth() -> Result<ApplyResult, String> {
+    let codex_home = resolve_codex_home();
+
+    if !codex_home.exists() {
+        return Err("Codex CLI directory not found. Nothing to clear.".to_string());
+    }
+
+    let mut cleared_items = Vec::new();
+
+    // Delete auth.json
+    let auth_path = codex_home.join("auth.json");
+    if auth_path.exists() {
+        std::fs::remove_file(&auth_path)
+            .map_err(|e| format!("Failed to delete auth.json: {}", e))?;
+        cleared_items.push(format!("Deleted {}", auth_path.display()));
+        info!("Codex auth file deleted: {:?}", auth_path);
+    }
+
+    // Delete sqlite/ directory (contains session data, OAuth tokens, etc.)
+    let sqlite_path = codex_home.join("sqlite");
+    if sqlite_path.exists() {
+        std::fs::remove_dir_all(&sqlite_path)
+            .map_err(|e| format!("Failed to delete sqlite directory: {}", e))?;
+        cleared_items.push(format!("Deleted {}", sqlite_path.display()));
+        info!("Codex sqlite directory deleted: {:?}", sqlite_path);
+    }
+
+    if cleared_items.is_empty() {
+        return Ok(ApplyResult {
+            success: true,
+            message: "No OAuth data found to clear. Config is clean.".to_string(),
+            config_path: config_path().to_string_lossy().to_string(),
+            backup_path: None,
+        });
+    }
+
+    let message = format!(
+        "Codex OAuth data cleared successfully!\n\nCleared:\n{}",
+        cleared_items.join("\n")
+    );
+
+    Ok(ApplyResult {
+        success: true,
+        message,
+        config_path: config_path().to_string_lossy().to_string(),
+        backup_path: None,
+    })
+}
+
+/// Check for environment variable conflicts that could interfere with Codex CLI.
+///
+/// Common conflicts:
+/// - `OPENAI_API_KEY` set → Codex CLI might use this instead of the configured key
+/// - `OPENAI_BASE_URL` set → Could override the configured base_url
+/// - `OPENAI_ORG_ID` set → May cause routing issues
+/// - `CODEX_HOME` set → Changes where Codex looks for config
+pub fn check_codex_env_conflicts() -> EnvConflictResult {
+    let vars = ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID", "CODEX_HOME"];
+    let mut messages = Vec::new();
+
+    let has_openai_api_key = if let Ok(val) = std::env::var("OPENAI_API_KEY") {
+        if val.starts_with("sk-") || !val.is_empty() {
+            messages.push(format!(
+                "OPENAI_API_KEY is set (starts with '{}...'). This may override the configured API key.",
+                &val[..val.len().min(8)]
+            ));
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let has_openai_base_url = if let Ok(val) = std::env::var("OPENAI_BASE_URL") {
+        messages.push(format!(
+            "OPENAI_BASE_URL is set to '{}'. This will override the proxy base URL.",
+            val
+        ));
+        true
+    } else {
+        false
+    };
+
+    let has_openai_org_id = if std::env::var("OPENAI_ORG_ID").is_ok() {
+        messages.push(
+            "OPENAI_ORG_ID is set. This may cause routing issues with third-party providers."
+                .to_string(),
+        );
+        true
+    } else {
+        false
+    };
+
+    let has_codex_home = if let Ok(val) = std::env::var("CODEX_HOME") {
+        messages.push(format!(
+            "CODEX_HOME is set to '{}'. Codex CLI will use this directory instead of ~/.codex.",
+            val
+        ));
+        true
+    } else {
+        false
+    };
+
+    if messages.is_empty() {
+        messages.push("No conflicting environment variables detected.".to_string());
+    }
+
+    EnvConflictResult {
+        has_openai_api_key,
+        has_openai_base_url,
+        has_openai_org_id,
+        has_codex_home,
+        messages,
+    }
 }

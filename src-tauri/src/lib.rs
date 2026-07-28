@@ -180,6 +180,8 @@ pub fn run() {
             commands::check_codex_status,
             commands::apply_codex_config,
             commands::restore_codex_config,
+            commands::clear_codex_auth,
+            commands::check_codex_env_conflicts,
             // Debug console
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,

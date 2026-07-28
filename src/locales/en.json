@@ -1455,6 +1455,24 @@
         "restore": "Restore Backup",
         "restore_success": "Codex CLI configuration restored from backup successfully!",
         "apply_to_codex": "Apply to Codex CLI",
-        "apply_success": "Codex CLI configuration applied successfully!"
+        "apply_success": "Codex CLI configuration applied successfully!",
+        "advanced_options": "Advanced Options",
+        "reasoning_effort": "Reasoning Effort",
+        "reasoning_default": "Default (Model Default)",
+        "reasoning_low": "Low (Faster, less thinking)",
+        "reasoning_medium": "Medium (Balanced)",
+        "reasoning_high": "High (More thorough reasoning)",
+        "disable_storage": "Disable response storage (privacy)",
+        "api_key_label": "API Key (optional)",
+        "api_key_placeholder": "Leave empty to use proxy's API key",
+        "api_key_hint": "Optional. If empty, Codex CLI will use the proxy's API key configured in the app.",
+        "clear_auth": "Clear OAuth Data",
+        "auth_cleared": "Codex CLI OAuth data cleared successfully!",
+        "env_conflict_title": "⚠️ Environment Variable Conflicts Detected",
+        "troubleshooting": "🔧 Troubleshooting Tips",
+        "tip_401": "Check if OPENAI_API_KEY env var is set (run 'echo %OPENAI_API_KEY%' or 'echo $OPENAI_API_KEY'). Unset it if present. Also ensure 'requires_openai_auth = false' is in config (it is by default now).",
+        "tip_stream": "If you see 'stream disconnected', check that the proxy is running and the base URL is correct. Try restarting the proxy.",
+        "tip_oauth": "If you previously logged in with OpenAI, run 'codex auth logout' or use the 'Clear OAuth Data' button above. Then delete ~/.codex/sqlite/ directory.",
+        "tip_model": "Ensure the model name is correct and available on the selected platform. Check the proxy is running and accounts have available quota."
     }
 }
