@@ -327,13 +327,13 @@ pub fn apply_codex_config(
     info!("Wrote model catalog to {:?} with {} models", catalog_path, all_platform_models.len());
 
     // ── Set top-level keys ──
-    // Use forward slashes for the path — TOML backslash escaping on Windows
-    // causes issues with Codex Desktop's parser.  Forward slashes work on all
-    // platforms including Windows.
-    let catalog_path_str = catalog_path.to_string_lossy().replace('\\', "/");
+    // Use ~/.codex/ relative path — Codex Desktop/CLI expands ~ to the
+    // user's home directory.  Absolute paths (especially Windows paths with
+    // backslashes) cause TOML parsing and cross-platform issues.
+    let catalog_rel_path = format!("~/.codex/model-catalogs/{}.json", path_prefix);
     config.insert(
         "model_catalog_json".to_string(),
-        toml::Value::String(catalog_path_str),
+        toml::Value::String(catalog_rel_path),
     );
     config.insert(
         "model_provider".to_string(),
