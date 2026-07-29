@@ -1172,7 +1172,7 @@ async fn forward_with_retry(
         // Responses API format so Codex CLI can understand it.
         // If translation fails, construct a proper Responses API error response
         // instead of falling back to the raw Chat Completions format (which
-        // Codex CLI cannot parse).
+        // Codex CLI cannot parse), and return HTTP 502 Bad Gateway.
         let body_bytes = if is_responses_api {
             match crate::modules::codex_translator::transform_chat_completions_to_responses(&body_bytes) {
                 Some(translated) => {
@@ -1182,7 +1182,12 @@ async fn forward_with_retry(
                 None => {
                     // Translation failed — construct a proper Responses API error
                     // instead of passing through raw Chat Completions format.
+                    // Also set HTTP status to 502 so the client doesn't see HTTP 200 + error body.
                     warn!("Responses API: failed to translate upstream response, sending error to client");
+                    response_builder = axum::response::Response::builder().status(reqwest::StatusCode::BAD_GATEWAY);
+                    for (key, value) in &response_headers {
+                        response_builder = response_builder.header(key.as_str(), value.as_str());
+                    }
                     let error_response = serde_json::json!({
                         "id": format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
                         "object": "response",

@@ -177,7 +177,8 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
         // messages directly. Just rename to `messages` and convert content types.
         if let Some(arr) = from_messages.as_array() {
             let mut messages: Vec<serde_json::Value> = Vec::new();
-            for mut msg in arr.clone() {
+            let mut arr_clone = arr.clone();
+            for mut msg in arr_clone.drain(..) {
                 // Remove Responses API-specific fields
                 if let Some(obj) = msg.as_object_mut() {
                     obj.remove("type");
@@ -434,7 +435,7 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
 /// Maximum time (seconds) to wait for the first valid SSE chunk before
 /// forcing stream completion. Prevents hung streams when a non-standard
 /// upstream sends chunks that don't match the expected OpenAI SSE format.
-const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 30;
+const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 15;
 
 /// Translate a Chat Completions streaming SSE response to Responses API SSE format.
 ///
@@ -460,32 +461,6 @@ pub fn transform_stream_to_responses(
 ) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(64);
     let model_owned = model.to_string();
-
-    // ── Helper: emit a data-only SSE line (Responses API uses `data: {json}\n\n` format) ──
-    // Use try_send (non-blocking) instead of blocking_send because we're in a
-    // tokio async context. blocking_send would block the tokio worker thread
-    // and can cause stream stalls or deadlocks.
-    let tx_clone = tx.clone();
-    let emit_data_sse = move |data: &serde_json::Value| {
-        let sse = format!(
-            "data: {}\n\n",
-            serde_json::to_string(data).unwrap_or_default()
-        );
-        let result = tx_clone.try_send(Ok(axum::body::Bytes::from(sse)));
-        if let Err(e) = result {
-            warn!("transform_stream: try_send failed (data event): {:?}", e);
-        }
-    };
-
-    // ── Helper: emit a raw data line (for [DONE]) ──
-    let tx_clone = tx.clone();
-    let emit_raw = move |data: &str| {
-        let sse = format!("data: {}\n\n", data);
-        let result = tx_clone.try_send(Ok(axum::body::Bytes::from(sse)));
-        if let Err(e) = result {
-            warn!("transform_stream: try_send failed (raw event): {:?}", e);
-        }
-    };
 
     tokio::spawn(async move {
         info!("transform_stream_to_responses: stream processing started");
@@ -522,7 +497,7 @@ pub fn transform_stream_to_responses(
             // chunk within STREAM_FIRST_CHUNK_TIMEOUT_SECS, force completion.
             let timeout_duration = if st.has_sent_created {
                 // After first valid chunk, use a longer per-chunk timeout
-                std::time::Duration::from_secs(60)
+                std::time::Duration::from_secs(30)
             } else {
                 std::time::Duration::from_secs(STREAM_FIRST_CHUNK_TIMEOUT_SECS)
             };
@@ -535,7 +510,7 @@ pub fn transform_stream_to_responses(
                     warn!("transform_stream_to_responses: upstream stream error: {}", e);
                     // Emit error as a Responses API error event if we haven't completed
                     if !st.is_completed {
-                        st.send_error_response(&emit_data_sse, &format!("Upstream stream error: {}", e));
+                        st.send_error_response(&tx, &format!("Upstream stream error: {}", e)).await;
                     }
                     let _ = tx.send(Err(e)).await;
                     break;
@@ -544,14 +519,14 @@ pub fn transform_stream_to_responses(
                     // Stream ended naturally
                     if st.has_sent_created && !st.is_completed {
                         info!("transform_stream: upstream stream ended naturally, flushing remaining events");
-                        st.flush_done_events(&emit_data_sse);
-                        st.send_completed(&emit_data_sse, &emit_raw);
+                        st.flush_done_events(&tx).await;
+                        st.send_completed(&tx).await;
                     } else if !st.is_completed {
                         // Stream ended before any valid chunk — this can happen
                         // if the upstream returns an empty body (e.g., 204 No Content
                         // disguised as a 200) or a non-SSE response.
                         warn!("transform_stream: upstream stream ended without any valid data");
-                        st.send_completed(&emit_data_sse, &emit_raw);
+                        st.send_completed(&tx).await;
                     }
                     break;
                 }
@@ -566,13 +541,13 @@ pub fn transform_stream_to_responses(
                     if !st.has_sent_created {
                         warn!("transform_stream: timeout waiting for first valid chunk ({}s). Upstream may be using non-standard SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS);
                         // Send a minimal error response so Codex CLI doesn't hang
-                        st.send_error_response(&emit_data_sse, &format!(
+                        st.send_error_response(&tx, &format!(
                             "Upstream did not return a valid streaming response within {} seconds. The provider may use an unsupported SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS
-                        ));
+                        )).await;
                     } else {
-                        warn!("transform_stream: timeout waiting for next chunk (60s), forcing completion");
-                        st.flush_done_events(&emit_data_sse);
-                        st.send_completed(&emit_data_sse, &emit_raw);
+                        warn!("transform_stream: timeout waiting for next chunk (30s), forcing completion");
+                        st.flush_done_events(&tx).await;
+                        st.send_completed(&tx).await;
                     }
                     break;
                 }
@@ -596,8 +571,8 @@ pub fn transform_stream_to_responses(
                 };
 
                 if data == "[DONE]" {
-                    st.flush_done_events(&emit_data_sse);
-                    st.send_completed(&emit_data_sse, &emit_raw);
+                    st.flush_done_events(&tx).await;
+                    st.send_completed(&tx).await;
                     continue;
                 }
 
@@ -638,7 +613,7 @@ pub fn transform_stream_to_responses(
                         .unwrap_or("unknown");
                     warn!("transform_stream: upstream error in SSE: [{}] {}", error_code, error_msg);
                     if !st.is_completed {
-                        st.send_error_response(&emit_data_sse, &format!("Upstream error: {} (code: {})", error_msg, error_code));
+                        st.send_error_response(&tx, &format!("Upstream error: {} (code: {})", error_msg, error_code)).await;
                     }
                     continue;
                 }
@@ -664,7 +639,7 @@ pub fn transform_stream_to_responses(
                     // ── Send initial events on first chunk ──
                     if !st.has_sent_created {
                         st.has_sent_created = true;
-                        emit_data_sse(&serde_json::json!({
+                        sse_send(&tx, &serde_json::json!({
                             "type": "response.created",
                             "response": {
                                 "id": st.response_id,
@@ -674,12 +649,12 @@ pub fn transform_stream_to_responses(
                                 "status": "in_progress",
                                 "output": []
                             }
-                        }));
+                        })).await;
                     }
 
                     if !st.has_sent_in_progress {
                         st.has_sent_in_progress = true;
-                        emit_data_sse(&serde_json::json!({
+                        sse_send(&tx, &serde_json::json!({
                             "type": "response.in_progress",
                             "response": {
                                 "id": st.response_id,
@@ -689,7 +664,7 @@ pub fn transform_stream_to_responses(
                                 "status": "in_progress",
                                 "output": []
                             }
-                        }));
+                        })).await;
                     }
 
                     // ── Text content ──
@@ -698,7 +673,7 @@ pub fn transform_stream_to_responses(
                             if !st.has_sent_output_item {
                                 st.has_sent_output_item = true;
                                 st.item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-                                emit_data_sse(&serde_json::json!({
+                                sse_send(&tx, &serde_json::json!({
                                     "type": "response.output_item.added",
                                     "output_index": st.output_index,
                                     "item": {
@@ -707,26 +682,26 @@ pub fn transform_stream_to_responses(
                                         "role": "assistant",
                                         "content": []
                                     }
-                                }));
+                                })).await;
                             }
                             if !st.has_sent_content_part {
                                 st.has_sent_content_part = true;
-                                emit_data_sse(&serde_json::json!({
+                                sse_send(&tx, &serde_json::json!({
                                     "type": "response.content_part.added",
                                     "item_id": st.item_id,
                                     "output_index": st.output_index,
                                     "content_index": st.content_index,
                                     "part": {"type": "output_text", "text": ""}
-                                }));
+                                })).await;
                             }
                             st.text_buffer.push_str(content);
-                            emit_data_sse(&serde_json::json!({
+                            sse_send(&tx, &serde_json::json!({
                                 "type": "response.output_text.delta",
                                 "delta": content,
                                 "item_id": st.item_id,
                                 "output_index": st.output_index,
                                 "content_index": st.content_index
-                            }));
+                            })).await;
                         }
                     }
 
@@ -744,7 +719,7 @@ pub fn transform_stream_to_responses(
                                 // (which has output_index=0) and before tool calls
                                 st.reasoning_output_index = if st.has_sent_output_item { 1 } else { 0 };
                                 st.reasoning_item_id = format!("reason_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-                                emit_data_sse(&serde_json::json!({
+                                sse_send(&tx, &serde_json::json!({
                                     "type": "response.output_item.added",
                                     "output_index": st.reasoning_output_index,
                                     "item": {
@@ -752,7 +727,7 @@ pub fn transform_stream_to_responses(
                                         "type": "reasoning",
                                         "reasoning": ""
                                     }
-                                }));
+                                })).await;
                             }
                             st.reasoning_buffer.push_str(reasoning);
                         }
@@ -774,25 +749,25 @@ pub fn transform_stream_to_responses(
                                 st.tool_call_ids.insert(tc_index, tc_id.clone());
                                 st.tool_call_names.insert(tc_index, tc_name.clone());
                                 st.tool_call_args.insert(tc_index, String::new());
-                                emit_data_sse(&serde_json::json!({
+                                sse_send(&tx, &serde_json::json!({
                                     "type": "response.output_item.added",
                                     "output_index": st.tool_call_output_index,
                                     "item": {
                                         "id": tc_id, "type": "function_call",
                                         "call_id": tc_id, "name": tc_name, "arguments": ""
                                     }
-                                }));
+                                })).await;
                             }
 
                             if let Some(args_buf) = st.tool_call_args.get_mut(&tc_index) {
                                 if !tc_args.is_empty() {
                                     args_buf.push_str(&tc_args);
                                     let tc_item_id = st.tool_call_ids.get(&tc_index).cloned().unwrap_or_default();
-                                    emit_data_sse(&serde_json::json!({
+                                    sse_send(&tx, &serde_json::json!({
                                         "type": "response.function_call_arguments.delta",
                                         "delta": tc_args, "item_id": tc_item_id,
                                         "output_index": st.tool_call_output_index
-                                    }));
+                                    })).await;
                                 }
                             }
                         }
@@ -801,8 +776,8 @@ pub fn transform_stream_to_responses(
                     // ── Finish reason ──
                     if let Some(reason) = finish_reason {
                         if reason == "stop" || reason == "length" || reason == "tool_calls" || reason == "content_filter" {
-                            st.flush_done_events(&emit_data_sse);
-                            st.send_completed(&emit_data_sse, &emit_raw);
+                            st.flush_done_events(&tx).await;
+                            st.send_completed(&tx).await;
                         }
                     }
                 }
@@ -813,13 +788,13 @@ pub fn transform_stream_to_responses(
         if !st.is_completed {
             if st.has_sent_created {
                 info!("transform_stream: final safety net — forcing stream completion");
-                st.flush_done_events(&emit_data_sse);
-                st.send_completed(&emit_data_sse, &emit_raw);
+                st.flush_done_events(&tx).await;
+                st.send_completed(&tx).await;
             } else {
                 // Stream ended without ever sending "response.created".
                 // This means no valid chunks were recognized at all.
                 error!("transform_stream: stream ended without any valid SSE data (provider may use incompatible format)");
-                st.send_error_response(&emit_data_sse, "Upstream returned no valid streaming data. The provider may use an incompatible SSE format.");
+                st.send_error_response(&tx, "Upstream returned no valid streaming data. The provider may use an incompatible SSE format.").await;
             }
         }
     });
@@ -856,14 +831,18 @@ pub struct StreamState {
 }
 
 impl StreamState {
-    fn send_error_response(&mut self, emit: &impl Fn(&serde_json::Value), error_message: &str) {
+    async fn send_error_response(
+        &mut self,
+        tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, reqwest::Error>>,
+        error_message: &str,
+    ) {
         // Mark as completed first so no subsequent send_completed fires
         self.is_completed = true;
 
         // If we already sent response.created, don't send another one.
         // Just emit a terminal error event to avoid confusing the client.
         if self.has_sent_created {
-            emit(&serde_json::json!({
+            sse_send(tx, &serde_json::json!({
                 "type": "response.failed",
                 "response": {
                     "id": self.response_id,
@@ -876,7 +855,7 @@ impl StreamState {
                         "message": error_message
                     }
                 }
-            }));
+            })).await;
             return;
         }
         let response_id = if self.response_id.is_empty() {
@@ -885,7 +864,7 @@ impl StreamState {
             self.response_id.clone()
         };
         // No response.created was sent yet — send one with error status
-        emit(&serde_json::json!({
+        sse_send(tx, &serde_json::json!({
             "type": "response.created",
             "response": {
                 "id": response_id,
@@ -899,41 +878,44 @@ impl StreamState {
                 },
                 "output": []
             }
-        }));
+        })).await;
     }
 
-    fn flush_done_events(&mut self, emit: &impl Fn(&serde_json::Value)) {
+    async fn flush_done_events(
+        &mut self,
+        tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, reqwest::Error>>,
+    ) {
         // Correct event order per Responses API spec:
         // 1. output_text.done → 2. content_part.done → 3. output_item.done
         if self.has_sent_content_part {
-            emit(&serde_json::json!({
+            sse_send(tx, &serde_json::json!({
                 "type": "response.output_text.done",
                 "item_id": self.item_id,
                 "output_index": self.output_index,
                 "content_index": self.content_index,
                 "text": self.text_buffer
-            }));
-            emit(&serde_json::json!({
+            })).await;
+            sse_send(tx, &serde_json::json!({
                 "type": "response.content_part.done",
                 "item_id": self.item_id,
                 "output_index": self.output_index,
                 "content_index": self.content_index,
                 "part": {"type": "output_text", "text": self.text_buffer}
-            }));
+            })).await;
         }
         if self.has_sent_output_item && self.has_sent_content_part {
-            emit(&serde_json::json!({
+            sse_send(tx, &serde_json::json!({
                 "type": "response.output_item.done",
                 "output_index": self.output_index,
                 "item": {
                     "id": self.item_id, "type": "message", "role": "assistant",
                     "content": [{"type": "output_text", "text": self.text_buffer}]
                 }
-            }));
+            })).await;
         }
         // ── Reasoning output item done ──
         if self.has_sent_reasoning && !self.reasoning_buffer.is_empty() {
-            emit(&serde_json::json!({
+            sse_send(tx, &serde_json::json!({
                 "type": "response.output_item.done",
                 "output_index": self.reasoning_output_index,
                 "item": {
@@ -941,7 +923,7 @@ impl StreamState {
                     "type": "reasoning",
                     "reasoning": self.reasoning_buffer
                 }
-            }));
+            })).await;
         }
         let mut tc_indices: Vec<u32> = self.tool_call_ids.keys().copied().collect();
         tc_indices.sort();
@@ -951,24 +933,27 @@ impl StreamState {
                 let tc_output_idx = if self.has_sent_output_item { 1 + tc_idx_counter } else { tc_idx_counter };
                 let tc_name = self.tool_call_names.get(tc_idx).cloned().unwrap_or_default();
                 let tc_args = self.tool_call_args.get(tc_idx).cloned().unwrap_or_default();
-                emit(&serde_json::json!({
+                sse_send(tx, &serde_json::json!({
                     "type": "response.function_call_arguments.done",
                     "item_id": tc_id, "output_index": tc_output_idx, "arguments": tc_args
-                }));
-                emit(&serde_json::json!({
+                })).await;
+                sse_send(tx, &serde_json::json!({
                     "type": "response.output_item.done",
                     "output_index": tc_output_idx,
                     "item": {
                         "id": tc_id, "type": "function_call",
                         "call_id": tc_id, "name": tc_name, "arguments": tc_args
                     }
-                }));
+                })).await;
                 tc_idx_counter += 1;
             }
         }
     }
 
-    fn send_completed(&mut self, emit: &impl Fn(&serde_json::Value), emit_raw: &impl Fn(&str)) {
+    async fn send_completed(
+        &mut self,
+        tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, reqwest::Error>>,
+    ) {
         if self.is_completed {
             return;
         }
@@ -1005,14 +990,27 @@ impl StreamState {
                 }));
             }
         }
-        emit(&serde_json::json!({
+        sse_send(tx, &serde_json::json!({
             "type": "response.completed",
             "response": {
                 "id": self.response_id, "object": "response",
                 "created_at": self.now, "model": self.model_name,
                 "status": "completed", "output": output
             }
-        }));
-        emit_raw("[DONE]");
+        })).await;
+    }
+}
+
+/// Helper: send a JSON SSE event through the channel (async, waits for capacity).
+async fn sse_send(
+    tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, reqwest::Error>>,
+    data: &serde_json::Value,
+) {
+    let sse = format!(
+        "data: {}\n\n",
+        serde_json::to_string(data).unwrap_or_default()
+    );
+    if let Err(e) = tx.send(Ok(axum::body::Bytes::from(sse))).await {
+        warn!("sse_send: send failed: {:?}", e);
     }
 }

@@ -44,36 +44,41 @@ export default function CodexIntegration() {
     }
   }, [platforms]);
 
-  // Fetch models when platform changes
+  // Fetch models when platform changes (only if not already cached)
   useEffect(() => {
     if (selectedPlatformId) {
-      setModelsLoading(true);
       setSelectedModelName('');
-      fetchModels(selectedPlatformId).then(() => {
-        const currentModels = usePlatformStore.getState().models[selectedPlatformId];
-        if (currentModels && currentModels.length > 0 && !autoDetected) {
-          setSelectedModelName(currentModels[0].model_name);
+      const cachedModels = usePlatformStore.getState().models[selectedPlatformId];
+      if (cachedModels && cachedModels.length > 0) {
+        // Models already cached in store, no need to fetch
+        if (!autoDetected) {
+          setSelectedModelName(cachedModels[0].model_name);
           setAutoDetected(true);
         }
-        setModelsLoading(false);
-      }).catch(() => setModelsLoading(false));
+      } else {
+        setModelsLoading(true);
+        fetchModels(selectedPlatformId).then(() => {
+          const currentModels = usePlatformStore.getState().models[selectedPlatformId];
+          if (currentModels && currentModels.length > 0 && !autoDetected) {
+            setSelectedModelName(currentModels[0].model_name);
+            setAutoDetected(true);
+          }
+          setModelsLoading(false);
+        }).catch(() => setModelsLoading(false));
+      }
     }
   }, [selectedPlatformId]);
 
   const handleCheck = useCallback(async () => {
     setStatus('checking');
     try {
-      const cs = await codexService.checkCodexStatus();
+      const [cs, conflicts] = await Promise.all([
+        codexService.checkCodexStatus(),
+        codexService.checkCodexEnvConflicts(),
+      ]);
       setCodexStatus(cs);
+      setEnvConflicts(conflicts);
       setStatus('ready');
-
-      // Also check env conflicts
-      try {
-        const conflicts = await codexService.checkCodexEnvConflicts();
-        setEnvConflicts(conflicts);
-      } catch {
-        // env check is optional
-      }
     } catch (e) {
       showToast(`${t('common.error')}: ${e}`, 'error');
       setStatus('error');
@@ -145,20 +150,6 @@ export default function CodexIntegration() {
 
   const platformModels = selectedPlatformId ? (models[selectedPlatformId] || []) : [];
   const pathPrefix = (platforms.find(p => p.id === selectedPlatformId)?.path_prefix) || 'openai';
-
-  // Check env conflicts on initial load
-  const checkCodexEnvConflicts = useCallback(async () => {
-    try {
-      const conflicts = await codexService.checkCodexEnvConflicts();
-      setEnvConflicts(conflicts);
-    } catch {
-      // env check is optional
-    }
-  }, []);
-
-  useEffect(() => {
-    checkCodexEnvConflicts();
-  }, [checkCodexEnvConflicts]);
 
   const hasConflicts = envConflicts && (
     envConflicts.has_openai_api_key ||

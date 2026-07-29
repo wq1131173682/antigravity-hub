@@ -455,6 +455,7 @@ pub async fn check_codex_status() -> Result<crate::modules::codex_integration::C
 }
 
 /// Apply Antigravity Hub proxy config to Codex CLI
+/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
 pub async fn apply_codex_config(
     proxy_host: String,
@@ -465,21 +466,37 @@ pub async fn apply_codex_config(
     disable_response_storage: Option<bool>,
     api_key: Option<String>,
 ) -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    crate::modules::codex_integration::apply_codex_config(
-        &proxy_host,
-        proxy_port,
-        &path_prefix,
-        &model_name,
-        reasoning_effort.as_deref(),
-        disable_response_storage,
-        api_key.as_deref(),
-    )
+    let proxy_host = proxy_host;
+    let proxy_port = proxy_port;
+    let path_prefix = path_prefix;
+    let model_name = model_name;
+    let reasoning_effort = reasoning_effort;
+    let disable_response_storage = disable_response_storage;
+    let api_key = api_key;
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::apply_codex_config(
+            &proxy_host,
+            proxy_port,
+            &path_prefix,
+            &model_name,
+            reasoning_effort.as_deref(),
+            disable_response_storage,
+            api_key.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
 }
 
 /// Restore Codex CLI config from backup
+/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
 pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    crate::modules::codex_integration::restore_codex_config()
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::restore_codex_config()
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
 }
 
 /// Refresh models from upstream API for a given platform
@@ -495,9 +512,14 @@ pub async fn test_model(platform_id: String, model_name: String) -> Result<crate
 }
 
 /// Clear Codex CLI OAuth data (auth.json + sqlite/)
+/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
 pub async fn clear_codex_auth() -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    crate::modules::codex_integration::clear_codex_auth()
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::clear_codex_auth()
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
 }
 
 /// Check for Codex-related environment variable conflicts
