@@ -392,7 +392,8 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
                     // ── Reasoning / thinking content ──
                     // Some providers return reasoning_content in the Chat Completions response.
                     // Translate it to a reasoning output item in Responses API format.
-                    if let Some(reasoning) = message.get("reasoning_content").and_then(|r| r.as_str()) {
+                    // Support multiple field names: reasoning_content, reasoning, thinking, thinking_content
+                    if let Some(reasoning) = extract_reasoning_content(message) {
                         if !reasoning.is_empty() {
                             output.push(serde_json::json!({
                                 "type": "reasoning",
@@ -710,7 +711,11 @@ pub fn transform_stream_to_responses(
                     // BEFORE the actual content. We handle reasoning separately from
                     // the regular text output — it is emitted as a reasoning output
                     // item with type "reasoning", NOT mixed into output_text.
-                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
+                    // Support multiple field names: reasoning_content, reasoning, thinking, thinking_content
+                    // Check at both delta level and choice level (some providers differ)
+                    let reasoning = extract_reasoning_content(delta)
+                        .or_else(|| extract_reasoning_content(choice));
+                    if let Some(reasoning) = reasoning {
                         if !reasoning.is_empty() {
                             // Emit reasoning output item on first reasoning chunk
                             if !st.has_sent_reasoning {
@@ -999,6 +1004,20 @@ impl StreamState {
             }
         })).await;
     }
+}
+
+/// Extract reasoning/thinking content from a JSON object, checking multiple
+/// field names that different providers use: reasoning_content, reasoning,
+/// thinking, thinking_content.
+fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> {
+    for key in &["reasoning_content", "reasoning", "thinking", "thinking_content"] {
+        if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
 }
 
 /// Helper: send a JSON SSE event through the channel (async, waits for capacity).
