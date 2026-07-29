@@ -1045,23 +1045,17 @@ async fn forward_with_retry(
 
         if is_error {
             let key_label = format!("key[{}]", key_idx);
-            let (reason_str, disabled_until_ts) = {
-                warn!("{} from {}, {}={}, model={}, trying next",
-                    status, target_url, key_label, key_id, model_identifier);
-                if let Some(mid) = &model_id {
-                    let _ = crate::modules::quota_window::record_500_error(key_id, mid, platform_id);
-                }
-                let reason = format!("Server error {} at {}", status.as_u16(), chrono::Utc::now().format("%H:%M:%S"));
-                let until = chrono::Utc::now().timestamp() + 60;
-                let _ = crate::modules::keystore::set_key_status(key_id, true, Some(reason.clone()), Some(until));
-                (reason, until)
-            };
+            warn!("{} from {}, {}={}, model={}",
+                status, target_url, key_label, key_id, model_identifier);
+
+            // NEVER disable keys — only rotate or retry with backoff.
+            // Keys are a precious resource; disabling them on transient server
+            // errors would leave the proxy unable to serve requests until the
+            // user manually re-enables them.
+            let has_multiple_keys = keys_to_try.len() > 1;
 
             // Emit key-switched event so frontend can refresh quota display
-            if attempt < max_retries - 1 {
-                // After record_500, the key is disabled, so get_keys_to_try on the
-                // next iteration will exclude it. Pick the next available key from
-                // the refreshed list (which will be fetched at the top of the loop).
+            if attempt < max_retries - 1 && has_multiple_keys {
                 let next_key_id = keys_to_try
                     .get((key_idx + 1) % keys_to_try.len())
                     .cloned()
@@ -1078,15 +1072,22 @@ async fn forward_with_retry(
                         model_name: model_identifier.clone(),
                         disabled_key_id: key_id.clone(),
                         next_key_id,
-                        reason: reason_str,
-                        disabled_until: disabled_until_ts,
+                        reason: format!("Server error {} - switching key", status.as_u16()),
+                        disabled_until: 0, // 0 = not disabled, just rotated
                     }
                 );
             }
 
             last_error = format!("HTTP {} from upstream", status);
-            if attempt < max_retries - 1 {
-                info!("Retrying with next key (attempt {}/{})", attempt + 2, max_retries);
+            if attempt < max_retries - 1 && has_multiple_keys {
+                // Multiple keys: rotate to next key
+                info!("Rotating to next key (attempt {}/{})", attempt + 2, max_retries);
+                continue;
+            } else if attempt < max_retries - 1 {
+                // Single key (or last few retries): exponential backoff, retry same key
+                let backoff_secs = std::cmp::min(32, 2_u64.pow(attempt as u32 + 1));
+                info!("Waiting {}s before retrying same key (single key mode)...", backoff_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 continue;
             }
             break;

@@ -226,7 +226,10 @@ pub fn apply_codex_config(
     // Build the proxy base URL
     // Codex CLI appends /v1/responses internally — the proxy handles the
     // Responses API ↔ Chat Completions translation transparently.
-    let proxy_base_url = format!("http://{}:{}/{}/v1", proxy_host, proxy_port, path_prefix);
+    // Use 127.0.0.1 instead of the binding address (0.0.0.0) so Codex CLI
+    // can actually reach the proxy.
+    let client_host = if proxy_host == "0.0.0.0" { "127.0.0.1" } else { proxy_host };
+    let proxy_base_url = format!("http://{}:{}/{}/v1", client_host, proxy_port, path_prefix);
 
     // ── Set top-level keys ──
     // Use "custom" as the standard provider name (per Codex CLI blog recommendation).
