@@ -173,8 +173,9 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
 /// Write Antigravity Hub proxy configuration to Codex CLI's config.toml.
 ///
 /// Uses a standard `[model_providers.custom]` entry with `base_url` pointing
-/// to the Antigravity Hub proxy. Always starts fresh — does NOT merge with
-/// existing config, so old provider sections from previous applies are cleared.
+/// to the Antigravity Hub proxy. Merges with existing config — only updates
+/// the keys that Antigravity Hub manages (model, model_provider, etc.) and
+/// preserves all other Codex CLI settings.
 ///
 /// Sets `preferred_auth_method = "apikey"` so Codex CLI uses API Key auth
 /// instead of ChatGPT login — this avoids the "cannot open ChatGPT" issue
@@ -219,9 +220,18 @@ pub fn apply_codex_config(
         None
     };
 
-    // ── Start fresh: create a new empty config (do NOT merge with existing) ──
-    // This ensures old provider sections from previous applies are cleared.
-    let mut config = toml::Table::new();
+    // ── Load existing config or start fresh ──
+    // Load the existing config.toml so we can update only the keys we manage,
+    // preserving all other Codex CLI settings (other providers, experimental
+    // flags, etc.). If the file doesn't exist yet, start with an empty table.
+    let mut config: toml::Table = if cfg_path.exists() {
+        let content = std::fs::read_to_string(&cfg_path)
+            .map_err(|e| format!("Failed to read existing config: {}", e))?;
+        content.parse::<toml::Table>()
+            .map_err(|e| format!("Failed to parse existing config: {}", e))?
+    } else {
+        toml::Table::new()
+    };
 
     // Build the proxy base URL
     // Codex CLI appends /v1/responses internally — the proxy handles the
@@ -296,7 +306,11 @@ pub fn apply_codex_config(
         }
     }
 
-    let mut model_providers = toml::Table::new();
+    let mut model_providers = config
+        .get("model_providers")
+        .and_then(|v| v.as_table())
+        .map(|t| t.clone())
+        .unwrap_or_else(toml::Table::new);
     model_providers.insert(
         "custom".to_string(),
         toml::Value::Table(provider_table),

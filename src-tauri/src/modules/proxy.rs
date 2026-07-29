@@ -1010,6 +1010,12 @@ async fn forward_with_retry(
         // Add the full body
         req_builder = req_builder.body(body_bytes.clone());
 
+        // Debug: log the upstream request for troubleshooting
+        if let Ok(body_preview) = std::str::from_utf8(&body_bytes) {
+            let preview: String = body_preview.chars().take(500).collect();
+            info!("Forwarding to upstream: {} | body: {}", target_url, preview);
+        }
+
         // Send the request
         let resp = match req_builder.send().await {
             Ok(r) => r,
