@@ -1097,9 +1097,17 @@ async fn forward_with_retry(
             let _ = crate::modules::quota_window::record_api_call(key_id, mid, platform_id);
         }
 
-        // Capture response headers before consuming body
+        // Capture response headers before consuming body.
+        // IMPORTANT: Filter out `content-length` because the proxy may transform
+        // the response body (e.g., Responses API translation), which changes the
+        // body size. Keeping the original content-length causes the client to hang
+        // waiting for bytes that will never arrive. axum sets the correct
+        // content-length automatically when the body is a fixed-size buffer.
         let response_headers: Vec<(String, String)> = resp.headers().iter()
-            .filter(|(key, _)| key.as_str().to_lowercase() != "transfer-encoding")
+            .filter(|(key, _)| {
+                let k = key.as_str().to_lowercase();
+                k != "transfer-encoding" && k != "content-length"
+            })
             .map(|(key, value)| (key.as_str().to_string(), value.to_str().unwrap_or("").to_string()))
             .collect();
 
