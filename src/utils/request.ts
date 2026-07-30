@@ -204,6 +204,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'list_profiles': { url: '/api/profiles', method: 'GET' },
   'save_profile': { url: '/api/profiles', method: 'POST' },
   'delete_profile': { url: '/api/profiles/:profileId', method: 'DELETE' },
+  'toggle_profile': { url: '/api/profiles/:profileId/toggle', method: 'POST' },
 };
 
 export async function request<T>(cmd: string, args?: any): Promise<T> {

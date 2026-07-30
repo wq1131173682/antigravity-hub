@@ -531,12 +531,15 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
 }
 
 /// Test a model by sending a minimal chat completion request.
-/// Returns the model status (reachable, response time, etc.).
+/// Returns detailed diagnostic information.
 #[derive(Debug, Clone, Serialize)]
 pub struct TestModelResult {
     pub success: bool,
     pub latency_ms: u64,
     pub model_name: String,
+    pub status_code: u16,
+    pub response_preview: Option<String>,
+    pub finish_reason: Option<String>,
     pub message: String,
 }
 
@@ -565,8 +568,6 @@ pub async fn test_model(
         ))?;
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
-    // Use deduplicate_url_path to handle base URLs that already include /v1
-    // (e.g., "https://token.sensenova.cn/v1" → "/v1/chat/completions" → "https://token.sensenova.cn/v1/chat/completions")
     let url = deduplicate_url_path(&base_url, "/v1/chat/completions");
 
     let request_body = serde_json::json!({
@@ -589,9 +590,9 @@ pub async fn test_model(
         .map_err(|e| format!("Connection failed: {}", e))?;
 
     let latency_ms = start.elapsed().as_millis() as u64;
-    let status = resp.status();
+    let status_code = resp.status().as_u16();
 
-    if status.is_success() {
+    if resp.status().is_success() {
         let body: serde_json::Value = resp.json().await
             .map_err(|e| format!("Failed to parse response: {}", e))?;
 
@@ -601,47 +602,63 @@ pub async fn test_model(
 
         let finish = body.pointer("/choices/0/finish_reason")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+            .map(String::from);
+
+        let preview = serde_json::to_string_pretty(&body).ok()
+            .map(|s| s.chars().take(500).collect::<String>());
 
         Ok(TestModelResult {
             success: true,
             latency_ms,
             model_name: model_used.to_string(),
+            status_code,
+            response_preview: preview,
+            finish_reason: finish.clone(),
             message: format!(
-                "Model '{}' responded in {}ms (finish_reason: {})",
-                model_used, latency_ms, finish
+                "✅ Model '{}' responded in {}ms (finish_reason: {})",
+                model_used, latency_ms, finish.as_deref().unwrap_or("unknown")
             ),
         })
-    } else if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        Ok(TestModelResult {
-            success: false,
-            latency_ms,
-            model_name: model_name.to_string(),
-            message: format!(
-                "Authentication failed (HTTP {}). Check your API key.",
-                status.as_u16()
-            ),
-        })
-    } else if status == reqwest::StatusCode::NOT_FOUND {
-        Ok(TestModelResult {
-            success: false,
-            latency_ms,
-            model_name: model_name.to_string(),
-            message: format!(
-                "Model '{}' not found (HTTP 404). The model may not exist or is unavailable.",
-                model_name
-            ),
-        })
-    } else {
-        // Read error body for more details
+    } else if resp.status() == reqwest::StatusCode::UNAUTHORIZED || resp.status() == reqwest::StatusCode::FORBIDDEN {
         let error_body = resp.text().await.unwrap_or_else(|_| "(unreadable)".to_string());
         Ok(TestModelResult {
             success: false,
             latency_ms,
             model_name: model_name.to_string(),
+            status_code,
+            response_preview: Some(error_body.chars().take(500).collect()),
+            finish_reason: None,
             message: format!(
-                "HTTP {}: {}",
-                status.as_u16(),
+                "🔒 Authentication failed (HTTP {}). Check your API key.",
+                status_code
+            ),
+        })
+    } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        let error_body = resp.text().await.unwrap_or_else(|_| "(unreadable)".to_string());
+        Ok(TestModelResult {
+            success: false,
+            latency_ms,
+            model_name: model_name.to_string(),
+            status_code,
+            response_preview: Some(error_body.chars().take(500).collect()),
+            finish_reason: None,
+            message: format!(
+                "❌ Model '{}' not found (HTTP 404). The model may not exist or is unavailable.",
+                model_name
+            ),
+        })
+    } else {
+        let error_body = resp.text().await.unwrap_or_else(|_| "(unreadable)".to_string());
+        Ok(TestModelResult {
+            success: false,
+            latency_ms,
+            model_name: model_name.to_string(),
+            status_code,
+            response_preview: Some(error_body.chars().take(500).collect()),
+            finish_reason: None,
+            message: format!(
+                "⚠️ HTTP {}: {}",
+                status_code,
                 error_body.chars().take(200).collect::<String>()
             ),
         })
@@ -793,10 +810,26 @@ async fn proxy_handler(
     }
 }
 
-/// Get platform info by path prefix
+/// Get platform info by path prefix, or from the active provider profile if one exists.
+/// Active profiles take priority over path_prefix-based routing.
 fn get_platform_info(prefix: &str) -> Option<(String, String, bool)> {
     use crate::modules::config;
+    use crate::modules::profile_manager;
     let config = config::load_app_config().ok()?;
+
+    // Check for active provider profiles first
+    let active_profiles = profile_manager::get_active_profiles(&config);
+    if let Some(first_active) = active_profiles.first() {
+        if let Some(platform) = config.platforms.iter().find(|p| p.id == first_active.platform_id) {
+            info!(
+                "Active profile '{}' (priority {}) overrides path_prefix '{}' → platform '{}'",
+                first_active.name, first_active.priority, prefix, platform.name
+            );
+            return Some((platform.base_url.clone(), platform.id.clone(), config.auto_switch));
+        }
+    }
+
+    // Fall back to path_prefix matching
     let platform = config.platforms.iter().find(|p| p.path_prefix == prefix)?;
     let auto_switch = config.auto_switch;
     Some((platform.base_url.clone(), platform.id.clone(), auto_switch))
@@ -833,7 +866,22 @@ fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str
 /// Get the first configured platform (fallback when no prefix matches)
 fn get_first_platform() -> Option<(String, String, bool)> {
     use crate::modules::config;
+    use crate::modules::profile_manager;
     let config = config::load_app_config().ok()?;
+
+    // Check if there are active profiles — if so, use the highest-priority one
+    let active_profiles = profile_manager::get_active_profiles(&config);
+    if let Some(first_active) = active_profiles.first() {
+        if let Some(platform) = config.platforms.iter().find(|p| p.id == first_active.platform_id) {
+            info!(
+                "Using active profile '{}' (priority {}) for platform '{}'",
+                first_active.name, first_active.priority, platform.name
+            );
+            return Some((platform.base_url.clone(), platform.id.clone(), config.auto_switch));
+        }
+    }
+
+    // Fall back to first configured platform
     let platform = config.platforms.first()?;
     let auto_switch = config.auto_switch;
     Some((platform.base_url.clone(), platform.id.clone(), auto_switch))

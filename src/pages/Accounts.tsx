@@ -2,13 +2,13 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import type { Model } from '../types/platform';
-import type { TestModelResult } from '../services/platformService';
 import { showToast } from '../components/common/ToastContainer';
 import ModalDialog from '../components/common/ModalDialog';
+import TestModelDialog from '../components/accounts/TestModelDialog';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  X, RefreshCw, Wifi, Loader2
+  X, RefreshCw, Wifi
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -76,9 +76,41 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
-              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens, 留空不设置)</span>
+              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens)</span>
             </label>
-            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+            <div className="flex gap-1.5 mb-1.5">
+              {[
+                { label: '128K', value: 128000 },
+                { label: '200K', value: 200000 },
+                { label: '1M', value: 1048576 },
+                { label: '2M', value: 2097152 },
+              ].map(preset => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  className={`px-2 py-1 text-[11px] font-mono font-medium rounded-md transition-colors ${
+                    Number(maxInputTokens) === preset.value
+                      ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
+                      : 'bg-gray-100 dark:bg-base-300 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-base-200 border border-transparent'
+                  }`}
+                  onClick={() => setMaxInputTokens(String(preset.value))}
+                >
+                  {preset.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                className={`px-2 py-1 text-[11px] font-mono font-medium rounded-md transition-colors ${
+                  !maxInputTokens.trim()
+                    ? 'bg-gray-200 dark:bg-base-200 text-gray-500 dark:text-gray-400 border border-gray-300 dark:border-base-300'
+                    : 'bg-gray-100 dark:bg-base-300 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-base-200 border border-transparent'
+                }`}
+                onClick={() => setMaxInputTokens('')}
+              >
+                自动
+              </button>
+            </div>
+            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder={t('diagnostics.context_placeholder')} />
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
@@ -149,9 +181,41 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
-              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens, 留空不设置)</span>
+              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens)</span>
             </label>
-            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+            <div className="flex gap-1.5 mb-1.5">
+              {[
+                { label: '128K', value: 128000 },
+                { label: '200K', value: 200000 },
+                { label: '1M', value: 1048576 },
+                { label: '2M', value: 2097152 },
+              ].map(preset => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  className={`px-2 py-1 text-[11px] font-mono font-medium rounded-md transition-colors ${
+                    Number(maxInputTokens) === preset.value
+                      ? 'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
+                      : 'bg-gray-100 dark:bg-base-300 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-base-200 border border-transparent'
+                  }`}
+                  onClick={() => setMaxInputTokens(String(preset.value))}
+                >
+                  {preset.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                className={`px-2 py-1 text-[11px] font-mono font-medium rounded-md transition-colors ${
+                  !maxInputTokens.trim()
+                    ? 'bg-gray-200 dark:bg-base-200 text-gray-500 dark:text-gray-400 border border-gray-300 dark:border-base-300'
+                    : 'bg-gray-100 dark:bg-base-300 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-base-200 border border-transparent'
+                }`}
+                onClick={() => setMaxInputTokens('')}
+              >
+                自动
+              </button>
+            </div>
+            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder={t('diagnostics.context_placeholder')} />
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
@@ -283,45 +347,20 @@ function AssignKeyDialog({ open, onClose, modelId, platformId }: { open: boolean
 }
 
 // ---------------------------------------------------------------------------
-// Test Model Button component
+// Test Model Button component (opens the detailed dialog)
 // ---------------------------------------------------------------------------
-function TestModelButton({ platformId, modelName, displayName, testModel: testModelFn }: {
-  platformId: string | null;
+function TestModelButton({ modelName, displayName, onTest }: {
   modelName: string;
   displayName: string;
-  testModel: (platformId: string, modelName: string) => Promise<TestModelResult>;
+  onTest: (modelName: string, displayName: string) => void;
 }) {
-  const [testing, setTesting] = useState(false);
-
-  const handleTest = async () => {
-    if (!platformId || testing) return;
-    setTesting(true);
-    try {
-      const result = await testModelFn(platformId, modelName);
-      if (result.success) {
-        showToast(`✅ ${displayName}: ${result.latency_ms}ms - ${result.message}`, 'success');
-      } else {
-        showToast(`❌ ${displayName}: ${result.message}`, 'error');
-      }
-    } catch (e) {
-      showToast(`❌ ${displayName}: ${e}`, 'error');
-    } finally {
-      setTesting(false);
-    }
-  };
-
   return (
     <button
-      className={`p-1.5 rounded-lg transition-colors ${
-        testing
-          ? 'text-blue-400 bg-blue-50 dark:bg-blue-900/20'
-          : 'text-gray-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20'
-      }`}
-      onClick={handleTest}
-      disabled={testing}
+      className="p-1.5 text-gray-400 hover:text-emerald-500 rounded-lg hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-colors"
+      onClick={() => onTest(modelName, displayName)}
       title={`测试模型 ${displayName}`}
     >
-      {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
+      <Wifi className="w-3.5 h-3.5" />
     </button>
   );
 }
@@ -366,6 +405,7 @@ function Accounts() {
   const [editingModel, setEditingModel] = useState<Model | null>(null);
   const [assigningModelId, setAssigningModelId] = useState<string | null>(null);
   const [showKeyValues, setShowKeyValues] = useState<Set<string>>(new Set());
+  const [testDialog, setTestDialog] = useState<{ modelName: string; displayName: string } | null>(null);
   // Delete confirmation modal state
   const [deleteConfirm, setDeleteConfirm] = useState<{
     type: 'platform' | 'key' | 'model';
@@ -547,10 +587,9 @@ function Accounts() {
                             )}
                           </div>
                           <div className="flex items-center gap-1 shrink-0">                            <TestModelButton
-                              platformId={selectedPlatformId}
                               modelName={model.model_name}
                               displayName={model.display_name || model.model_name}
-                              testModel={testModel}
+                              onTest={(name, display) => setTestDialog({ modelName: name, displayName: display })}
                             />
                             <button className="p-1.5 text-gray-400 hover:text-blue-500 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors" onClick={() => { setEditingModel(model); setShowEditQuota(true); }} title={t('accounts.edit_model_quotas')}>
                               <Edit3 className="w-3.5 h-3.5" />
@@ -694,6 +733,16 @@ function Accounts() {
         </>
       )}
       <EditModelQuotaDialog open={showEditQuota} onClose={() => { setShowEditQuota(false); setEditingModel(null); }} model={editingModel} />
+      {selectedPlatformId && (
+        <TestModelDialog
+          open={testDialog !== null}
+          onClose={() => setTestDialog(null)}
+          platformId={selectedPlatformId}
+          modelName={testDialog?.modelName || ''}
+          displayName={testDialog?.displayName || ''}
+          testModel={testModel}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       <ModalDialog

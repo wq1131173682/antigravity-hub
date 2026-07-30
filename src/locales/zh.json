@@ -1402,6 +1402,18 @@
         "hint_max_ips": "0 表示不限制",
         "hint_curfew": "留空则禁用。基于服务器时间。"
     },
+    "diagnostics": {
+        "title": "模型诊断",
+        "hint": "发送最小测试请求，验证模型连通性和响应时间。",
+        "run_test": "开始测试",
+        "testing": "正在测试模型连通性...",
+        "test_again": "再次测试",
+        "latency": "延迟",
+        "status_code": "状态码",
+        "finish_reason": "结束原因",
+        "response_preview": "响应预览",
+        "context_placeholder": "自定义值 (如 1048576)"
+    },
     "profiles": {
         "title": "供应商配置",
         "description": "保存平台 + 模型的组合，方便快速参考。",
@@ -1419,6 +1431,15 @@
         "notes_placeholder": "可选备注...",
         "empty": "暂无配置。创建一个来保存平台+模型的组合。",
         "delete_confirm_title": "删除此配置？",
-        "delete_confirm_message": "此操作不可撤销。"
+        "delete_confirm_message": "此操作不可撤销。",
+        "active": "已激活",
+        "inactive": "未激活",
+        "enable_rotation": "启用轮转",
+        "rotation_strategy": "轮转策略",
+        "strategy_failover": "故障转移 (失败时尝试下一个)",
+        "strategy_none": "无 (单供应商)",
+        "priority": "优先级",
+        "enabled_toast": "已启用轮转",
+        "disabled_toast": "已禁用轮转"
     }
 }

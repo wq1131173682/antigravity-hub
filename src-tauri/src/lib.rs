@@ -181,6 +181,7 @@ pub fn run() {
             commands::list_profiles,
             commands::save_profile,
             commands::delete_profile,
+            commands::toggle_profile,
             // Debug console
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,

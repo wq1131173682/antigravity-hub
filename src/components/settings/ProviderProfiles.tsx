@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../../stores/usePlatformStore';
-import { Save, Trash2, Bookmark, Plus, X, Edit3, Layers, Server } from 'lucide-react';
+import { Power, PowerOff, ArrowUpDown, Save, Trash2, Bookmark, Plus, X, Edit3, Layers, Server } from 'lucide-react';
 import { showToast } from '../common/ToastContainer';
 import ModalDialog from '../common/ModalDialog';
 import * as profileService from '../../services/profileService';
@@ -17,6 +17,9 @@ export default function ProviderProfiles() {
   const [formPlatformId, setFormPlatformId] = useState('');
   const [formModelId, setFormModelId] = useState('');
   const [formNotes, setFormNotes] = useState('');
+  const [formActive, setFormActive] = useState(false);
+  const [formPriority, setFormPriority] = useState('0');
+  const [formStrategy, setFormStrategy] = useState('failover');
   const [saving, setSaving] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
@@ -50,6 +53,9 @@ export default function ProviderProfiles() {
     setFormPlatformId(platforms[0]?.id || '');
     setFormModelId('');
     setFormNotes('');
+    setFormActive(false);
+    setFormPriority('0');
+    setFormStrategy('failover');
     setShowForm(true);
   };
 
@@ -59,6 +65,9 @@ export default function ProviderProfiles() {
     setFormPlatformId(profile.platform_id);
     setFormModelId(profile.model_id);
     setFormNotes(profile.notes || '');
+    setFormActive(profile.active);
+    setFormPriority(String(profile.priority ?? 0));
+    setFormStrategy(profile.rotation_strategy || 'failover');
     setShowForm(true);
   };
 
@@ -79,6 +88,9 @@ export default function ProviderProfiles() {
         platformId: formPlatformId,
         modelId: formModelId,
         notes: formNotes.trim() || undefined,
+        active: formActive,
+        priority: parseInt(formPriority) || 0,
+        rotationStrategy: formStrategy,
       });
       showToast(t('common.success'), 'success');
       setShowForm(false);
@@ -96,6 +108,16 @@ export default function ProviderProfiles() {
       await profileService.deleteProfile(deleteConfirmId);
       showToast(t('common.delete_success'), 'success');
       setDeleteConfirmId(null);
+      loadProfiles();
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    }
+  };
+
+  const handleToggleActive = async (profile: profileService.ProviderProfile) => {
+    try {
+      await profileService.toggleProfile(profile.id, !profile.active);
+      showToast(profile.active ? t('profiles.disabled_toast') : t('profiles.enabled_toast'), 'success');
       loadProfiles();
     } catch (e) {
       showToast(`${t('common.error')}: ${e}`, 'error');
@@ -145,12 +167,33 @@ export default function ProviderProfiles() {
                 className="flex items-center justify-between px-3 py-2.5 bg-gray-50 dark:bg-base-200/50 rounded-lg border border-gray-100 dark:border-base-300 hover:border-violet-200 dark:hover:border-violet-800/50 transition-all group"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <Bookmark className="w-4 h-4 text-violet-400 shrink-0" />
+                  <button
+                    onClick={() => handleToggleActive(profile)}
+                    className={`p-1 rounded-lg transition-colors shrink-0 ${
+                      profile.active
+                        ? 'text-green-500 bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/30'
+                        : 'text-gray-400 bg-gray-100 dark:bg-base-300 hover:bg-gray-200 dark:hover:bg-base-200'
+                    }`}
+                    title={profile.active ? t('profiles.active') : t('profiles.inactive')}
+                  >
+                    {profile.active ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
+                  </button>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">
                         {profile.name}
                       </span>
+                      {profile.active && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 rounded">
+                          {t('profiles.active')}
+                        </span>
+                      )}
+                      <span className="flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] text-gray-400">
+                        <ArrowUpDown className="w-2.5 h-2.5" />
+                        P{profile.priority}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
                       {platform && (
                         <span className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded">
                           <Server className="w-2.5 h-2.5" />
@@ -163,6 +206,11 @@ export default function ProviderProfiles() {
                           {model.display_name || model.model_name}
                         </span>
                       )}
+                      {profile.rotation_strategy === 'failover' && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-mono bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 rounded">
+                          Failover
+                        </span>
+                      )}
                     </div>
                     {profile.notes && (
                       <p className="text-[11px] text-gray-400 dark:text-gray-500 mt-0.5 truncate max-w-xs">
@@ -171,7 +219,8 @@ export default function ProviderProfiles() {
                     )}
                   </div>
                 </div>
-                <div className="flex items-center gap-1 shrink-0">                    <button
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
                     className="p-1.5 text-gray-400 hover:text-violet-500 rounded-lg hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors opacity-0 group-hover:opacity-100"
                     onClick={() => handleEdit(profile)}
                     title={t('common.edit')}
@@ -245,6 +294,46 @@ export default function ProviderProfiles() {
                     <option key={m.id} value={m.id}>{m.display_name || m.model_name}</option>
                   ))}
                 </select>
+              </div>
+
+              {/* Active toggle */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-medium text-gray-500 dark:text-gray-400">{t('profiles.enable_rotation')}</label>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={formActive}
+                    onChange={e => setFormActive(e.target.checked)}
+                  />
+                  <div className="w-8 h-4.5 bg-gray-200 dark:bg-base-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-violet-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-violet-500" />
+                </label>
+              </div>
+
+              {/* Rotation Strategy */}
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('profiles.rotation_strategy')}</label>
+                <select
+                  className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-violet-500 outline-none"
+                  value={formStrategy}
+                  onChange={e => setFormStrategy(e.target.value)}
+                >
+                  <option value="failover">{t('profiles.strategy_failover')}</option>
+                  <option value="none">{t('profiles.strategy_none')}</option>
+                </select>
+              </div>
+
+              {/* Priority */}
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('profiles.priority')}</label>
+                <input
+                  type="number"
+                  min="0"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-violet-500 outline-none font-mono"
+                  value={formPriority}
+                  onChange={e => setFormPriority(e.target.value)}
+                  placeholder="0"
+                />
               </div>
 
               {/* Notes */}

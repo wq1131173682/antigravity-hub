@@ -79,6 +79,9 @@ export interface TestModelResult {
   success: boolean;
   latency_ms: number;
   model_name: string;
+  status_code: number;
+  response_preview: string | null;
+  finish_reason: string | null;
   message: string;
 }
 
