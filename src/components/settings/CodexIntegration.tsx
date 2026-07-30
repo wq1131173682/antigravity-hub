@@ -1,10 +1,14 @@
-﻿import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useConfigStore } from '../../stores/useConfigStore';
 import { usePlatformStore } from '../../stores/usePlatformStore';
 import * as codexService from '../../services/codexService';
 import { showToast } from '../common/ToastContainer';
-import { Terminal, CheckCircle2, XCircle, AlertTriangle, RotateCcw, Loader2, Play, FileCode, RefreshCw, Trash2, Lightbulb, Eye, EyeOff } from 'lucide-react';
+import {
+  Terminal, CheckCircle2, XCircle, AlertTriangle, RotateCcw, Loader2,
+  Play, FileCode, RefreshCw, Trash2, Lightbulb, Eye, EyeOff,
+  FolderOpen, Plus,
+} from 'lucide-react';
 
 type StatusType = 'idle' | 'checking' | 'ready' | 'applying' | 'success' | 'error';
 
@@ -15,6 +19,7 @@ export default function CodexIntegration() {
   const { config } = useConfigStore();
   const { platforms, models, fetchPlatforms, fetchModels } = usePlatformStore();
 
+  // Core state
   const [status, setStatus] = useState<StatusType>('idle');
   const [codexStatus, setCodexStatus] = useState<codexService.CodexStatus | null>(null);
   const [selectedPlatformId, setSelectedPlatformId] = useState<string>('');
@@ -23,7 +28,7 @@ export default function CodexIntegration() {
   const [result, setResult] = useState<codexService.ApplyResult | null>(null);
   const [modelsLoading, setModelsLoading] = useState(false);
 
-  // New optional settings
+  // Optional settings
   const [reasoningEffort, setReasoningEffort] = useState<string>('');
   const [disableResponseStorage, setDisableResponseStorage] = useState(true);
   const [apiKey, setApiKey] = useState<string>('');
@@ -32,9 +37,17 @@ export default function CodexIntegration() {
   // Env conflict detection
   const [envConflicts, setEnvConflicts] = useState<codexService.EnvConflictResult | null>(null);
 
+  // Profile state
+  const [profiles, setProfiles] = useState<codexService.CodexProfile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('');
+  const [profileName, setProfileName] = useState<string>('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+
   // Initialize
   useEffect(() => {
     fetchPlatforms();
+    loadProfiles();
   }, []);
 
   // Auto-detect when platforms load
@@ -44,13 +57,12 @@ export default function CodexIntegration() {
     }
   }, [platforms]);
 
-  // Fetch models when platform changes (only if not already cached)
+  // Fetch models when platform changes
   useEffect(() => {
     if (selectedPlatformId) {
       setSelectedModelName('');
       const cachedModels = usePlatformStore.getState().models[selectedPlatformId];
       if (cachedModels && cachedModels.length > 0) {
-        // Models already cached in store, no need to fetch
         if (!autoDetected) {
           setSelectedModelName(cachedModels[0].model_name);
           setAutoDetected(true);
@@ -69,6 +81,50 @@ export default function CodexIntegration() {
     }
   }, [selectedPlatformId]);
 
+  // Load profiles from backend
+  const loadProfiles = useCallback(async () => {
+    setProfilesLoading(true);
+    try {
+      const loaded = await codexService.listCodexProfiles();
+      setProfiles(loaded);
+    } catch {
+      // Silently fail - profiles are optional
+    } finally {
+      setProfilesLoading(false);
+    }
+  }, []);
+
+  // Apply form fields from a selected profile
+  const applyProfileToForm = useCallback((profile: codexService.CodexProfile) => {
+    setSelectedPlatformId(profile.platform_id);
+    setSelectedModelName(profile.model_name);
+    setReasoningEffort(profile.reasoning_effort || '');
+    setDisableResponseStorage(profile.disable_response_storage !== false);
+    setApiKey(profile.api_key || '');
+    // Note: proxy_host/port are auto-derived from config when applying
+  }, []);
+
+  // Handle profile selection change
+  const handleProfileSelect = useCallback((profileId: string) => {
+    setSelectedProfileId(profileId);
+    if (!profileId) {
+      setProfileName('');
+      return;
+    }
+    const profile = profiles.find(p => p.id === profileId);
+    if (profile) {
+      setProfileName(profile.name);
+      applyProfileToForm(profile);
+    }
+  }, [profiles, applyProfileToForm]);
+
+  // Handle platform selection
+  const handlePlatformChange = useCallback((value: string) => {
+    setSelectedPlatformId(value);
+    setAutoDetected(false);
+  }, []);
+
+  // Handle checking Codex status
   const handleCheck = useCallback(async () => {
     setStatus('checking');
     try {
@@ -85,6 +141,7 @@ export default function CodexIntegration() {
     }
   }, [t]);
 
+  // Handle applying current form to Codex CLI/Desktop
   const handleApply = useCallback(async () => {
     if (!selectedModelName) {
       showToast(t('codex.select_model_first'), 'warning');
@@ -122,6 +179,81 @@ export default function CodexIntegration() {
     }
   }, [selectedModelName, config, platforms, selectedPlatformId, t, reasoningEffort, disableResponseStorage, apiKey]);
 
+  // Handle applying a saved profile
+  const handleApplyProfile = useCallback(async () => {
+    if (!selectedProfileId) {
+      showToast(t('codex.select_model_first'), 'warning');
+      return;
+    }
+    setStatus('applying');
+    setResult(null);
+    try {
+      const res = await codexService.applyCodexProfile(selectedProfileId);
+      setResult(res);
+      setStatus('success');
+      showToast(t('codex.profile_applied'), 'success');
+
+      const cs = await codexService.checkCodexStatus();
+      setCodexStatus(cs);
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+      setStatus('error');
+    }
+  }, [selectedProfileId, t]);
+
+  // Handle saving current form as a profile
+  const handleSaveProfile = useCallback(async () => {
+    if (!profileName.trim()) {
+      showToast(t('codex.profile_name_required'), 'warning');
+      return;
+    }
+    if (!selectedPlatformId || !selectedModelName) {
+      showToast(t('codex.select_model_first'), 'warning');
+      return;
+    }
+
+    const selectedPlatform = platforms.find(p => p.id === selectedPlatformId);
+    const pathPrefix = selectedPlatform?.path_prefix || 'openai';
+
+    setSavingProfile(true);
+    try {
+      const saved = await codexService.saveCodexProfile({
+        id: selectedProfileId || null,
+        name: profileName.trim(),
+        platform_id: selectedPlatformId,
+        model_name: selectedModelName,
+        proxy_host: config?.proxy_host || '127.0.0.1',
+        proxy_port: config?.proxy_port || 8045,
+        path_prefix: pathPrefix,
+        reasoning_effort: reasoningEffort || null,
+        disable_response_storage: disableResponseStorage,
+        api_key: apiKey || null,
+      });
+      setSelectedProfileId(saved.id);
+      showToast(t('codex.profile_saved'), 'success');
+      await loadProfiles();
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    } finally {
+      setSavingProfile(false);
+    }
+  }, [profileName, selectedProfileId, selectedPlatformId, selectedModelName, platforms, config, reasoningEffort, disableResponseStorage, apiKey, t, loadProfiles]);
+
+  // Handle deleting a profile
+  const handleDeleteProfile = useCallback(async () => {
+    if (!selectedProfileId) return;
+    try {
+      await codexService.deleteCodexProfile(selectedProfileId);
+      setSelectedProfileId('');
+      setProfileName('');
+      showToast(t('codex.profile_deleted'), 'success');
+      await loadProfiles();
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    }
+  }, [selectedProfileId, t, loadProfiles]);
+
+  // Handle restore
   const handleRestore = useCallback(async () => {
     setStatus('applying');
     try {
@@ -129,7 +261,6 @@ export default function CodexIntegration() {
       setResult(res);
       setStatus('success');
       showToast(t('codex.restore_success'), 'success');
-
       const cs = await codexService.checkCodexStatus();
       setCodexStatus(cs);
     } catch (e) {
@@ -138,6 +269,7 @@ export default function CodexIntegration() {
     }
   }, [t]);
 
+  // Handle clear auth
   const handleClearAuth = useCallback(async () => {
     try {
       const res = await codexService.clearCodexAuth();
@@ -158,6 +290,8 @@ export default function CodexIntegration() {
     envConflicts.has_codex_home
   );
 
+  const selectedProfile = profiles.find(p => p.id === selectedProfileId);
+
   return (
     <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
       <div className="flex items-center gap-2 mb-4">
@@ -170,6 +304,105 @@ export default function CodexIntegration() {
       <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
         {t('codex.description')}
       </p>
+
+      {/* ===== Saved Profiles Section ===== */}
+      <div className="mb-5 p-4 bg-gradient-to-br from-gray-50 to-gray-100 dark:from-base-300/50 dark:to-base-300/30 rounded-xl border border-gray-200 dark:border-base-200">
+        <div className="flex items-center gap-2 mb-3">
+          <FolderOpen className="w-4 h-4 text-blue-500" />
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-base-content">
+            {t('codex.profiles_title')}
+          </h3>
+          {profilesLoading && (
+            <Loader2 className="w-3 h-3 animate-spin text-gray-400" />
+          )}
+        </div>
+
+        <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+          {t('codex.profiles_description')}
+        </p>
+
+        {/* Profile Selector Row */}
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <div className="flex-1 min-w-[160px]">
+            <select
+              className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none border-gray-200 dark:border-base-300"
+              value={selectedProfileId}
+              onChange={(e) => handleProfileSelect(e.target.value)}
+            >
+              <option value="">{t('codex.profile_select')}</option>
+              {profiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Apply Profile Button */}
+          {selectedProfile && (
+            <button
+              className="px-3 py-2 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+              onClick={handleApplyProfile}
+              disabled={status === 'applying'}
+            >
+              {status === 'applying' ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Play className="w-3.5 h-3.5" />
+              )}
+              {t('codex.profile_apply')}
+            </button>
+          )}
+
+          {/* Delete Profile Button */}
+          {selectedProfile && (
+            <button
+              className="px-3 py-2 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-sm font-medium rounded-lg border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors flex items-center gap-1.5"
+              onClick={() => {
+                if (window.confirm(t('codex.profile_delete_confirm'))) {
+                  handleDeleteProfile();
+                }
+              }}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {t('codex.profile_delete')}
+            </button>
+          )}
+        </div>
+
+        {/* Save current as profile */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex-1 min-w-[160px]">
+            <input
+              type="text"
+              className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none border-gray-200 dark:border-base-300"
+              value={profileName}
+              onChange={(e) => setProfileName(e.target.value)}
+              placeholder={t('codex.profile_name_placeholder')}
+            />
+          </div>
+          <button
+            className="px-3 py-2 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+            onClick={handleSaveProfile}
+            disabled={savingProfile}
+          >
+            {savingProfile ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : selectedProfile ? (
+              <RefreshCw className="w-3.5 h-3.5" />
+            ) : (
+              <Plus className="w-3.5 h-3.5" />
+            )}
+            {t('codex.profile_save_as')}
+          </button>
+        </div>
+
+        {profiles.length === 0 && !profilesLoading && (
+          <p className="text-xs text-gray-400 dark:text-gray-500 mt-2 italic">
+            {t('codex.profile_no_saved')}
+          </p>
+        )}
+      </div>
 
       {/* Environment Variable Conflict Warning */}
       {hasConflicts && (
@@ -248,7 +481,7 @@ export default function CodexIntegration() {
             <select
               className="w-full px-3 py-2 text-sm border rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-emerald-500 outline-none border-gray-200 dark:border-base-300"
               value={selectedPlatformId}
-              onChange={(e) => { setSelectedPlatformId(e.target.value); setAutoDetected(false); }}
+              onChange={(e) => handlePlatformChange(e.target.value)}
             >
               {platforms.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
@@ -285,6 +518,43 @@ export default function CodexIntegration() {
             )}
           </div>
         </div>
+
+        {/* Proxy Settings (auto-populated from app config) */}
+        <details className="group">
+          <summary className="text-xs font-medium text-gray-500 dark:text-gray-400 cursor-pointer hover:text-gray-700 dark:hover:text-gray-300 flex items-center gap-1.5 select-none">
+            <Terminal className="w-3.5 h-3.5" />
+            {t('codex.proxy_settings')}
+          </summary>
+          <div className="mt-3 p-3 bg-gray-50 dark:bg-base-300 rounded-lg border border-gray-100 dark:border-base-200">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                  {t('codex.proxy_host')}
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 text-sm border rounded-lg bg-gray-100 dark:bg-base-200 text-gray-600 dark:text-gray-400 font-mono cursor-not-allowed border-gray-200 dark:border-base-300"
+                  value={config?.proxy_host || '127.0.0.1'}
+                  readOnly
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                  {t('codex.proxy_port')}
+                </label>
+                <input
+                  type="text"
+                  className="w-full px-3 py-2 text-sm border rounded-lg bg-gray-100 dark:bg-base-200 text-gray-600 dark:text-gray-400 font-mono cursor-not-allowed border-gray-200 dark:border-base-300"
+                  value={config?.proxy_port || 8045}
+                  readOnly
+                />
+              </div>
+            </div>
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-2">
+              {t('codex.use_app_config')} — {t('codex.config_preview')}: <code className="text-emerald-600 dark:text-emerald-400">http://{config?.proxy_host || '127.0.0.1'}:{config?.proxy_port || 8045}/{pathPrefix}/v1</code>
+            </p>
+          </div>
+        </details>
 
         {/* Advanced Options */}
         <details className="group">

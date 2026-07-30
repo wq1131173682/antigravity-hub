@@ -541,3 +541,57 @@ pub fn get_lan_ip() -> Result<String, String> {
         .map_err(|e| format!("Failed to get local addr: {}", e))?;
     Ok(local_addr.ip().to_string())
 }
+
+// ============================================================================
+// Codex Profile Commands
+// ============================================================================
+
+/// List all saved Codex provider profiles
+#[tauri::command]
+pub async fn list_codex_profiles() -> Result<Vec<crate::models::CodexProfile>, String> {
+    crate::modules::codex_integration::list_codex_profiles()
+}
+
+/// Save a Codex provider profile (create or update)
+#[tauri::command]
+pub async fn save_codex_profile(
+    id: Option<String>,
+    name: String,
+    platform_id: String,
+    model_name: String,
+    proxy_host: String,
+    proxy_port: u16,
+    path_prefix: String,
+    reasoning_effort: Option<String>,
+    disable_response_storage: Option<bool>,
+    api_key: Option<String>,
+) -> Result<crate::models::CodexProfile, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::save_codex_profile(
+            id, name, platform_id, model_name, proxy_host, proxy_port,
+            path_prefix, reasoning_effort, disable_response_storage, api_key,
+        )
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
+}
+
+/// Delete a Codex provider profile
+#[tauri::command]
+pub async fn delete_codex_profile(profile_id: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::delete_codex_profile(profile_id)
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
+}
+
+/// Apply a saved Codex provider profile
+#[tauri::command]
+pub async fn apply_codex_profile(profile_id: String) -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::apply_codex_profile(profile_id)
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
+}

@@ -1,10 +1,16 @@
 ﻿use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 /// Codex CLI configuration directory and file constants
 const CODEX_DIR: &str = ".codex";
 const CONFIG_FILE: &str = "config.toml";
 const BACKUP_SUFFIX: &str = ".antigravity.bak";
+
+/// Model catalog file name template
+const CATALOG_FILE: &str = "{}-models.json";
+/// Default context window for models that don't specify one
+const DEFAULT_CONTEXT_WINDOW: u64 = 128000;
 
 /// Status of Codex CLI installation and configuration
 #[derive(Debug, serde::Serialize)]
@@ -114,6 +120,103 @@ fn validate_reasoning_effort(effort: Option<&str>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Generate a model catalog file for Codex Desktop.
+///
+/// Codex Desktop uses a `model_catalog_json` file to know which models are
+/// available for selection in the UI. Without it, Desktop falls back to a
+/// built-in catalog that may contain models not configured in Antigravity Hub,
+/// causing 404 errors when the proxy routes them to the wrong upstream.
+///
+/// The catalog file is written to `~/.codex/model-catalogs/{path_prefix}-models.json`
+/// and contains all models for the platform identified by `path_prefix`.
+fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
+    use crate::modules::config;
+    use crate::modules::model_manager;
+
+    // Look up the platform by path_prefix
+    let app_config = config::load_app_config()
+        .map_err(|e| format!("Failed to load app config: {}", e))?;
+
+    let platform = app_config.platforms.iter()
+        .find(|p| p.path_prefix == path_prefix)
+        .ok_or_else(|| format!("Platform with path_prefix '{}' not found in config", path_prefix))?;
+
+    let platform_id = &platform.id;
+    let platform_name = &platform.name;
+
+    // List all models for this platform
+    let models = model_manager::list_models(platform_id)
+        .map_err(|e| format!("Failed to list models for platform '{}': {}", platform_id, e))?;
+
+    // Build the catalog entries
+    let catalog_models: Vec<serde_json::Value> = models.iter().map(|m| {
+        let context_window = m.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        // Auto-compact at half the context window, capped at 196608
+        let auto_compact = std::cmp::min(context_window / 2, 196608_u64);
+
+        serde_json::json!({
+            "model": m.model_name,
+            "slug": m.model_name,
+            "display_name": format!("{} / {}", platform_name, m.display_name),
+            "description": m.model_name,
+            "visibility": "list",
+            "supported_in_api": true,
+            "context_window": context_window,
+            "max_context_window": context_window,
+            "effective_context_window_percent": 95,
+            "auto_compact_token_limit": auto_compact,
+            "input_modalities": ["text", "image"],
+            "supports_image_detail_original": true,
+            "supports_parallel_tool_calls": true,
+            "supports_search_tool": true,
+            "web_search_tool_type": "text_and_image",
+            "apply_patch_tool_type": "freeform",
+            "shell_type": "shell_command",
+            "supports_reasoning_summaries": true,
+            "default_reasoning_summary": "auto",
+            "default_reasoning_level": "medium",
+            "support_verbosity": true,
+            "default_verbosity": "low",
+            "truncation_policy": {
+                "mode": "tokens",
+                "limit": 10000
+            },
+            "priority": 10
+        })
+    }).collect();
+
+    let catalog = serde_json::json!({
+        "models": catalog_models
+    });
+
+    // Ensure the model-catalogs directory exists
+    let catalog_dir = resolve_codex_home().join("model-catalogs");
+    std::fs::create_dir_all(&catalog_dir)
+        .map_err(|e| format!("Failed to create model-catalogs directory: {}", e))?;
+
+    // Write the catalog file
+    let catalog_filename = CATALOG_FILE.replace("{}", path_prefix);
+    let catalog_path = catalog_dir.join(&catalog_filename);
+    let catalog_json = serde_json::to_string_pretty(&catalog)
+        .map_err(|e| format!("Failed to serialize model catalog: {}", e))?;
+
+    // Write atomically using temp file
+    let temp_path = catalog_dir.join(format!("{}.tmp", catalog_filename));
+    std::fs::write(&temp_path, &catalog_json)
+        .map_err(|e| format!("Failed to write model catalog: {}", e))?;
+    std::fs::rename(&temp_path, &catalog_path)
+        .map_err(|e| format!("Failed to finalize model catalog: {}", e))?;
+
+    info!(
+        "Model catalog generated: {:?} ({} models for platform '{}')",
+        catalog_path,
+        models.len(),
+        platform_name
+    );
+
+    Ok(catalog_path.to_string_lossy().to_string())
 }
 
 // ── Public API ──
@@ -241,11 +344,25 @@ pub fn apply_codex_config(
     let client_host = if proxy_host == "0.0.0.0" { "127.0.0.1" } else { proxy_host };
     let proxy_base_url = format!("http://{}:{}/{}/v1", client_host, proxy_port, path_prefix);
 
+    // ── Try generating model catalog for Codex Desktop ──
+    // If successful, we produce a Desktop-compatible config (minimal fields).
+    // If it fails, we fall back to CLI mode with all standard fields.
+    let is_desktop = match generate_model_catalog(path_prefix) {
+        Ok(catalog_path) => {
+            info!("model_catalog_json set to: {}", catalog_path);
+            config.insert(
+                "model_catalog_json".to_string(),
+                toml::Value::String(catalog_path),
+            );
+            true
+        }
+        Err(e) => {
+            warn!("Failed to generate model catalog (non-fatal): {}", e);
+            false
+        }
+    };
+
     // ── Set top-level keys ──
-    // Use "custom" as the standard provider name (per Codex CLI blog recommendation).
-    // This avoids the ChatGPT login flow — Codex CLI will use API Key auth instead.
-    // The provider name is always "custom" regardless of which platform is selected,
-    // so re-applying for a different platform cleanly replaces the old config.
     config.insert(
         "model_provider".to_string(),
         toml::Value::String("custom".to_string()),
@@ -254,30 +371,30 @@ pub fn apply_codex_config(
         "model".to_string(),
         toml::Value::String(model_name.to_string()),
     );
-    config.insert(
-        "preferred_auth_method".to_string(),
-        toml::Value::String("apikey".to_string()),
-    );
 
-    // Set disable_response_storage (optional)
-    if let Some(val) = disable_response_storage {
+    // CLI-specific fields — skip for Desktop mode to avoid compatibility issues
+    // Desktop's TOML parser doesn't recognize these fields, which can cause
+    // "Windows installation not complete" errors during initialization.
+    if !is_desktop {
         config.insert(
-            "disable_response_storage".to_string(),
-            toml::Value::Boolean(val),
+            "preferred_auth_method".to_string(),
+            toml::Value::String("apikey".to_string()),
         );
-    }
-
-    // Set model_reasoning_effort (optional)
-    if let Some(effort) = reasoning_effort {
-        config.insert(
-            "model_reasoning_effort".to_string(),
-            toml::Value::String(effort.to_string()),
-        );
+        if let Some(val) = disable_response_storage {
+            config.insert(
+                "disable_response_storage".to_string(),
+                toml::Value::Boolean(val),
+            );
+        }
+        if let Some(effort) = reasoning_effort {
+            config.insert(
+                "model_reasoning_effort".to_string(),
+                toml::Value::String(effort.to_string()),
+            );
+        }
     }
 
     // ── [model_providers.custom] section ──
-    // Always use "custom" as the provider key name. The base_URL includes the
-    // path_prefix so requests are correctly routed to the right platform.
     let mut provider_table = toml::Table::new();
     provider_table.insert(
         "name".to_string(),
@@ -291,18 +408,57 @@ pub fn apply_codex_config(
         "wire_api".to_string(),
         toml::Value::String("responses".to_string()),
     );
-    // CRITICAL: Prevents Codex CLI from trying OpenAI OAuth authentication
-    provider_table.insert(
-        "requires_openai_auth".to_string(),
-        toml::Value::Boolean(false),
-    );
-    // Optional: inject API key directly into provider config
-    if let Some(key) = api_key {
-        if !key.is_empty() {
-            provider_table.insert(
-                "api_key".to_string(),
-                toml::Value::String(key.to_string()),
-            );
+
+    if is_desktop {
+        // Desktop reads API keys from environment variables, not from config.
+        // `env_key` tells Desktop which env var to use for the custom provider.
+        provider_table.insert(
+            "env_key".to_string(),
+            toml::Value::String("OPENAI_API_KEY".to_string()),
+        );
+
+        // Add models array so Codex Desktop's UI dropdown shows available models.
+        // Without this, the model selector in Desktop's settings page is empty.
+        if let Some(platform) = crate::modules::config::load_app_config()
+            .ok()
+            .and_then(|cfg| cfg.platforms.into_iter().find(|p| p.path_prefix == path_prefix))
+        {
+            if let Ok(models) = crate::modules::model_manager::list_models(&platform.id) {
+                let models_array: Vec<toml::Value> = models.iter().map(|m| {
+                    let mut entry = toml::Table::new();
+                    entry.insert(
+                        "model".to_string(),
+                        toml::Value::String(m.model_name.clone()),
+                    );
+                    entry.insert(
+                        "display_name".to_string(),
+                        toml::Value::String(m.display_name.clone()),
+                    );
+                    toml::Value::Table(entry)
+                }).collect();
+                if !models_array.is_empty() {
+                    provider_table.insert(
+                        "models".to_string(),
+                        toml::Value::Array(models_array),
+                    );
+                }
+            }
+        }
+    }
+
+    if !is_desktop {
+        // CLI-only: prevents OpenAI OAuth, injects API key
+        provider_table.insert(
+            "requires_openai_auth".to_string(),
+            toml::Value::Boolean(false),
+        );
+        if let Some(key) = api_key {
+            if !key.is_empty() {
+                provider_table.insert(
+                    "api_key".to_string(),
+                    toml::Value::String(key.to_string()),
+                );
+            }
         }
     }
 
@@ -325,11 +481,13 @@ pub fn apply_codex_config(
         .map_err(|e| format!("Failed to serialize Codex config: {}", e))?;
 
     // Add a header comment
+    let config_type = if is_desktop { "Desktop" } else { "CLI" };
     let final_content = format!(
-        "# Codex Configuration\n\
+        "# Codex {} Configuration\n\
          # Managed by Antigravity Hub\n\
          # Applied at: {}\n\
          # To revert, delete this file or restore the backup.\n\n{}",
+        config_type,
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         output
     );
@@ -342,22 +500,21 @@ pub fn apply_codex_config(
         .map_err(|e| format!("Failed to finalize Codex config: {}", e))?;
 
     info!(
-        "Codex config applied: model_provider=custom, model={}, path_prefix={}, reasoning_effort={:?}, disable_storage={:?}, base_url={}, path={:?}",
-        model_name, path_prefix, reasoning_effort, disable_response_storage, proxy_base_url, cfg_path
+        "Codex config applied: type={}, model={}, path_prefix={}, base_url={}, path={:?}",
+        config_type, model_name, path_prefix, proxy_base_url, cfg_path
     );
 
     Ok(ApplyResult {
         success: true,
         message: format!(
-            "Codex configuration applied!\n\
+            "Codex {} configuration applied!\n\
              Provider: custom (routed via /{}/)\n\
              Model: {}\n\
-             Reasoning Effort: {}\n\
              Base URL: {}\n\
              File: {}",
+            config_type,
             path_prefix,
             model_name,
-            reasoning_effort.unwrap_or("default"),
             proxy_base_url,
             cfg_path.display()
         ),
@@ -445,6 +602,121 @@ pub fn clear_codex_auth() -> Result<ApplyResult, String> {
         config_path: config_path().to_string_lossy().to_string(),
         backup_path: None,
     })
+}
+
+// ── Codex Provider Profile Management ──
+
+/// List all saved Codex provider profiles.
+pub fn list_codex_profiles() -> Result<Vec<crate::models::CodexProfile>, String> {
+    let app_config = crate::modules::config::load_app_config()?;
+    Ok(app_config.codex_profiles)
+}
+
+/// Save a Codex provider profile.
+/// If the profile has an existing `id`, it updates the existing one.
+/// If `id` is empty or None, it creates a new profile with a generated UUID.
+pub fn save_codex_profile(
+    id: Option<String>,
+    name: String,
+    platform_id: String,
+    model_name: String,
+    proxy_host: String,
+    proxy_port: u16,
+    path_prefix: String,
+    reasoning_effort: Option<String>,
+    disable_response_storage: Option<bool>,
+    api_key: Option<String>,
+) -> Result<crate::models::CodexProfile, String> {
+    let mut app_config = crate::modules::config::load_app_config()?;
+    let now = chrono::Utc::now().timestamp();
+
+    // Determine profile ID and whether this is an update
+    let (profile_id, is_update) = match id.as_deref() {
+        Some(existing) if !existing.is_empty() => {
+            (existing.to_string(), true)
+        }
+        _ => (Uuid::new_v4().to_string(), false),
+    };
+
+    // Preserve original created_at on update
+    let original_created_at = if is_update {
+        app_config.codex_profiles.iter()
+            .find(|p| p.id == profile_id)
+            .map(|p| p.created_at)
+    } else {
+        None
+    };
+
+    let profile = crate::models::CodexProfile {
+        id: profile_id.clone(),
+        name,
+        platform_id,
+        model_name,
+        proxy_host,
+        proxy_port,
+        path_prefix,
+        reasoning_effort,
+        disable_response_storage,
+        api_key,
+        created_at: original_created_at.unwrap_or(now),
+        updated_at: now,
+    };
+
+    // Find and replace existing, or append
+    if let Some(pos) = app_config.codex_profiles.iter().position(|p| p.id == profile_id) {
+        app_config.codex_profiles[pos] = profile.clone();
+    } else {
+        app_config.codex_profiles.push(profile.clone());
+    }
+
+    crate::modules::config::save_app_config(&app_config)?;
+    info!("Codex profile saved: {} ({})", profile.name, profile.id);
+    Ok(profile)
+}
+
+/// Delete a Codex provider profile by ID.
+pub fn delete_codex_profile(profile_id: String) -> Result<(), String> {
+    let mut app_config = crate::modules::config::load_app_config()?;
+    let len_before = app_config.codex_profiles.len();
+    app_config.codex_profiles.retain(|p| p.id != profile_id);
+    if app_config.codex_profiles.len() == len_before {
+        return Err(format!("Codex profile '{}' not found", profile_id));
+    }
+    crate::modules::config::save_app_config(&app_config)?;
+    info!("Codex profile deleted: {}", profile_id);
+    Ok(())
+}
+
+/// Apply a saved Codex provider profile.
+/// Loads the profile, resolves the platform's path_prefix if empty,
+/// then calls `apply_codex_config` with the profile's settings.
+pub fn apply_codex_profile(profile_id: String) -> Result<ApplyResult, String> {
+    let app_config = crate::modules::config::load_app_config()?;
+
+    let profile = app_config.codex_profiles.iter()
+        .find(|p| p.id == profile_id)
+        .ok_or_else(|| format!("Codex profile '{}' not found", profile_id))?;
+
+    // Resolve path_prefix from platform if needed
+    let path_prefix = if profile.path_prefix.is_empty() {
+        app_config.platforms.iter()
+            .find(|p| p.id == profile.platform_id)
+            .map(|p| p.path_prefix.as_str())
+            .unwrap_or("openai")
+            .to_string()
+    } else {
+        profile.path_prefix.clone()
+    };
+
+    apply_codex_config(
+        &profile.proxy_host,
+        profile.proxy_port,
+        &path_prefix,
+        &profile.model_name,
+        profile.reasoning_effort.as_deref(),
+        profile.disable_response_storage,
+        profile.api_key.as_deref(),
+    )
 }
 
 /// Check for environment variable conflicts that could interfere with Codex CLI.

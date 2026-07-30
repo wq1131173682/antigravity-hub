@@ -112,6 +112,12 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'check_codex_status': { url: '/api/codex/status', method: 'GET' },
   'apply_codex_config': { url: '/api/codex/apply', method: 'POST' },
   'restore_codex_config': { url: '/api/codex/restore', method: 'POST' },
+  'clear_codex_auth': { url: '/api/codex/auth/clear', method: 'POST' },
+  'check_codex_env_conflicts': { url: '/api/codex/env-check', method: 'GET' },
+  'list_codex_profiles': { url: '/api/codex/profiles', method: 'GET' },
+  'save_codex_profile': { url: '/api/codex/profiles', method: 'POST' },
+  'delete_codex_profile': { url: '/api/codex/profiles/:profileId', method: 'DELETE' },
+  'apply_codex_profile': { url: '/api/codex/profiles/:profileId/apply', method: 'POST' },
 
   // Stats
   'get_token_stats_hourly': { url: '/api/stats/token/hourly', method: 'GET' },

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use super::platform::Platform;
+use super::codex::CodexProfile;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,9 @@ pub struct AppConfig {
     /// List of configured platforms
     #[serde(default)]
     pub platforms: Vec<Platform>,
+    /// Saved Codex provider profiles
+    #[serde(default)]
+    pub codex_profiles: Vec<CodexProfile>,
 }
 
 fn default_proxy_port() -> u16 {
@@ -47,6 +51,7 @@ impl AppConfig {
             auto_switch: true,
             upstream_proxy_url: None,
             platforms: Vec::new(),
+            codex_profiles: Vec::new(),
         }
     }
 }

@@ -60,3 +60,64 @@ export async function clearCodexAuth(): Promise<ApplyResult> {
 export async function checkCodexEnvConflicts(): Promise<EnvConflictResult> {
   return await invoke('check_codex_env_conflicts');
 }
+
+// ── Codex Provider Profiles ──
+
+export interface CodexProfile {
+  id: string;
+  name: string;
+  platform_id: string;
+  model_name: string;
+  proxy_host: string;
+  proxy_port: number;
+  path_prefix: string;
+  reasoning_effort: string | null;
+  disable_response_storage: boolean | null;
+  api_key: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SaveCodexProfileParams {
+  id?: string | null;
+  name: string;
+  platform_id: string;
+  model_name: string;
+  proxy_host: string;
+  proxy_port: number;
+  path_prefix: string;
+  reasoning_effort?: string | null;
+  disable_response_storage?: boolean | null;
+  api_key?: string | null;
+}
+
+export async function listCodexProfiles(): Promise<CodexProfile[]> {
+  return await invoke('list_codex_profiles');
+}
+
+export async function saveCodexProfile(params: SaveCodexProfileParams): Promise<CodexProfile> {
+  return await invoke('save_codex_profile', {
+    id: params.id ?? null,
+    name: params.name,
+    platformId: params.platform_id,
+    modelName: params.model_name,
+    proxyHost: params.proxy_host,
+    proxyPort: params.proxy_port,
+    pathPrefix: params.path_prefix,
+    reasoningEffort: params.reasoning_effort ?? null,
+    disableResponseStorage: params.disable_response_storage ?? null,
+    apiKey: params.api_key ?? null,
+  });
+}
+
+export async function deleteCodexProfile(profileId: string): Promise<void> {
+  return await invoke('delete_codex_profile', {
+    profileId,
+  });
+}
+
+export async function applyCodexProfile(profileId: string): Promise<ApplyResult> {
+  return await invoke('apply_codex_profile', {
+    profileId,
+  });
+}
