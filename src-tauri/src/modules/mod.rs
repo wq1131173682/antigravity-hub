@@ -10,5 +10,4 @@ pub mod logger;
 pub mod log_bridge;
 pub mod i18n;
 pub mod token_stats;
-pub mod codex_integration;
 pub mod codex_translator;

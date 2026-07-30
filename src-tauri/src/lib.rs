@@ -177,17 +177,6 @@ pub fn run() {
             commands::set_window_theme,
             // Utility
             commands::get_lan_ip,
-            // Codex CLI integration
-            commands::check_codex_status,
-            commands::apply_codex_config,
-            commands::restore_codex_config,
-            commands::clear_codex_auth,
-            commands::check_codex_env_conflicts,
-            // Codex Provider Profiles
-            commands::list_codex_profiles,
-            commands::save_codex_profile,
-            commands::delete_codex_profile,
-            commands::apply_codex_profile,
             // Debug console
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,

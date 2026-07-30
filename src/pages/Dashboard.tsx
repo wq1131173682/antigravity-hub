@@ -1,12 +1,11 @@
-import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
-import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw, Settings, Play } from 'lucide-react';
+import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw } from 'lucide-react';
 import { getLanIp, getTokenStats, resetTokenStats, TokenStats } from '../services/platformService';
-import * as codexService from '../services/codexService';
 import { isTauri } from '../utils/env';
 import { MODEL_CONFIG } from '../config/modelConfig';
 
@@ -48,8 +47,6 @@ function Dashboard() {
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
   const [resettingStats, setResettingStats] = useState(false);
-  const [codexProfiles, setCodexProfiles] = useState<codexService.CodexProfile[]>([]);
-  const [applyingProfileId, setApplyingProfileId] = useState<string | null>(null);
   const startTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Cleanup timeout on unmount
@@ -57,11 +54,6 @@ function Dashboard() {
     return () => {
       if (startTimeoutRef.current) clearTimeout(startTimeoutRef.current);
     };
-  }, []);
-
-  // Load Codex profiles for quick-apply card
-  useEffect(() => {
-    codexService.listCodexProfiles().then(setCodexProfiles).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -133,22 +125,6 @@ function Dashboard() {
     const id = setInterval(refresh, 3000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
-
-  // Handle applying a Codex profile from the dashboard
-  const handleApplyProfile = useCallback(async (profileId: string) => {
-    setApplyingProfileId(profileId);
-    try {
-      const res = await codexService.applyCodexProfile(profileId);
-      if (res.success) {
-        const profile = codexProfiles.find(p => p.id === profileId);
-        showToast(`Codex: ${profile?.name || 'Profile'} applied!`, 'success');
-      }
-    } catch (e) {
-      showToast(`${t('common.error')}: ${e}`, 'error');
-    } finally {
-      setApplyingProfileId(null);
-    }
-  }, [codexProfiles, t]);
 
   const handleResetTokenStats = async () => {
     if (resettingStats) return;
@@ -1017,81 +993,6 @@ Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
             </div>
           </div>
         </div>
-        {/* Codex Profile Quick Actions */}
-        {codexProfiles.length > 0 && (
-          <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="p-1.5 bg-emerald-50 dark:bg-emerald-900/20 rounded-md">
-                  <Terminal className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
-                </div>
-                <h2 className="font-semibold text-gray-900 dark:text-base-content text-sm">
-                  Codex 配置快速切换
-                </h2>
-                <span className="text-[11px] text-gray-400 dark:text-gray-500">Quick Apply</span>
-              </div>
-              <button
-                onClick={() => navigate('/settings')}
-                className="text-[11px] px-2.5 py-1 rounded-md bg-gray-100 dark:bg-base-300 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-base-200 transition-colors flex items-center gap-1"
-              >
-                <Settings className="w-3 h-3" />
-                {t('settings.title')}
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              {codexProfiles.map(profile => (
-                <div
-                  key={profile.id}
-                  className="relative group bg-gray-50 dark:bg-base-200/50 rounded-lg border border-gray-100 dark:border-base-300 hover:border-emerald-200 dark:hover:border-emerald-800/50 transition-all hover:shadow-sm"
-                >
-                  <div className="p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-semibold text-gray-800 dark:text-gray-200 truncate max-w-[140px]">
-                        {profile.name}
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        {profile.model_name && (
-                          <span className="text-[10px] font-mono bg-gray-200/60 dark:bg-base-300/60 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400 truncate max-w-[80px]">
-                            {profile.model_name.split('/').pop()}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px] text-gray-400 dark:text-gray-500">
-                      <span className="truncate max-w-[100px]">/{profile.path_prefix}</span>
-                      <span>·</span>
-                      <span>{profile.proxy_host}:{profile.proxy_port}</span>
-                    </div>
-                  </div>
-                  <div className="px-3 pb-3">
-                    <button
-                      onClick={() => handleApplyProfile(profile.id)}
-                      disabled={applyingProfileId === profile.id}
-                      className={`w-full py-1.5 text-[11px] font-medium rounded-md transition-all flex items-center justify-center gap-1 ${
-                        applyingProfileId === profile.id
-                          ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400'
-                          : 'bg-emerald-500 text-white hover:bg-emerald-600 active:scale-[0.97] shadow-sm'
-                      }`}
-                    >
-                      {applyingProfileId === profile.id ? (
-                        <>
-                          <RefreshCw className="w-3 h-3 animate-spin" />
-                          Applying...
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3 h-3" />
-                          Apply
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

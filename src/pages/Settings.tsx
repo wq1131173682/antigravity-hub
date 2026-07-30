@@ -1,7 +1,6 @@
 import { version } from '../../package.json';
 import { useState, useEffect } from 'react';
 import { Save, RefreshCw, Server, Globe, Shield } from 'lucide-react';
-import CodexIntegration from '../components/settings/CodexIntegration';
 import { request as invoke } from '../utils/request';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
@@ -164,9 +163,6 @@ function Settings() {
             </div>
           </div>
         </div>
-
-        {/* Codex CLI Integration */}
-        <CodexIntegration />
 
         {/* Language Settings */}
         <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">

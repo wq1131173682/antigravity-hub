@@ -1,16 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
-import { useConfigStore } from '../stores/useConfigStore';
 import type { Model } from '../types/platform';
 import type { TestModelResult } from '../services/platformService';
 import { showToast } from '../components/common/ToastContainer';
 import ModalDialog from '../components/common/ModalDialog';
-import * as codexService from '../services/codexService';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  Terminal, X, RefreshCw, Wifi, Loader2
+  X, RefreshCw, Wifi, Loader2
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -367,7 +365,6 @@ function Accounts() {
   const [showEditQuota, setShowEditQuota] = useState(false);
   const [editingModel, setEditingModel] = useState<Model | null>(null);
   const [assigningModelId, setAssigningModelId] = useState<string | null>(null);
-  const [applyingModelToCodex, setApplyingModelToCodex] = useState<string | null>(null);
   const [showKeyValues, setShowKeyValues] = useState<Set<string>>(new Set());
   // Delete confirmation modal state
   const [deleteConfirm, setDeleteConfirm] = useState<{
@@ -549,45 +546,7 @@ function Accounts() {
                               </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              className={`p-1.5 rounded-lg transition-colors ${
-                                applyingModelToCodex === model.id
-                                  ? 'text-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 animate-pulse'
-                                  : 'text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'
-                              }`}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                if (applyingModelToCodex || !selectedPlatform) return;
-                                const appConfig = useConfigStore.getState().config;
-                                if (!appConfig) {
-                                  showToast(t('codex.config_not_loaded'), 'warning');
-                                  return;
-                                }
-                                setApplyingModelToCodex(model.id);
-                                try {
-                                  await codexService.applyCodexConfig({
-                                    proxyHost: appConfig.proxy_host || '127.0.0.1',
-                                    proxyPort: appConfig.proxy_port || 8045,
-                                    pathPrefix: selectedPlatform.path_prefix,
-                                    modelName: model.model_name,
-                                  });
-                                  showToast(t('codex.apply_success'), 'success');
-                                } catch (e) {
-                                  showToast(`${t('common.error')}: ${e}`, 'error');
-                                } finally {
-                                  setApplyingModelToCodex(null);
-                                }
-                              }}
-                              title={t('codex.apply_to_codex')}
-                            >
-                              {applyingModelToCodex === model.id ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Terminal className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                            <TestModelButton
+                          <div className="flex items-center gap-1 shrink-0">                            <TestModelButton
                               platformId={selectedPlatformId}
                               modelName={model.model_name}
                               displayName={model.display_name || model.model_name}
