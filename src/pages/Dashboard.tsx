@@ -186,6 +186,18 @@ function Dashboard() {
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-medium text-gray-800 dark:text-gray-200">{p.name}</span>
                         <span className="text-[10px] font-mono bg-gray-200 dark:bg-base-300 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400">/{p.path_prefix}</span>
+                        {proxyRunning && (
+                          <button
+                            onClick={() => {
+                              navigator.clipboard.writeText(`http://${displayHost}:${proxyPort}/${p.path_prefix}`);
+                              showToast(t('common.copied'), 'success');
+                            }}
+                            className="p-1 hover:bg-gray-200 dark:hover:bg-base-300 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                            title={`http://${displayHost}:${proxyPort}/${p.path_prefix}`}
+                          >
+                            <Copy className="w-3 h-3" />
+                          </button>
+                        )}
                       </div>
                       <span className="text-xs text-gray-400">{platformModels.length} {t('dashboard.model_count')}</span>
                     </div>

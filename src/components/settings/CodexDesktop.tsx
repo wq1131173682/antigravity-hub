@@ -66,9 +66,9 @@ export default function CodexDesktop() {
     setResult(null);
     try {
       const res = await invoke<CodexApplyResult>('apply_codex_config', {
-        platform_id: selectedPlatformId,
-        model_name: selectedModel,
-        api_key: apiKey.trim() || null,
+        platformId: selectedPlatformId,
+        modelName: selectedModel,
+        apiKey: apiKey.trim() || null,
       });
       setResult(res);
       showToast(t('common.success'), 'success');
