@@ -106,11 +106,12 @@ pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
     let models = model_manager::list_models(platform_id)
         .map_err(|e| format!("Failed to list models: {}", e))?;
 
-    // Build catalog entries in Codex Desktop format
+    // Build catalog entries in Codex Desktop format.
+    // CRITICAL: Codex Desktop parses each entry with a strict struct that requires
+    // many fields. Missing any causes "failed to parse model_catalog_json" errors.
+    // This matches the fields that Codex++ generates from its bundled template.
     let catalog_models: Vec<serde_json::Value> = models.iter().map(|m| {
         let context_window = m.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        // Auto-compact at half the context window, capped at 196608
-        let auto_compact = std::cmp::min(context_window / 2, 196608_u64);
 
         serde_json::json!({
             "model": m.model_name,
@@ -121,8 +122,8 @@ pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
             "supported_in_api": true,
             "context_window": context_window,
             "max_context_window": context_window,
-            "effective_context_window_percent": 95,
-            "auto_compact_token_limit": auto_compact,
+            "effective_context_window_percent": 100,
+            "auto_compact_token_limit": serde_json::Value::Null,
             "input_modalities": ["text", "image"],
             "supports_image_detail_original": true,
             "supports_parallel_tool_calls": true,
@@ -139,7 +140,17 @@ pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
                 "mode": "tokens",
                 "limit": 10000
             },
-            "priority": 10
+            "priority": 10,
+            // REQUIRED by Codex Desktop's model catalog parser:
+            "supported_reasoning_levels": [
+                {"reasoningEffort": "low", "description": "Low effort reasoning"},
+                {"reasoningEffort": "medium", "description": "Medium effort reasoning"},
+                {"reasoningEffort": "high", "description": "High effort reasoning"}
+            ],
+            "additional_speed_tiers": [],
+            "service_tiers": [],
+            "availability_nux": serde_json::Value::Null,
+            "upgrade": serde_json::Value::Null
         })
     }).collect();
 
@@ -242,42 +253,25 @@ pub fn apply_codex_config(
         .map_err(|e| format!("Failed to write auth.json: {}", e))?;
     info!("auth.json written: {:?}", auth_path);
 
-    // ── Read existing config to preserve user settings ──
-    // Codex Desktop stores language, [desktop], and other settings that
-    // we must NOT overwrite. We read them from the existing config and
-    // merge them into our generated config below.
+    // ── Read existing config and merge our settings into it ──
+    // CRITICAL: We must NOT rebuild the entire config from scratch.
+    // Codex Desktop stores many settings (other model_providers, profiles,
+    // MCP servers, skills, plugins, desktop settings, language, etc.).
+    // We read the existing config, insert/update only our keys, and
+    // preserve everything else.
     let existing_config_path = codex_dir.join(CONFIG_FILE);
-    let mut preserved_language: Option<String> = None;
-    let mut preserved_desktop: Option<toml::Table> = None;
-    if existing_config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&existing_config_path) {
-            if let Ok(parsed) = content.parse::<toml::Table>() {
-                // Preserve language setting (e.g. "zh-cn")
-                if let Some(toml::Value::String(lang)) = parsed.get("language") {
-                    preserved_language = Some(lang.clone());
-                    info!("Preserved language setting: {}", lang);
-                }
-                // Preserve [desktop] section (window state, theme, etc.)
-                if let Some(toml::Value::Table(desktop)) = parsed.get("desktop") {
-                    preserved_desktop = Some(desktop.clone());
-                    info!("Preserved [desktop] section with {} keys", desktop.len());
-                }
-            }
+    let mut config_toml: toml::Table = if existing_config_path.exists() {
+        match std::fs::read_to_string(&existing_config_path) {
+            Ok(content) => content.parse::<toml::Table>().unwrap_or_default(),
+            Err(_) => toml::Table::new(),
         }
-    }
+    } else {
+        toml::Table::new()
+    };
 
-    // ── Build config.toml content ──
-    let mut config_toml = toml::Table::new();
-
-    // Preserve language setting from existing config
-    if let Some(lang) = preserved_language {
-        config_toml.insert(
-            "language".to_string(),
-            toml::Value::String(lang),
-        );
-    }
-
-    // Top-level keys
+    // ── Merge our top-level keys ──
+    // These overwrite the existing values if present, but leave all other
+    // existing top-level keys (language, version, desktop, etc.) untouched.
     config_toml.insert(
         "model_provider".to_string(),
         toml::Value::String("custom".to_string()),
@@ -288,20 +282,11 @@ pub fn apply_codex_config(
     );
     // Use relative path for model_catalog_json (relative to ~/.codex/)
     // Codex++ uses this format and Codex Desktop resolves relative paths correctly.
-    // Absolute Windows paths (with backslashes) can cause parsing issues.
     let catalog_relative = format!("model-catalogs/{}-models.json", path_prefix);
     config_toml.insert(
         "model_catalog_json".to_string(),
         toml::Value::String(catalog_relative.clone()),
     );
-
-    // Preserve [desktop] section from existing config
-    if let Some(desktop) = preserved_desktop {
-        config_toml.insert(
-            "desktop".to_string(),
-            toml::Value::Table(desktop),
-        );
-    }
 
     // [model_providers.custom] section
     // CRITICAL: This must match what Codex Desktop expects:
@@ -362,13 +347,16 @@ pub fn apply_codex_config(
         }
     }
 
+    // Merge our custom provider into existing model_providers table
+    // CRITICAL: Don't replace the entire table — preserve other providers
+    let mut providers = config_toml
+        .get("model_providers")
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_else(|| toml::Table::new());
+    providers.insert("custom".to_string(), toml::Value::Table(provider_table));
     config_toml.insert(
         "model_providers".to_string(),
-        toml::Value::Table({
-            let mut providers = toml::Table::new();
-            providers.insert("custom".to_string(), toml::Value::Table(provider_table));
-            providers
-        }),
+        toml::Value::Table(providers),
     );
 
     let output = toml::to_string_pretty(&config_toml)
