@@ -1460,7 +1460,9 @@
         "apply": "Apply to Codex Desktop",
         "applying": "Applying...",
         "restore": "Restore Backup Config",
-        "select_required": "Please select platform and model first"
+        "select_required": "Please select platform and model first",
+        "api_key": "API Key",
+        "api_key_hint": "(optional, auto-generated if empty)"
     },
     "profiles": {
         "title": "Provider Profiles",

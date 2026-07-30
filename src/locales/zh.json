@@ -1425,7 +1425,9 @@
         "apply": "应用至 Codex Desktop",
         "applying": "正在应用...",
         "restore": "恢复备份配置",
-        "select_required": "请选择平台和默认模型"
+        "select_required": "请选择平台和默认模型",
+        "api_key": "API 密钥",
+        "api_key_hint": "（可选，留空自动生成）"
     },
     "profiles": {
         "title": "供应商配置",

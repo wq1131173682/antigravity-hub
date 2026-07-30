@@ -514,13 +514,14 @@ pub async fn check_codex_status() -> Result<crate::modules::codex_desktop::Codex
     Ok(modules::codex_desktop::check_codex_status())
 }
 
-/// Apply Codex Desktop configuration (generates model catalog + writes config.toml)
+/// Apply Codex Desktop configuration (generates model catalog + writes config.toml + auth.json)
 #[tauri::command]
 pub async fn apply_codex_config(
     platform_id: String,
     model_name: String,
+    api_key: Option<String>,
 ) -> Result<crate::modules::codex_desktop::CodexApplyResult, String> {
-    modules::codex_desktop::apply_codex_config(platform_id, model_name)
+    modules::codex_desktop::apply_codex_config(platform_id, model_name, api_key)
 }
 
 /// Restore Codex Desktop config from backup

@@ -176,11 +176,20 @@ pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
 
 /// Apply Codex Desktop configuration.
 ///
-/// Generates a model catalog and writes `config.toml` pointing to our proxy.
-/// The config.toml uses the Desktop-compatible format with `model_catalog_json`.
+/// Generates a model catalog, writes `auth.json` with the API key,
+/// and writes `config.toml` pointing to our proxy.
+///
+/// Key differences from simple config writing:
+/// 1. Writes `~/.codex/auth.json` with `{"OPENAI_API_KEY": "..."}` — Codex Desktop
+///    reads API keys from this file, NOT from the config.toml.
+/// 2. Sets `requires_openai_auth = true` in provider section — Codex Desktop
+///    checks this field to consider the config as "configured".
+/// 3. Uses `experimental_bearer_token` with the actual key — allows direct
+///    embedding in the config without relying on env vars.
 pub fn apply_codex_config(
     platform_id: String,
     model_name: String,
+    api_key: Option<String>,
 ) -> Result<CodexApplyResult, String> {
     use crate::modules::config;
 
@@ -198,13 +207,45 @@ pub fn apply_codex_config(
     let client_host = if proxy_host == "0.0.0.0" { "127.0.0.1" } else { proxy_host };
     let proxy_base_url = format!("http://{}:{}/{}/v1", client_host, proxy_port, path_prefix);
 
+    // ── Resolve API key ──
+    // If not provided, generate a random one
+    let bearer_token = api_key.unwrap_or_else(|| {
+        format!("sk-antigravity-{}", uuid::Uuid::new_v4().to_string().replace('-', ""))
+    });
+
     // ── Generate model catalog ──
     let catalog_path = generate_model_catalog(&platform_id)?;
+
+    // ── Write auth.json ──
+    // CRITICAL: Codex Desktop reads API keys from auth.json, NOT from config.toml.
+    // Without this file, Codex Desktop has no API key to authenticate.
+    // 
+    // IMPORTANT: Back up the original auth.json BEFORE overwriting it,
+    // so the user can restore it later along with their config.toml.
+    let codex_dir = resolve_codex_home();
+    std::fs::create_dir_all(&codex_dir)
+        .map_err(|e| format!("Failed to create .codex directory: {}", e))?;
+    let auth_path = codex_dir.join("auth.json");
+    let auth_backup_path = codex_dir.join(format!("auth.json{}", BACKUP_SUFFIX));
+    if auth_path.exists() {
+        if let Err(e) = std::fs::copy(&auth_path, &auth_backup_path) {
+            warn!("Failed to backup auth.json: {}", e);
+        } else {
+            info!("auth.json backed up: {:?}", auth_backup_path);
+        }
+    }
+    let auth_content = serde_json::json!({
+        "OPENAI_API_KEY": bearer_token
+    });
+    std::fs::write(&auth_path, serde_json::to_string_pretty(&auth_content)
+        .map_err(|e| format!("Failed to serialize auth.json: {}", e))?)
+        .map_err(|e| format!("Failed to write auth.json: {}", e))?;
+    info!("auth.json written: {:?}", auth_path);
 
     // ── Build config.toml content ──
     let mut config_toml = toml::Table::new();
 
-    // Top-level keys (Desktop-compatible)
+    // Top-level keys
     config_toml.insert(
         "model_provider".to_string(),
         toml::Value::String("custom".to_string()),
@@ -219,6 +260,11 @@ pub fn apply_codex_config(
     );
 
     // [model_providers.custom] section
+    // CRITICAL: This must match what Codex Desktop expects:
+    // - requires_openai_auth = true (Codex Desktop checks this)
+    // - experimental_bearer_token = "..." (the actual API key)
+    // - base_url points to our proxy
+    // - wire_api = "responses" (Codex Desktop uses Responses API)
     let mut provider_table = toml::Table::new();
     provider_table.insert(
         "name".to_string(),
@@ -232,7 +278,19 @@ pub fn apply_codex_config(
         "wire_api".to_string(),
         toml::Value::String("responses".to_string()),
     );
-    // Desktop reads API keys from env vars, not config
+    // CRITICAL: Without requires_openai_auth = true, Codex Desktop won't
+    // consider this config as configured.
+    provider_table.insert(
+        "requires_openai_auth".to_string(),
+        toml::Value::Boolean(true),
+    );
+    // CRITICAL: experimental_bearer_token is how Codex++ embeds the API
+    // key directly in the config. Codex Desktop reads this field.
+    provider_table.insert(
+        "experimental_bearer_token".to_string(),
+        toml::Value::String(bearer_token.clone()),
+    );
+    // Keep env_key as fallback for env-var-based configs
     provider_table.insert(
         "env_key".to_string(),
         toml::Value::String("OPENAI_API_KEY".to_string()),
@@ -282,7 +340,6 @@ pub fn apply_codex_config(
     );
 
     // Backup existing config
-    let codex_dir = resolve_codex_home();
     let config_path = codex_dir.join(CONFIG_FILE);
     let backup_path = codex_dir.join(format!("{}{}", CONFIG_FILE, BACKUP_SUFFIX));
 
@@ -313,13 +370,15 @@ pub fn apply_codex_config(
              默认模型: {}\n\
              代理地址: {}\n\
              配置文件: {:?}\n\
-             模型目录: {:?}",
-            path_prefix, model_name, proxy_base_url, config_path, catalog_path
+             模型目录: {:?}\n\
+             API Key: {} (已写入 auth.json + config.toml)",
+            path_prefix, model_name, proxy_base_url, config_path, catalog_path, bearer_token
         ),
     })
 }
 
 /// Restore Codex Desktop config from backup
+/// Also restores auth.json from backup if available
 pub fn restore_codex_config() -> Result<String, String> {
     let codex_dir = resolve_codex_home();
     let config_path = codex_dir.join(CONFIG_FILE);
@@ -329,11 +388,29 @@ pub fn restore_codex_config() -> Result<String, String> {
         return Err("No backup found to restore.".to_string());
     }
 
+    // Restore config.toml
     std::fs::copy(&backup_path, &config_path)
         .map_err(|e| format!("Failed to restore backup: {}", e))?;
 
     // Remove backup after successful restore
     let _ = std::fs::remove_file(&backup_path);
+
+    // Restore auth.json backup if exists
+    let auth_path = codex_dir.join("auth.json");
+    let auth_backup_path = codex_dir.join(format!("auth.json{}", BACKUP_SUFFIX));
+    if auth_backup_path.exists() {
+        std::fs::copy(&auth_backup_path, &auth_path)
+            .map_err(|e| format!("Failed to restore auth.json backup: {}", e))?;
+        let _ = std::fs::remove_file(&auth_backup_path);
+        info!("auth.json restored from backup");
+    } else if auth_path.exists() {
+        // No auth backup exists, check if current auth.json was written by us
+        let content = std::fs::read_to_string(&auth_path).unwrap_or_default();
+        if content.contains("antigravity") || content.contains("sk-antigravity") {
+            let _ = std::fs::remove_file(&auth_path);
+            info!("Cleaned up auth.json (written by Antigravity Hub)");
+        }
+    }
 
     info!("Codex Desktop config restored from backup: {:?}", config_path);
 

@@ -27,6 +27,7 @@ export default function CodexDesktop() {
   const [checking, setChecking] = useState(false);
   const [selectedPlatformId, setSelectedPlatformId] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
+  const [apiKey, setApiKey] = useState('');
   const [applying, setApplying] = useState(false);
   const [result, setResult] = useState<CodexApplyResult | null>(null);
   const [restoring, setRestoring] = useState(false);
@@ -67,6 +68,7 @@ export default function CodexDesktop() {
       const res = await invoke<CodexApplyResult>('apply_codex_config', {
         platform_id: selectedPlatformId,
         model_name: selectedModel,
+        api_key: apiKey.trim() || null,
       });
       setResult(res);
       showToast(t('common.success'), 'success');
@@ -174,6 +176,20 @@ export default function CodexDesktop() {
               <option key={m.id} value={m.model_name}>{m.display_name || m.model_name}</option>
             ))}
           </select>
+        </div>
+
+          {/* API Key (optional) */}
+        <div>
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+            {t('codex_desktop.api_key')} <span className="text-gray-400 font-normal">{t('codex_desktop.api_key_hint')}</span>
+          </label>
+          <input
+            type="password"
+            className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-orange-500 outline-none font-mono"
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder="sk-antigravity-..."
+          />
         </div>
 
         {/* Apply Button */}
