@@ -384,10 +384,11 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
 
-    // Try multiple URL patterns — some providers use /v1/models, others /models
+    // Try multiple URL patterns — some providers use /v1/models, others /models.
+    // Use deduplicate_url_path to handle base URLs that already include /v1.
     let url_candidates = vec![
-        format!("{}/v1/models", base_url),
-        format!("{}/models", base_url),
+        deduplicate_url_path(&base_url, "/v1/models"),
+        deduplicate_url_path(&base_url, "/models"),
     ];
 
     let client = PROXY_CLIENT.read().unwrap().clone();
@@ -564,7 +565,9 @@ pub async fn test_model(
         ))?;
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
-    let url = format!("{}/v1/chat/completions", base_url);
+    // Use deduplicate_url_path to handle base URLs that already include /v1
+    // (e.g., "https://token.sensenova.cn/v1" → "/v1/chat/completions" → "https://token.sensenova.cn/v1/chat/completions")
+    let url = deduplicate_url_path(&base_url, "/v1/chat/completions");
 
     let request_body = serde_json::json!({
         "model": model_name,
