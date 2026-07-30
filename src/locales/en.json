@@ -1465,33 +1465,5 @@
         "select_required": "Please select platform and model first",
         "api_key": "API Key",
         "api_key_hint": "(optional, auto-generated if empty)"
-    },
-    "profiles": {
-        "title": "Provider Profiles",
-        "description": "Save platform + model combinations for quick reference.",
-        "add": "Add Profile",
-        "edit": "Edit Profile",
-        "name": "Profile Name",
-        "name_placeholder": "e.g. OpenAI Work",
-        "name_required": "Please enter a profile name",
-        "platform": "Platform",
-        "model": "Model",
-        "select_platform": "Select a platform...",
-        "select_model": "Select a model...",
-        "select_required": "Please select both platform and model",
-        "notes": "Notes",
-        "notes_placeholder": "Optional notes...",
-        "empty": "No profiles yet. Create one to save a platform + model combination.",
-        "delete_confirm_title": "Delete this profile?",
-        "delete_confirm_message": "This action cannot be undone.",
-        "active": "Active",
-        "inactive": "Inactive",
-        "enable_rotation": "Enable Rotation",
-        "rotation_strategy": "Rotation Strategy",
-        "strategy_failover": "Failover (Try next on failure)",
-        "strategy_none": "None (Single provider)",
-        "priority": "Priority",
-        "enabled_toast": "Rotation enabled",
-        "disabled_toast": "Rotation disabled"
     }
 }

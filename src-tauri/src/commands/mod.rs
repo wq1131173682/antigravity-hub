@@ -457,54 +457,6 @@ pub async fn test_model(platform_id: String, model_name: String) -> Result<crate
 }
 
 // ============================================================================
-// Provider Profile Commands
-// ============================================================================
-
-/// List all saved provider profiles
-#[tauri::command]
-pub async fn list_profiles() -> Result<Vec<crate::models::ProviderProfile>, String> {
-    let config = modules::config::load_app_config()?;
-    Ok(modules::profile_manager::list_profiles(&config))
-}
-
-/// Save a provider profile (create or update)
-#[tauri::command]
-pub async fn save_profile(
-    id: Option<String>,
-    name: String,
-    platform_id: String,
-    model_id: String,
-    notes: Option<String>,
-    active: Option<bool>,
-    priority: Option<i32>,
-    rotation_strategy: Option<String>,
-) -> Result<crate::models::ProviderProfile, String> {
-    let mut config = modules::config::load_app_config()?;
-    let profile = modules::profile_manager::save_profile(
-        &mut config, id, name, platform_id, model_id, notes, active, priority, rotation_strategy,
-    )?;
-    modules::config::save_app_config(&config)?;
-    Ok(profile)
-}
-
-/// Delete a provider profile
-#[tauri::command]
-pub async fn delete_profile(profile_id: String) -> Result<(), String> {
-    let mut config = modules::config::load_app_config()?;
-    modules::profile_manager::delete_profile(&mut config, &profile_id)?;
-    modules::config::save_app_config(&config)
-}
-
-/// Toggle a profile's active state
-#[tauri::command]
-pub async fn toggle_profile(profile_id: String, active: bool) -> Result<crate::models::ProviderProfile, String> {
-    let mut config = modules::config::load_app_config()?;
-    let profile = modules::profile_manager::toggle_profile(&mut config, &profile_id, active)?;
-    modules::config::save_app_config(&config)?;
-    Ok(profile)
-}
-
-// ============================================================================
 // Codex Desktop Commands
 // ============================================================================
 

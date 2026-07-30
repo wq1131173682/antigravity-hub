@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use super::platform::Platform;
-use super::profile::ProviderProfile;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,9 +23,6 @@ pub struct AppConfig {
     /// List of configured platforms
     #[serde(default)]
     pub platforms: Vec<Platform>,
-    /// Saved provider profiles (quick-switch configurations)
-    #[serde(default)]
-    pub provider_profiles: Vec<ProviderProfile>,
 }
 
 fn default_proxy_port() -> u16 {
@@ -51,7 +47,6 @@ impl AppConfig {
             auto_switch: true,
             upstream_proxy_url: None,
             platforms: Vec::new(),
-            provider_profiles: Vec::new(),
         }
     }
 }

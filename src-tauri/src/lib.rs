@@ -177,11 +177,6 @@ pub fn run() {
             commands::set_window_theme,
             // Utility
             commands::get_lan_ip,
-            // Provider Profiles
-            commands::list_profiles,
-            commands::save_profile,
-            commands::delete_profile,
-            commands::toggle_profile,
             // Codex Desktop
             commands::check_codex_status,
             commands::apply_codex_config,

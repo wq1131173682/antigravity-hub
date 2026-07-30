@@ -5,7 +5,6 @@ import { request as invoke } from '../utils/request';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { useTranslation } from 'react-i18next';
-import ProviderProfiles from '../components/settings/ProviderProfiles';
 import CodexDesktop from '../components/settings/CodexDesktop';
 
 function Settings() {
@@ -135,9 +134,6 @@ function Settings() {
             </div>
           </div>
         </div>
-
-        {/* Provider Profiles */}
-        <ProviderProfiles />
 
         {/* Codex Desktop Integration */}
         <CodexDesktop />

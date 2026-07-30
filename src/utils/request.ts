@@ -200,11 +200,6 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'unbind_account_proxy': { url: '/api/proxy/pool/unbind', method: 'POST' },
   'get_account_proxy_binding': { url: '/api/proxy/pool/binding/:accountId', method: 'GET' },
 
-  // Provider Profiles
-  'list_profiles': { url: '/api/profiles', method: 'GET' },
-  'save_profile': { url: '/api/profiles', method: 'POST' },
-  'delete_profile': { url: '/api/profiles/:profileId', method: 'DELETE' },
-  'toggle_profile': { url: '/api/profiles/:profileId/toggle', method: 'POST' },
   'check_codex_status': { url: '/api/codex/status', method: 'GET' },
   'apply_codex_config': { url: '/api/codex/apply', method: 'POST' },
   'restore_codex_config': { url: '/api/codex/restore', method: 'POST' },

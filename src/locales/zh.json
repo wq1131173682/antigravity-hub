@@ -1430,33 +1430,5 @@
         "select_required": "请选择平台和默认模型",
         "api_key": "API 密钥",
         "api_key_hint": "（可选，留空自动生成）"
-    },
-    "profiles": {
-        "title": "供应商配置",
-        "description": "保存平台 + 模型的组合，方便快速参考。",
-        "add": "新建配置",
-        "edit": "编辑配置",
-        "name": "配置名称",
-        "name_placeholder": "例如：OpenAI 工作",
-        "name_required": "请输入配置名称",
-        "platform": "平台",
-        "model": "模型",
-        "select_platform": "请选择平台...",
-        "select_model": "请选择模型...",
-        "select_required": "请选择平台和模型",
-        "notes": "备注",
-        "notes_placeholder": "可选备注...",
-        "empty": "暂无配置。创建一个来保存平台+模型的组合。",
-        "delete_confirm_title": "删除此配置？",
-        "delete_confirm_message": "此操作不可撤销。",
-        "active": "已激活",
-        "inactive": "未激活",
-        "enable_rotation": "启用轮转",
-        "rotation_strategy": "轮转策略",
-        "strategy_failover": "故障转移 (失败时尝试下一个)",
-        "strategy_none": "无 (单供应商)",
-        "priority": "优先级",
-        "enabled_toast": "已启用轮转",
-        "disabled_toast": "已禁用轮转"
     }
 }

@@ -810,26 +810,11 @@ async fn proxy_handler(
     }
 }
 
-/// Get platform info by path prefix, or from the active provider profile if one exists.
-/// Active profiles take priority over path_prefix-based routing.
+/// Get platform info by path prefix.
 fn get_platform_info(prefix: &str) -> Option<(String, String, bool)> {
     use crate::modules::config;
-    use crate::modules::profile_manager;
     let config = config::load_app_config().ok()?;
 
-    // Check for active provider profiles first
-    let active_profiles = profile_manager::get_active_profiles(&config);
-    if let Some(first_active) = active_profiles.first() {
-        if let Some(platform) = config.platforms.iter().find(|p| p.id == first_active.platform_id) {
-            info!(
-                "Active profile '{}' (priority {}) overrides path_prefix '{}' → platform '{}'",
-                first_active.name, first_active.priority, prefix, platform.name
-            );
-            return Some((platform.base_url.clone(), platform.id.clone(), config.auto_switch));
-        }
-    }
-
-    // Fall back to path_prefix matching
     let platform = config.platforms.iter().find(|p| p.path_prefix == prefix)?;
     let auto_switch = config.auto_switch;
     Some((platform.base_url.clone(), platform.id.clone(), auto_switch))
@@ -866,22 +851,8 @@ fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str
 /// Get the first configured platform (fallback when no prefix matches)
 fn get_first_platform() -> Option<(String, String, bool)> {
     use crate::modules::config;
-    use crate::modules::profile_manager;
     let config = config::load_app_config().ok()?;
 
-    // Check if there are active profiles — if so, use the highest-priority one
-    let active_profiles = profile_manager::get_active_profiles(&config);
-    if let Some(first_active) = active_profiles.first() {
-        if let Some(platform) = config.platforms.iter().find(|p| p.id == first_active.platform_id) {
-            info!(
-                "Using active profile '{}' (priority {}) for platform '{}'",
-                first_active.name, first_active.priority, platform.name
-            );
-            return Some((platform.base_url.clone(), platform.id.clone(), config.auto_switch));
-        }
-    }
-
-    // Fall back to first configured platform
     let platform = config.platforms.first()?;
     let auto_switch = config.auto_switch;
     Some((platform.base_url.clone(), platform.id.clone(), auto_switch))
