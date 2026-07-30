@@ -1401,5 +1401,5 @@
         "placeholder_max_ips": "0 = 不限制",
         "hint_max_ips": "0 表示不限制",
         "hint_curfew": "留空则禁用。基于服务器时间。"
-    },
+    }
 }
