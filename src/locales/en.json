@@ -98,6 +98,8 @@
         "total_platforms": "Platforms",
         "total_keys": "API Keys",
         "active_keys": "Active Keys",
+        "platforms_title": "Platforms",
+        "model_count": "models",
         "usage_warning": "Exhausted Keys",
         "proxy_running": "Proxy on :{port}",
         "proxy_stopped": "Proxy Stopped",

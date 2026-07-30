@@ -95,6 +95,8 @@
         "total_platforms": "平台数",
         "total_keys": "API Key 数",
         "active_keys": "活跃 Key",
+        "platforms_title": "平台 / Platforms",
+        "model_count": "个模型",
         "usage_warning": "已耗尽 Key",
         "proxy_running": "代理运行中 (端口 {port})",
         "proxy_stopped": "代理已停止",
