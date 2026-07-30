@@ -177,6 +177,10 @@ pub fn run() {
             commands::set_window_theme,
             // Utility
             commands::get_lan_ip,
+            // Provider Profiles
+            commands::list_profiles,
+            commands::save_profile,
+            commands::delete_profile,
             // Debug console
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,

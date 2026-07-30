@@ -199,6 +199,11 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'bind_account_proxy': { url: '/api/proxy/pool/bind', method: 'POST' },
   'unbind_account_proxy': { url: '/api/proxy/pool/unbind', method: 'POST' },
   'get_account_proxy_binding': { url: '/api/proxy/pool/binding/:accountId', method: 'GET' },
+
+  // Provider Profiles
+  'list_profiles': { url: '/api/profiles', method: 'GET' },
+  'save_profile': { url: '/api/profiles', method: 'POST' },
+  'delete_profile': { url: '/api/profiles/:profileId', method: 'DELETE' },
 };
 
 export async function request<T>(cmd: string, args?: any): Promise<T> {

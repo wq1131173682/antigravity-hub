@@ -456,6 +456,42 @@ pub async fn test_model(platform_id: String, model_name: String) -> Result<crate
     modules::proxy::test_model(&platform_id, &model_name).await
 }
 
+// ============================================================================
+// Provider Profile Commands
+// ============================================================================
+
+/// List all saved provider profiles
+#[tauri::command]
+pub async fn list_profiles() -> Result<Vec<crate::models::ProviderProfile>, String> {
+    let config = modules::config::load_app_config()?;
+    Ok(modules::profile_manager::list_profiles(&config))
+}
+
+/// Save a provider profile (create or update)
+#[tauri::command]
+pub async fn save_profile(
+    id: Option<String>,
+    name: String,
+    platform_id: String,
+    model_id: String,
+    notes: Option<String>,
+) -> Result<crate::models::ProviderProfile, String> {
+    let mut config = modules::config::load_app_config()?;
+    let profile = modules::profile_manager::save_profile(
+        &mut config, id, name, platform_id, model_id, notes,
+    )?;
+    modules::config::save_app_config(&config)?;
+    Ok(profile)
+}
+
+/// Delete a provider profile
+#[tauri::command]
+pub async fn delete_profile(profile_id: String) -> Result<(), String> {
+    let mut config = modules::config::load_app_config()?;
+    modules::profile_manager::delete_profile(&mut config, &profile_id)?;
+    modules::config::save_app_config(&config)
+}
+
 /// Get the primary LAN IP address (for displaying when proxy binds to 0.0.0.0)
 #[tauri::command]
 pub fn get_lan_ip() -> Result<String, String> {
