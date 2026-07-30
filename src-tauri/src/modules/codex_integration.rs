@@ -1,10 +1,5 @@
 ﻿use std::path::PathBuf;
-use tracing::{info, warn};
-
-/// Model catalog file name template
-const CATALOG_FILE: &str = "{}-models.json";
-/// Default context window for models that don't specify one
-const DEFAULT_CONTEXT_WINDOW: u64 = 128000;
+use tracing::info;
 
 /// Codex CLI configuration directory and file constants
 const CODEX_DIR: &str = ".codex";
@@ -119,104 +114,6 @@ fn validate_reasoning_effort(effort: Option<&str>) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-// ── Model Catalog (Codex Desktop) ──
-
-/// Generate a model catalog JSON file for Codex Desktop.
-///
-/// Codex Desktop requires a `model_catalog_json` file to know which models are
-/// available. Without it, Desktop falls back to a built-in catalog that may
-/// contain models not configured in Antigravity Hub (e.g., "agnes-2.5-flash"),
-/// causing 404 errors when the proxy routes them to the wrong upstream.
-///
-/// The catalog file is written to `~/.codex/model-catalogs/{path_prefix}-models.json`
-/// and contains all models for the platform identified by `path_prefix`.
-fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
-    use crate::modules::config;
-    use crate::modules::model_manager;
-
-    // Look up the platform by path_prefix
-    let app_config = config::load_app_config()
-        .map_err(|e| format!("Failed to load app config: {}", e))?;
-
-    let platform = app_config.platforms.iter()
-        .find(|p| p.path_prefix == path_prefix)
-        .ok_or_else(|| format!("Platform with path_prefix '{}' not found in config", path_prefix))?;
-
-    let platform_id = &platform.id;
-    let platform_name = &platform.name;
-
-    // List all models for this platform
-    let models = model_manager::list_models(platform_id)
-        .map_err(|e| format!("Failed to list models for platform '{}': {}", platform_id, e))?;
-
-    // Build the catalog entries
-    let catalog_models: Vec<serde_json::Value> = models.iter().map(|m| {
-        let context_window = m.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        // Auto-compact at half the context window, capped at 196608
-        let auto_compact = std::cmp::min(context_window / 2, 196608_u64);
-
-        serde_json::json!({
-            "slug": m.model_name,
-            "display_name": format!("{} / {}", platform_name, m.display_name),
-            "description": m.model_name,
-            "visibility": "list",
-            "supported_in_api": true,
-            "context_window": context_window,
-            "max_context_window": context_window,
-            "effective_context_window_percent": 95,
-            "auto_compact_token_limit": auto_compact,
-            "input_modalities": ["text", "image"],
-            "supports_image_detail_original": true,
-            "supports_parallel_tool_calls": true,
-            "supports_search_tool": true,
-            "web_search_tool_type": "text_and_image",
-            "apply_patch_tool_type": "freeform",
-            "shell_type": "shell_command",
-            "supports_reasoning_summaries": true,
-            "default_reasoning_summary": "auto",
-            "default_reasoning_level": "medium",
-            "support_verbosity": true,
-            "default_verbosity": "low",
-            "truncation_policy": {
-                "mode": "tokens",
-                "limit": 10000
-            },
-            "priority": 10
-        })
-    }).collect();
-
-    let catalog = serde_json::json!({
-        "models": catalog_models
-    });
-
-    // Ensure the model-catalogs directory exists
-    let catalog_dir = resolve_codex_home().join("model-catalogs");
-    std::fs::create_dir_all(&catalog_dir)
-        .map_err(|e| format!("Failed to create model-catalogs directory: {}", e))?;
-
-    // Write the catalog file
-    let catalog_filename = CATALOG_FILE.replace("{}", path_prefix);
-    let catalog_path = catalog_dir.join(&catalog_filename);
-    let catalog_json = serde_json::to_string_pretty(&catalog)
-        .map_err(|e| format!("Failed to serialize model catalog: {}", e))?;
-
-    // Write atomically using temp file
-    let temp_path = catalog_dir.join(format!("{}.tmp", catalog_filename));
-    std::fs::write(&temp_path, &catalog_json)
-        .map_err(|e| format!("Failed to write model catalog: {}", e))?;
-    std::fs::rename(&temp_path, &catalog_path)
-        .map_err(|e| format!("Failed to finalize model catalog: {}", e))?;
-
-    info!(
-        "Model catalog generated: {:?} ({} models for platform '{}')",
-        catalog_path,
-        models.len(),
-        platform_name
-    );
-
-    Ok(catalog_path.to_string_lossy().to_string())
 }
 
 // ── Public API ──
@@ -423,38 +320,16 @@ pub fn apply_codex_config(
         toml::Value::Table(model_providers),
     );
 
-    // ── Model catalog for Codex Desktop ──
-    // Codex Desktop requires a `model_catalog_json` file to know which models
-    // are available. Without it, Desktop falls back to a built-in catalog that
-    // may contain models not configured in Antigravity Hub, causing 404 errors.
-    // We generate a catalog with all models from the selected platform.
-    match generate_model_catalog(path_prefix) {
-        Ok(catalog_path) => {
-            info!("model_catalog_json set to: {}", catalog_path);
-            config.insert(
-                "model_catalog_json".to_string(),
-                toml::Value::String(catalog_path),
-            );
-        }
-        Err(e) => {
-            // Non-fatal: if catalog generation fails, the config still works
-            // for CLI users, and Desktop users will see a warning.
-            warn!("Failed to generate model catalog (non-fatal): {}", e);
-        }
-    }
-
     // Serialize and write
     let output = toml::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize Codex config: {}", e))?;
 
     // Add a header comment
-    let config_type = if config.contains_key("model_catalog_json") { "Desktop" } else { "CLI" };
     let final_content = format!(
-        "# Codex {} Configuration\n\
+        "# Codex Configuration\n\
          # Managed by Antigravity Hub\n\
          # Applied at: {}\n\
          # To revert, delete this file or restore the backup.\n\n{}",
-        config_type,
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
         output
     );
@@ -471,19 +346,15 @@ pub fn apply_codex_config(
         model_name, path_prefix, reasoning_effort, disable_response_storage, proxy_base_url, cfg_path
     );
 
-    // Check if the config was generated for Desktop (has model_catalog_json)
-    let config_type = if config.contains_key("model_catalog_json") { "Desktop" } else { "CLI" };
-
     Ok(ApplyResult {
         success: true,
         message: format!(
-            "Codex {} configuration applied!\n\
+            "Codex configuration applied!\n\
              Provider: custom (routed via /{}/)\n\
              Model: {}\n\
              Reasoning Effort: {}\n\
              Base URL: {}\n\
              File: {}",
-            config_type,
             path_prefix,
             model_name,
             reasoning_effort.unwrap_or("default"),
