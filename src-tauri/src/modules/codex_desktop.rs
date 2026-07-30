@@ -57,7 +57,6 @@ pub fn check_codex_status() -> CodexStatus {
     let version = if config_path.exists() {
         std::fs::read_to_string(&config_path).ok()
             .and_then(|content| {
-                // Look for key = value or "key" = "value" patterns
                 for line in content.lines() {
                     if let Some(val) = line.strip_prefix("version = ") {
                         return Some(val.trim_matches('"').to_string());
@@ -85,10 +84,63 @@ pub fn read_codex_config() -> Result<String, String> {
         .map_err(|e| format!("Failed to read Codex config: {}", e))
 }
 
-/// Generate a model catalog file for Codex Desktop for a specific platform.
+// ── Template-based model catalog generation ──
+//
+// cc-switch approach: define a default template entry with ALL fields that
+// Codex Desktop's deserialization expects. Clone this template for each
+// model and override only the specific fields (slug, display_name, etc.).
+// This ensures NO field is ever missing — matching Codex++ behavior.
+
+/// Return a template model entry with ALL required fields.
+/// This is cloned for each model, then fields are overridden.
+/// Mirrors Codex++'s `first_bundled_template_entry()` fallback.
+fn default_model_template() -> serde_json::Value {
+    serde_json::json!({
+        "model": "",
+        "slug": "",
+        "display_name": "",
+        "description": "",
+        "visibility": "list",
+        "supported_in_api": true,
+        "context_window": DEFAULT_CONTEXT_WINDOW,
+        "max_context_window": DEFAULT_CONTEXT_WINDOW,
+        "effective_context_window_percent": 100,
+        "auto_compact_token_limit": null,
+        "input_modalities": ["text", "image"],
+        "supports_image_detail_original": true,
+        "supports_parallel_tool_calls": true,
+        "supports_search_tool": true,
+        "web_search_tool_type": "text_and_image",
+        "apply_patch_tool_type": "freeform",
+        "shell_type": "shell_command",
+        "supports_reasoning_summaries": true,
+        "default_reasoning_summary": "auto",
+        "default_reasoning_level": "medium",
+        "support_verbosity": true,
+        "default_verbosity": "low",
+        "truncation_policy": {
+            "mode": "tokens",
+            "limit": 10000
+        },
+        "priority": 10,
+        "supported_reasoning_levels": [
+            {"reasoningEffort": "low", "description": "Low effort"},
+            {"reasoningEffort": "medium", "description": "Medium effort"},
+            {"reasoningEffort": "high", "description": "High effort"}
+        ],
+        "additional_speed_tiers": [],
+        "service_tiers": [],
+        "availability_nux": null,
+        "upgrade": null
+    })
+}
+
+/// Generate a model catalog file for Codex Desktop.
 ///
-/// The model catalog tells Codex Desktop which models are available.
-/// It is written to `~/.codex/model-catalogs/{path_prefix}-models.json`.
+/// Uses template-cloning approach (like Codex++/cc-switch):
+/// 1. Start with a default template entry that has ALL required fields
+/// 2. For each model, clone the template and override specific fields
+/// 3. This guarantees no field is ever missing
 pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
     use crate::modules::config;
     use crate::modules::model_manager;
@@ -102,56 +154,27 @@ pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
     let platform_name = &platform.name;
     let path_prefix = &platform.path_prefix;
 
-    // List all models for this platform
     let models = model_manager::list_models(platform_id)
         .map_err(|e| format!("Failed to list models: {}", e))?;
 
-    // Build catalog entries in Codex Desktop format.
-    // CRITICAL: Codex Desktop parses each entry with a strict struct that requires
-    // many fields. Missing any causes "failed to parse model_catalog_json" errors.
-    // This matches the fields that Codex++ generates from its bundled template.
-    let catalog_models: Vec<serde_json::Value> = models.iter().map(|m| {
+    // Build catalog: clone template → override per-model fields
+    let template = default_model_template();
+    let catalog_models: Vec<serde_json::Value> = models.iter().enumerate().map(|(idx, m)| {
         let context_window = m.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+        let mut entry = template.clone();
 
-        serde_json::json!({
-            "model": m.model_name,
-            "slug": m.model_name,
-            "display_name": format!("{} / {}", platform_name, m.display_name),
-            "description": m.model_name,
-            "visibility": "list",
-            "supported_in_api": true,
-            "context_window": context_window,
-            "max_context_window": context_window,
-            "effective_context_window_percent": 100,
-            "auto_compact_token_limit": serde_json::Value::Null,
-            "input_modalities": ["text", "image"],
-            "supports_image_detail_original": true,
-            "supports_parallel_tool_calls": true,
-            "supports_search_tool": true,
-            "web_search_tool_type": "text_and_image",
-            "apply_patch_tool_type": "freeform",
-            "shell_type": "shell_command",
-            "supports_reasoning_summaries": true,
-            "default_reasoning_summary": "auto",
-            "default_reasoning_level": "medium",
-            "support_verbosity": true,
-            "default_verbosity": "low",
-            "truncation_policy": {
-                "mode": "tokens",
-                "limit": 10000
-            },
-            "priority": 10,
-            // REQUIRED by Codex Desktop's model catalog parser:
-            "supported_reasoning_levels": [
-                {"reasoningEffort": "low", "description": "Low effort reasoning"},
-                {"reasoningEffort": "medium", "description": "Medium effort reasoning"},
-                {"reasoningEffort": "high", "description": "High effort reasoning"}
-            ],
-            "additional_speed_tiers": [],
-            "service_tiers": [],
-            "availability_nux": serde_json::Value::Null,
-            "upgrade": serde_json::Value::Null
-        })
+        // Override per-model fields (keep all template fields intact)
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("model".to_string(), serde_json::json!(m.model_name));
+            obj.insert("slug".to_string(), serde_json::json!(m.model_name));
+            obj.insert("display_name".to_string(), serde_json::json!(format!("{} / {}", platform_name, m.display_name)));
+            obj.insert("description".to_string(), serde_json::json!(m.model_name));
+            obj.insert("context_window".to_string(), serde_json::json!(context_window));
+            obj.insert("max_context_window".to_string(), serde_json::json!(context_window));
+            obj.insert("priority".to_string(), serde_json::json!(1000 + idx));
+        }
+
+        entry
     }).collect();
 
     let catalog = serde_json::json!({
@@ -187,16 +210,9 @@ pub fn generate_model_catalog(platform_id: &str) -> Result<String, String> {
 
 /// Apply Codex Desktop configuration.
 ///
-/// Generates a model catalog, writes `auth.json` with the API key,
-/// and writes `config.toml` pointing to our proxy.
-///
-/// Key differences from simple config writing:
-/// 1. Writes `~/.codex/auth.json` with `{"OPENAI_API_KEY": "..."}` — Codex Desktop
-///    reads API keys from this file, NOT from the config.toml.
-/// 2. Sets `requires_openai_auth = true` in provider section — Codex Desktop
-///    checks this field to consider the config as "configured".
-/// 3. Uses `experimental_bearer_token` with the actual key — allows direct
-///    embedding in the config without relying on env vars.
+/// Uses toml_edit for in-place config.toml editing (cc-switch approach).
+/// This preserves ALL existing content, comments, formatting, and sections
+/// (other model_providers, MCP servers, skills, plugins, desktop, etc.).
 pub fn apply_codex_config(
     platform_id: String,
     model_name: String,
@@ -214,12 +230,10 @@ pub fn apply_codex_config(
     let proxy_port = app_config.proxy_port;
     let proxy_host = app_config.proxy_host.as_str();
 
-    // Determine the base URL for Codex Desktop to call
     let client_host = if proxy_host == "0.0.0.0" { "127.0.0.1" } else { proxy_host };
     let proxy_base_url = format!("http://{}:{}/{}/v1", client_host, proxy_port, path_prefix);
 
     // ── Resolve API key ──
-    // If not provided, generate a random one
     let bearer_token = api_key.unwrap_or_else(|| {
         format!("sk-antigravity-{}", uuid::Uuid::new_v4().to_string().replace('-', ""))
     });
@@ -227,15 +241,11 @@ pub fn apply_codex_config(
     // ── Generate model catalog ──
     generate_model_catalog(&platform_id)?;
 
-    // ── Write auth.json ──
-    // CRITICAL: Codex Desktop reads API keys from auth.json, NOT from config.toml.
-    // Without this file, Codex Desktop has no API key to authenticate.
-    // 
-    // IMPORTANT: Back up the original auth.json BEFORE overwriting it,
-    // so the user can restore it later along with their config.toml.
     let codex_dir = resolve_codex_home();
     std::fs::create_dir_all(&codex_dir)
         .map_err(|e| format!("Failed to create .codex directory: {}", e))?;
+
+    // ── Write auth.json ──
     let auth_path = codex_dir.join("auth.json");
     let auth_backup_path = codex_dir.join(format!("auth.json{}", BACKUP_SUFFIX));
     if auth_path.exists() {
@@ -245,136 +255,15 @@ pub fn apply_codex_config(
             info!("auth.json backed up: {:?}", auth_backup_path);
         }
     }
-    let auth_content = serde_json::json!({
-        "OPENAI_API_KEY": bearer_token
-    });
+    let auth_content = serde_json::json!({ "OPENAI_API_KEY": bearer_token });
     std::fs::write(&auth_path, serde_json::to_string_pretty(&auth_content)
         .map_err(|e| format!("Failed to serialize auth.json: {}", e))?)
         .map_err(|e| format!("Failed to write auth.json: {}", e))?;
     info!("auth.json written: {:?}", auth_path);
 
-    // ── Read existing config and merge our settings into it ──
-    // CRITICAL: We must NOT rebuild the entire config from scratch.
-    // Codex Desktop stores many settings (other model_providers, profiles,
-    // MCP servers, skills, plugins, desktop settings, language, etc.).
-    // We read the existing config, insert/update only our keys, and
-    // preserve everything else.
-    let existing_config_path = codex_dir.join(CONFIG_FILE);
-    let mut config_toml: toml::Table = if existing_config_path.exists() {
-        match std::fs::read_to_string(&existing_config_path) {
-            Ok(content) => content.parse::<toml::Table>().unwrap_or_default(),
-            Err(_) => toml::Table::new(),
-        }
-    } else {
-        toml::Table::new()
-    };
-
-    // ── Merge our top-level keys ──
-    // These overwrite the existing values if present, but leave all other
-    // existing top-level keys (language, version, desktop, etc.) untouched.
-    config_toml.insert(
-        "model_provider".to_string(),
-        toml::Value::String("custom".to_string()),
-    );
-    config_toml.insert(
-        "model".to_string(),
-        toml::Value::String(model_name.clone()),
-    );
-    // Use relative path for model_catalog_json (relative to ~/.codex/)
-    // Codex++ uses this format and Codex Desktop resolves relative paths correctly.
-    let catalog_relative = format!("model-catalogs/{}-models.json", path_prefix);
-    config_toml.insert(
-        "model_catalog_json".to_string(),
-        toml::Value::String(catalog_relative.clone()),
-    );
-
-    // [model_providers.custom] section
-    // CRITICAL: This must match what Codex Desktop expects:
-    // - requires_openai_auth = true (Codex Desktop checks this)
-    // - experimental_bearer_token = "..." (the actual API key)
-    // - base_url points to our proxy
-    // - wire_api = "responses" (Codex Desktop uses Responses API)
-    let mut provider_table = toml::Table::new();
-    provider_table.insert(
-        "name".to_string(),
-        toml::Value::String("custom".to_string()),
-    );
-    provider_table.insert(
-        "base_url".to_string(),
-        toml::Value::String(proxy_base_url.clone()),
-    );
-    provider_table.insert(
-        "wire_api".to_string(),
-        toml::Value::String("responses".to_string()),
-    );
-    // CRITICAL: Without requires_openai_auth = true, Codex Desktop won't
-    // consider this config as configured.
-    provider_table.insert(
-        "requires_openai_auth".to_string(),
-        toml::Value::Boolean(true),
-    );
-    // CRITICAL: experimental_bearer_token is how Codex++ embeds the API
-    // key directly in the config. Codex Desktop reads this field.
-    provider_table.insert(
-        "experimental_bearer_token".to_string(),
-        toml::Value::String(bearer_token.clone()),
-    );
-    // Keep env_key as fallback for env-var-based configs
-    provider_table.insert(
-        "env_key".to_string(),
-        toml::Value::String("OPENAI_API_KEY".to_string()),
-    );
-
-    // Add model list so Desktop UI dropdown shows available models
-    if let Ok(models) = crate::modules::model_manager::list_models(&platform_id) {
-        let models_array: Vec<toml::Value> = models.iter().map(|m| {
-            let mut entry = toml::Table::new();
-            entry.insert(
-                "model".to_string(),
-                toml::Value::String(m.model_name.clone()),
-            );
-            entry.insert(
-                "display_name".to_string(),
-                toml::Value::String(m.display_name.clone()),
-            );
-            toml::Value::Table(entry)
-        }).collect();
-        if !models_array.is_empty() {
-            provider_table.insert(
-                "models".to_string(),
-                toml::Value::Array(models_array),
-            );
-        }
-    }
-
-    // Merge our custom provider into existing model_providers table
-    // CRITICAL: Don't replace the entire table — preserve other providers
-    let mut providers = config_toml
-        .get("model_providers")
-        .and_then(|v| v.as_table().cloned())
-        .unwrap_or_else(|| toml::Table::new());
-    providers.insert("custom".to_string(), toml::Value::Table(provider_table));
-    config_toml.insert(
-        "model_providers".to_string(),
-        toml::Value::Table(providers),
-    );
-
-    let output = toml::to_string_pretty(&config_toml)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-
-    // Add header comment
-    let final_content = format!(
-        "# Codex Desktop Configuration\n\
-         # Managed by Antigravity Hub\n\
-         # Applied at: {}\n\n{}",
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        output
-    );
-
-    // Backup existing config
+    // ── Backup existing config.toml ──
     let config_path = codex_dir.join(CONFIG_FILE);
     let backup_path = codex_dir.join(format!("{}{}", CONFIG_FILE, BACKUP_SUFFIX));
-
     if config_path.exists() {
         if let Err(e) = std::fs::copy(&config_path, &backup_path) {
             warn!("Failed to create backup: {}", e);
@@ -383,7 +272,74 @@ pub fn apply_codex_config(
         }
     }
 
-    // Write the new config
+    // ── Read existing config & edit in-place using toml_edit ──
+    // This preserves ALL existing content, comments, formatting.
+    // Only our specific keys/sections are inserted/updated.
+    let catalog_relative = format!("model-catalogs/{}-models.json", path_prefix);
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = if existing.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        existing.parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("Failed to parse config.toml: {}", e))?
+    };
+
+    // ── Set language from app config ──
+    let codex_language = match app_config.language.as_str() {
+        "zh" | "zh-CN" | "zh-cn" | "zh-Hans" => "zh-cn",
+        "zh-TW" | "zh-tw" | "zh-Hant" => "zh-tw",
+        "ja" | "ja-JP" => "ja",
+        _ => "en",
+    };
+    doc["language"] = toml_edit::value(codex_language);
+
+    // ── Set top-level keys ──
+    doc["model_provider"] = toml_edit::value("custom");
+    doc["model"] = toml_edit::value(&model_name);
+    doc["model_catalog_json"] = toml_edit::value(&catalog_relative);
+
+    // ── Set [model_providers.custom] section ──
+    // Ensure model_providers table exists
+    if !doc.contains_key("model_providers") {
+        doc["model_providers"] = toml_edit::table();
+    }
+    // Ensure custom table exists inside model_providers
+    let has_custom = doc["model_providers"]
+        .as_table()
+        .map_or(false, |t| t.contains_key("custom"));
+    if !has_custom {
+        doc["model_providers"]["custom"] = toml_edit::table();
+    }
+
+    doc["model_providers"]["custom"]["name"] = toml_edit::value("custom");
+    doc["model_providers"]["custom"]["base_url"] = toml_edit::value(&proxy_base_url);
+    doc["model_providers"]["custom"]["wire_api"] = toml_edit::value("responses");
+    doc["model_providers"]["custom"]["requires_openai_auth"] = toml_edit::value(false);
+    doc["model_providers"]["custom"]["env_key"] = toml_edit::value("OPENAI_API_KEY");
+
+    // Add model list
+    if let Ok(models) = crate::modules::model_manager::list_models(&platform_id) {
+        if !models.is_empty() {
+            let models_array: Vec<toml_edit::Value> = models.iter().map(|m| {
+                let mut entry = toml_edit::InlineTable::new();
+                entry.insert("model", toml_edit::value(m.model_name.clone()).into_value().unwrap());
+                entry.insert("display_name", toml_edit::value(m.display_name.clone()).into_value().unwrap());
+                toml_edit::Value::InlineTable(entry)
+            }).collect();
+            doc["model_providers"]["custom"]["models"] = toml_edit::value(toml_edit::Array::from_iter(models_array));
+        }
+    }
+
+    // ── Serialize and write ──
+    let final_content = format!(
+        "# Codex Desktop Configuration\n\
+         # Managed by Antigravity Hub\n\
+         # Applied at: {}\n\
+         # Restore with: restore_codex_config\n\n{}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        doc.to_string()
+    );
+
     std::fs::write(&config_path, &final_content)
         .map_err(|e| format!("Failed to write config: {}", e))?;
 
@@ -403,14 +359,13 @@ pub fn apply_codex_config(
              代理地址: {}\n\
              配置文件: {:?}\n\
              模型目录: {}\n\
-             API Key: {} (已写入 auth.json + config.toml)",
+             API Key: {} (已写入 auth.json)",
             path_prefix, model_name, proxy_base_url, config_path, catalog_relative, bearer_token
         ),
     })
 }
 
 /// Restore Codex Desktop config from backup
-/// Also restores auth.json from backup if available
 pub fn restore_codex_config() -> Result<String, String> {
     let codex_dir = resolve_codex_home();
     let config_path = codex_dir.join(CONFIG_FILE);
@@ -420,11 +375,8 @@ pub fn restore_codex_config() -> Result<String, String> {
         return Err("No backup found to restore.".to_string());
     }
 
-    // Restore config.toml
     std::fs::copy(&backup_path, &config_path)
         .map_err(|e| format!("Failed to restore backup: {}", e))?;
-
-    // Remove backup after successful restore
     let _ = std::fs::remove_file(&backup_path);
 
     // Restore auth.json backup if exists
@@ -436,7 +388,6 @@ pub fn restore_codex_config() -> Result<String, String> {
         let _ = std::fs::remove_file(&auth_backup_path);
         info!("auth.json restored from backup");
     } else if auth_path.exists() {
-        // No auth backup exists, check if current auth.json was written by us
         let content = std::fs::read_to_string(&auth_path).unwrap_or_default();
         if content.contains("antigravity") || content.contains("sk-antigravity") {
             let _ = std::fs::remove_file(&auth_path);
@@ -445,7 +396,6 @@ pub fn restore_codex_config() -> Result<String, String> {
     }
 
     info!("Codex Desktop config restored from backup: {:?}", config_path);
-
     Ok(format!(
         "已从备份恢复 Codex Desktop 配置。配置文件: {:?}",
         config_path
