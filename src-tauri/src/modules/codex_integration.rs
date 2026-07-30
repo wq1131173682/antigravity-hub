@@ -122,6 +122,50 @@ fn validate_reasoning_effort(effort: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Calculate a smart auto_compact_token_limit based on the context window size.
+///
+/// Strategy:
+/// - ≤ 128K (standard): use half, capped at 64K (balanced compression)
+/// - ≤ 200K: use 100K (generous for mid-range)
+/// - ≤ 1M (1,048,576): use 200K (allows large context but compresses early)
+/// - > 1M: use window / 4, capped at 500K (very large windows get aggressive compression)
+fn calc_auto_compact(context_window: u64) -> u64 {
+    if context_window <= 128_000 {
+        std::cmp::min(context_window / 2, 64_000)
+    } else if context_window <= 200_000 {
+        100_000
+    } else if context_window <= 1_048_576 {
+        200_000
+    } else {
+        std::cmp::min(context_window / 4, 500_000)
+    }
+}
+
+/// Calculate the effective context window percent based on window size.
+/// Very large windows get a slightly lower effective percent to account
+/// for overhead from tool definitions, system prompts, etc.
+fn calc_effective_pct(context_window: u64) -> u64 {
+    if context_window >= 1_000_000 {
+        90
+    } else if context_window >= 200_000 {
+        92
+    } else {
+        95
+    }
+}
+
+/// Calculate truncation policy limit based on context window.
+/// Larger windows can tolerate more truncation tokens.
+fn calc_truncation_limit(context_window: u64) -> u64 {
+    if context_window >= 1_000_000 {
+        50_000
+    } else if context_window >= 200_000 {
+        20_000
+    } else {
+        10_000
+    }
+}
+
 /// Generate a model catalog file for Codex Desktop.
 ///
 /// Codex Desktop uses a `model_catalog_json` file to know which models are
@@ -131,6 +175,12 @@ fn validate_reasoning_effort(effort: Option<&str>) -> Result<(), String> {
 ///
 /// The catalog file is written to `~/.codex/model-catalogs/{path_prefix}-models.json`
 /// and contains all models for the platform identified by `path_prefix`.
+///
+/// Enhanced features:
+/// - Per-model context window sizes (128K, 200K, 1M+)
+/// - Smart auto_compact_token_limit based on window size
+/// - Proper max_context_window and effective_context_window_percent
+/// - Scaled truncation policies
 fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
     use crate::modules::config;
     use crate::modules::model_manager;
@@ -150,11 +200,21 @@ fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
     let models = model_manager::list_models(platform_id)
         .map_err(|e| format!("Failed to list models for platform '{}': {}", platform_id, e))?;
 
-    // Build the catalog entries
+    // Build the catalog entries with per-model context windows
     let catalog_models: Vec<serde_json::Value> = models.iter().map(|m| {
         let context_window = m.max_input_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        // Auto-compact at half the context window, capped at 196608
-        let auto_compact = std::cmp::min(context_window / 2, 196608_u64);
+        let max_window = context_window;
+        let auto_compact = calc_auto_compact(context_window);
+        let effective_pct = calc_effective_pct(context_window);
+        let truncation_limit = calc_truncation_limit(context_window);
+
+        // Determine input modalities based on window size
+        // Very large windows (1M+) support audio in addition to text+image
+        let input_modalities = if context_window >= 1_000_000 {
+            vec!["text", "image", "audio"]
+        } else {
+            vec!["text", "image"]
+        };
 
         serde_json::json!({
             "model": m.model_name,
@@ -164,10 +224,10 @@ fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
             "visibility": "list",
             "supported_in_api": true,
             "context_window": context_window,
-            "max_context_window": context_window,
-            "effective_context_window_percent": 95,
+            "max_context_window": max_window,
+            "effective_context_window_percent": effective_pct,
             "auto_compact_token_limit": auto_compact,
-            "input_modalities": ["text", "image"],
+            "input_modalities": input_modalities,
             "supports_image_detail_original": true,
             "supports_parallel_tool_calls": true,
             "supports_search_tool": true,
@@ -181,7 +241,7 @@ fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
             "default_verbosity": "low",
             "truncation_policy": {
                 "mode": "tokens",
-                "limit": 10000
+                "limit": truncation_limit
             },
             "priority": 10
         })
@@ -210,7 +270,7 @@ fn generate_model_catalog(path_prefix: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to finalize model catalog: {}", e))?;
 
     info!(
-        "Model catalog generated: {:?} ({} models for platform '{}')",
+        "Model catalog generated: {:?} ({} models, platform='{}')",
         catalog_path,
         models.len(),
         platform_name

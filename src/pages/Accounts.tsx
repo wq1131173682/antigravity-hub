@@ -539,6 +539,15 @@ function Accounts() {
                             <Layers className="w-4 h-4 text-purple-500 shrink-0" />
                             <span className="font-medium text-sm text-gray-900 dark:text-base-content">{model.display_name || model.model_name}</span>
                             <span className="text-xs text-gray-400 font-mono">{model.model_name}</span>
+                            {model.max_input_tokens && (
+                              <span className="px-1.5 py-0.5 text-[10px] font-mono bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 rounded font-medium">
+                                {model.max_input_tokens >= 1000000
+                                  ? `${(model.max_input_tokens / 1000000).toFixed(0)}M`
+                                  : model.max_input_tokens >= 1000
+                                    ? `${(model.max_input_tokens / 1000).toFixed(0)}K`
+                                    : `${model.max_input_tokens}`} ctx
+                              </span>
+                            )}
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
                             <button
