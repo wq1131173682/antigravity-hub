@@ -1436,5 +1436,5 @@
         "placeholder_max_ips": "0 = Unlimited",
         "hint_max_ips": "0 = Unlimited",
         "hint_curfew": "Leave empty to disable. Based on server time."
-    },
+    }
 }
