@@ -4,6 +4,7 @@ import { useConfigStore } from '../../stores/useConfigStore';
 import { usePlatformStore } from '../../stores/usePlatformStore';
 import * as codexService from '../../services/codexService';
 import { showToast } from '../common/ToastContainer';
+import ModalDialog from '../common/ModalDialog';
 import {
   Terminal, CheckCircle2, XCircle, AlertTriangle, RotateCcw, Loader2,
   Play, FileCode, RefreshCw, Trash2, Lightbulb, Eye, EyeOff,
@@ -43,6 +44,7 @@ export default function CodexIntegration() {
   const [profileName, setProfileName] = useState<string>('');
   const [savingProfile, setSavingProfile] = useState(false);
   const [profilesLoading, setProfilesLoading] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
 
   // Initialize
   useEffect(() => {
@@ -358,11 +360,7 @@ export default function CodexIntegration() {
           {selectedProfile && (
             <button
               className="px-3 py-2 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-sm font-medium rounded-lg border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors flex items-center gap-1.5"
-              onClick={() => {
-                if (window.confirm(t('codex.profile_delete_confirm'))) {
-                  handleDeleteProfile();
-                }
-              }}
+              onClick={() => setShowDeleteModal(true)}
             >
               <Trash2 className="w-3.5 h-3.5" />
               {t('codex.profile_delete')}
@@ -696,6 +694,22 @@ export default function CodexIntegration() {
           </div>
         )}
       </div>
+
+      {/* Delete Profile Confirmation Modal */}
+      <ModalDialog
+        isOpen={showDeleteModal}
+        title={t('codex.profile_delete')}
+        message={t('codex.profile_delete_confirm')}
+        type="confirm"
+        isDestructive
+        confirmText={t('common.delete')}
+        cancelText={t('common.cancel')}
+        onConfirm={() => {
+          setShowDeleteModal(false);
+          handleDeleteProfile();
+        }}
+        onCancel={() => setShowDeleteModal(false)}
+      />
     </div>
   );
 }

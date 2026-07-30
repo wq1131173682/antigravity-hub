@@ -165,6 +165,9 @@ function Settings() {
           </div>
         </div>
 
+        {/* Codex CLI Integration */}
+        <CodexIntegration />
+
         {/* Language Settings */}
         <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
           <div className="flex items-center gap-2 mb-4">
@@ -196,9 +199,6 @@ function Settings() {
             </button>
           </div>
         </div>
-
-        {/* Codex CLI Integration */}
-        <CodexIntegration />
 
         {/* Reload Config */}
         <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
