@@ -205,6 +205,10 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'save_profile': { url: '/api/profiles', method: 'POST' },
   'delete_profile': { url: '/api/profiles/:profileId', method: 'DELETE' },
   'toggle_profile': { url: '/api/profiles/:profileId/toggle', method: 'POST' },
+  'check_codex_status': { url: '/api/codex/status', method: 'GET' },
+  'apply_codex_config': { url: '/api/codex/apply', method: 'POST' },
+  'restore_codex_config': { url: '/api/codex/restore', method: 'POST' },
+  'read_codex_config': { url: '/api/codex/config', method: 'GET' },
 };
 
 export async function request<T>(cmd: string, args?: any): Promise<T> {

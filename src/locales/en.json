@@ -1449,6 +1449,19 @@
         "response_preview": "Response Preview",
         "context_placeholder": "Custom value (e.g. 1048576)"
     },
+    "codex_desktop": {
+        "title": "Codex Desktop Integration",
+        "description": "Configure Codex Desktop to use Antigravity Hub as its provider proxy, with model catalog support.",
+        "check_status": "Check Codex Status",
+        "select_platform": "Platform",
+        "select_platform_hint": "Select a platform...",
+        "default_model": "Default Model",
+        "select_model_hint": "Select a model...",
+        "apply": "Apply to Codex Desktop",
+        "applying": "Applying...",
+        "restore": "Restore Backup Config",
+        "select_required": "Please select platform and model first"
+    },
     "profiles": {
         "title": "Provider Profiles",
         "description": "Save platform + model combinations for quick reference.",

@@ -6,6 +6,7 @@ import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { useTranslation } from 'react-i18next';
 import ProviderProfiles from '../components/settings/ProviderProfiles';
+import CodexDesktop from '../components/settings/CodexDesktop';
 
 function Settings() {
   const { t, i18n } = useTranslation();
@@ -137,6 +138,9 @@ function Settings() {
 
         {/* Provider Profiles */}
         <ProviderProfiles />
+
+        {/* Codex Desktop Integration */}
+        <CodexDesktop />
 
         {/* Upstream Proxy Settings */}
         <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">

@@ -182,6 +182,11 @@ pub fn run() {
             commands::save_profile,
             commands::delete_profile,
             commands::toggle_profile,
+            // Codex Desktop
+            commands::check_codex_status,
+            commands::apply_codex_config,
+            commands::restore_codex_config,
+            commands::read_codex_config,
             // Debug console
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,

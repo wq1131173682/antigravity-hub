@@ -1414,6 +1414,19 @@
         "response_preview": "响应预览",
         "context_placeholder": "自定义值 (如 1048576)"
     },
+    "codex_desktop": {
+        "title": "Codex Desktop 集成",
+        "description": "配置 Codex Desktop 使用 Antigravity Hub 作为提供商代理，支持模型目录。",
+        "check_status": "检查 Codex 状态",
+        "select_platform": "平台",
+        "select_platform_hint": "请选择平台...",
+        "default_model": "默认模型",
+        "select_model_hint": "请选择模型...",
+        "apply": "应用至 Codex Desktop",
+        "applying": "正在应用...",
+        "restore": "恢复备份配置",
+        "select_required": "请选择平台和默认模型"
+    },
     "profiles": {
         "title": "供应商配置",
         "description": "保存平台 + 模型的组合，方便快速参考。",

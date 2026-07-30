@@ -504,6 +504,37 @@ pub async fn toggle_profile(profile_id: String, active: bool) -> Result<crate::m
     Ok(profile)
 }
 
+// ============================================================================
+// Codex Desktop Commands
+// ============================================================================
+
+/// Check Codex CLI/Desktop installation status
+#[tauri::command]
+pub async fn check_codex_status() -> Result<crate::modules::codex_desktop::CodexStatus, String> {
+    Ok(modules::codex_desktop::check_codex_status())
+}
+
+/// Apply Codex Desktop configuration (generates model catalog + writes config.toml)
+#[tauri::command]
+pub async fn apply_codex_config(
+    platform_id: String,
+    model_name: String,
+) -> Result<crate::modules::codex_desktop::CodexApplyResult, String> {
+    modules::codex_desktop::apply_codex_config(platform_id, model_name)
+}
+
+/// Restore Codex Desktop config from backup
+#[tauri::command]
+pub async fn restore_codex_config() -> Result<String, String> {
+    modules::codex_desktop::restore_codex_config()
+}
+
+/// Read current Codex Desktop config content
+#[tauri::command]
+pub async fn read_codex_config() -> Result<String, String> {
+    modules::codex_desktop::read_codex_config()
+}
+
 /// Get the primary LAN IP address (for displaying when proxy binds to 0.0.0.0)
 #[tauri::command]
 pub fn get_lan_ip() -> Result<String, String> {
