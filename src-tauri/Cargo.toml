@@ -1,6 +1,6 @@
 [package]
 name = "antigravity_tools"
-version = "6.4.1"
+version = "6.6.0"
 description = "Multi-platform API Account Manager - Simplified Edition"
 authors = ["you"]
 license = "CC-BY-NC-SA-4.0"
@@ -39,7 +39,6 @@ regex = "1.12.2"
 anyhow = "1.0"
 axum = "0.7"
 toml = "0.8"
-toml_edit = "0.22"
 
 [features]
 default = ["custom-protocol"]

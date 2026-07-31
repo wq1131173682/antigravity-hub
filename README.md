@@ -34,7 +34,7 @@
 
 ## 改了什么
 
-相对于原版，主要改动集中在系统托盘部分：
+相对于原版，主要改动集中在系统托盘部分和 Codex CLI 集成：
 
 **托盘菜单增强**
 - 原版只有「显示窗口」和「退出」两项，现在增加了「切换下一个账号」和「刷新额度」
@@ -45,7 +45,20 @@
 **i18n 小修**
 - 原版的托盘语言检测只覆盖了 3 种语言，补全到全部 12 种
 
-改动不大，主要是让日常使用更方便一些。
+托盘部分改动不大，主要是让日常使用更方便一些。
+
+此外，本项目还深度集成了 **Codex CLI**（详见下节），可以把代理配置一键应用到本地 Codex。
+
+## Codex CLI 集成
+
+在「设置」页可以一键把当前代理配置应用到 **Codex CLI**（写入 `~/.codex/config.toml`，若设置了 `CODEX_HOME` 则使用该目录）：
+
+- 写入 `[model_providers.custom]` 提供商，`base_url` 指向本地代理（带平台路径前缀路由，如 `/{prefix}/v1`）
+- 设置 `preferred_auth_method = "apikey"` 和 `requires_openai_auth = false`，跳过 ChatGPT 登录流程，直接走 API Key 认证
+- 支持高级选项：推理力度（`model_reasoning_effort`）、禁用响应存储、可选 API Key（留空则使用代理配置）
+- 应用前自动备份原配置到 `config.toml.antigravity.bak`，可一键恢复
+- 提供「清除 OAuth 数据」按钮（删除 `auth.json` 和 `sqlite/`），解决残留登录态与自定义提供商冲突的问题
+- 自动检测 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_ORG_ID` / `CODEX_HOME` 环境变量冲突并提示
 
 ## 快速开始
 

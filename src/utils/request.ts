@@ -200,10 +200,12 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'unbind_account_proxy': { url: '/api/proxy/pool/unbind', method: 'POST' },
   'get_account_proxy_binding': { url: '/api/proxy/pool/binding/:accountId', method: 'GET' },
 
+  // Codex CLI
   'check_codex_status': { url: '/api/codex/status', method: 'GET' },
   'apply_codex_config': { url: '/api/codex/apply', method: 'POST' },
   'restore_codex_config': { url: '/api/codex/restore', method: 'POST' },
-  'read_codex_config': { url: '/api/codex/config', method: 'GET' },
+  'clear_codex_auth': { url: '/api/codex/auth/clear', method: 'POST' },
+  'check_codex_env_conflicts': { url: '/api/codex/env-conflicts', method: 'GET' },
 };
 
 export async function request<T>(cmd: string, args?: any): Promise<T> {

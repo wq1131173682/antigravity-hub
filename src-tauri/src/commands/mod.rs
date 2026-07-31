@@ -457,35 +457,68 @@ pub async fn test_model(platform_id: String, model_name: String) -> Result<crate
 }
 
 // ============================================================================
-// Codex Desktop Commands
+// Codex CLI Integration Commands
 // ============================================================================
 
-/// Check Codex CLI/Desktop installation status
+/// Check Codex CLI status
 #[tauri::command]
-pub async fn check_codex_status() -> Result<crate::modules::codex_desktop::CodexStatus, String> {
-    Ok(modules::codex_desktop::check_codex_status())
+pub async fn check_codex_status() -> Result<crate::modules::codex_integration::CodexStatus, String> {
+    Ok(crate::modules::codex_integration::check_codex_status())
 }
 
-/// Apply Codex Desktop configuration (generates model catalog + writes config.toml + auth.json)
+/// Apply Antigravity Hub proxy config to Codex CLI
+/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
 pub async fn apply_codex_config(
-    platform_id: String,
+    proxy_host: String,
+    proxy_port: u16,
+    path_prefix: String,
     model_name: String,
+    reasoning_effort: Option<String>,
+    disable_response_storage: Option<bool>,
     api_key: Option<String>,
-) -> Result<crate::modules::codex_desktop::CodexApplyResult, String> {
-    modules::codex_desktop::apply_codex_config(platform_id, model_name, api_key)
+) -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::apply_codex_config(
+            &proxy_host,
+            proxy_port,
+            &path_prefix,
+            &model_name,
+            reasoning_effort.as_deref(),
+            disable_response_storage,
+            api_key.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
 }
 
-/// Restore Codex Desktop config from backup
+/// Restore Codex CLI config from backup
+/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
-pub async fn restore_codex_config() -> Result<String, String> {
-    modules::codex_desktop::restore_codex_config()
+pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::restore_codex_config()
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
 }
 
-/// Read current Codex Desktop config content
+/// Clear Codex CLI OAuth data (auth.json + sqlite/)
+/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
-pub async fn read_codex_config() -> Result<String, String> {
-    modules::codex_desktop::read_codex_config()
+pub async fn clear_codex_auth() -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::modules::codex_integration::clear_codex_auth()
+    })
+    .await
+    .map_err(|e| format!("Blocking task failed: {}", e))?
+}
+
+/// Check for Codex-related environment variable conflicts
+#[tauri::command]
+pub async fn check_codex_env_conflicts() -> Result<crate::modules::codex_integration::EnvConflictResult, String> {
+    Ok(crate::modules::codex_integration::check_codex_env_conflicts())
 }
 
 /// Get the primary LAN IP address (for displaying when proxy binds to 0.0.0.0)

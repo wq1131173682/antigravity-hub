@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "antigravity_tools"
-version = "6.4.1"
+version = "6.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -65,7 +65,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
- "toml_edit 0.22.27",
  "tracing",
  "tracing-appender",
  "tracing-log",
