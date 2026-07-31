@@ -115,6 +115,33 @@ pub fn emit_key_switched(payload: KeySwitchedPayload) {
     }
 }
 
+/// Payload for the proxy://request event emitted to the frontend (Mini View).
+/// Carries the platform + model being called and token usage so the small
+/// window can display live request information.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyRequestPayload {
+    pub id: String,
+    pub platform_name: String,
+    pub platform_id: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub status: u16,
+    pub duration: u64,
+    pub timestamp: i64,
+    /// true when the request is in-flight, false when it completed/failed
+    pub in_progress: bool,
+}
+
+/// Emit a proxy://request event to the frontend (Mini View footer / current-call card).
+/// `in_progress = true` marks the start of a request; the completion event carries
+/// final status, duration and token usage.
+pub fn emit_proxy_request(payload: ProxyRequestPayload) {
+    if let Some(handle) = APP_HANDLE.get() {
+        let _ = handle.emit("proxy://request", payload);
+    }
+}
+
 /// Visitor to extract fields from tracing events
 struct FieldVisitor {
     message: Option<String>,

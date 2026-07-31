@@ -1490,5 +1490,20 @@
         "tip_stream": "If you see 'stream disconnected', check that the proxy is running and the base URL is correct. Try restarting the proxy.",
         "tip_oauth": "If you previously logged in with OpenAI, run 'codex auth logout' or use the 'Clear OAuth Data' button above. Then delete ~/.codex/sqlite/ directory.",
         "tip_model": "Ensure the model name is correct and available on the selected platform. Check the proxy is running and accounts have available quota."
+    },
+    "mini_view": {
+        "calling": "Calling",
+        "last_call": "Last Call",
+        "in_flight": "In Flight",
+        "recent_requests": "Recent Requests",
+        "clear": "Clear",
+        "expand": "Expand",
+        "collapse": "Collapse",
+        "status": "Status",
+        "duration": "Duration",
+        "time": "Time",
+        "platform": "Platform",
+        "model": "Model",
+        "total_tokens": "Total"
     }
 }

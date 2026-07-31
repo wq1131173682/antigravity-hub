@@ -4,6 +4,7 @@ use serde::Serialize;
 use reqwest::Client;
 use once_cell::sync::Lazy;
 use rand::seq::SliceRandom;
+use futures::StreamExt;
 
 use tracing::{info, warn, error};
 
@@ -975,11 +976,38 @@ async fn forward_with_retry(
 
     let model_identifier = model_name.clone().unwrap_or_else(|| "unknown".to_string());
 
+    // ── Mini View: request tracking ──
+    // Resolve the display name once so the frontend Mini View can show
+    // which platform + model is currently being called.
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_start = std::time::Instant::now();
+    let platform_name = crate::modules::config::load_app_config()
+        .ok()
+        .and_then(|c| c.platforms.into_iter().find(|p| p.id == platform_id))
+        .map(|p| p.name)
+        .unwrap_or_else(|| platform_prefix.to_string());
+
     // Pre-load key values into a map to avoid repeated list_keys calls
     let key_value_map: std::collections::HashMap<String, String> = {
         let keys = crate::modules::keystore::list_keys(platform_id)?;
         keys.into_iter().map(|k| (k.id, k.key_value)).collect()
     };
+
+    // Notify the frontend that a request has started (in-flight state).
+    // NOTE: emitted AFTER the key_value_map load above so a failure there
+    // (which returns early) never leaves an orphaned in-flight event.
+    crate::modules::log_bridge::emit_proxy_request(crate::modules::log_bridge::ProxyRequestPayload {
+        id: request_id.clone(),
+        platform_name: platform_name.clone(),
+        platform_id: platform_id.to_string(),
+        model: model_identifier.clone(),
+        input_tokens: 0,
+        output_tokens: 0,
+        status: 0,
+        duration: 0,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        in_progress: true,
+    });
 
     for attempt in 0..max_retries {
         // Refresh keys_to_try on each attempt (except the first) so that
@@ -992,6 +1020,19 @@ async fn forward_with_retry(
         };
 
         if keys_to_try.is_empty() {
+            // Notify the frontend that the request failed (no keys available).
+            crate::modules::log_bridge::emit_proxy_request(crate::modules::log_bridge::ProxyRequestPayload {
+                id: request_id.clone(),
+                platform_name: platform_name.clone(),
+                platform_id: platform_id.to_string(),
+                model: model_identifier.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                status: 503,
+                duration: request_start.elapsed().as_millis() as u64,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                in_progress: false,
+            });
             return Err("No active API keys available for this platform".to_string());
         }
 
@@ -1155,20 +1196,43 @@ async fn forward_with_retry(
 
         if is_streaming {
             crate::modules::token_stats::record_streaming_request();
+
+            // Streaming responses can't be fully parsed up-front, but OpenAI /
+            // Anthropic SSE streams include a final `usage` block. Wrap the
+            // stream so we can scan chunks for it and emit the completion
+            // event with real token counts once the stream ends.
+            let stream_payload = crate::modules::log_bridge::ProxyRequestPayload {
+                id: request_id.clone(),
+                platform_name: platform_name.clone(),
+                platform_id: platform_id.to_string(),
+                model: model_identifier.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+                status: status.as_u16(),
+                duration: 0,
+                timestamp: chrono::Utc::now().timestamp_millis(),
+                in_progress: false,
+            };
             if is_responses_api {
                 // Translate SSE stream from Chat Completions format to
                 // Responses API format on-the-fly so Codex CLI can parse it.
                 // The upstream returns Chat Completions SSE chunks, but Codex
                 // CLI expects Responses API SSE events.
                 let body = axum::body::Body::from_stream(
-                    crate::modules::codex_translator::transform_stream_to_responses(resp.bytes_stream(), &model_identifier)
+                    track_stream_usage(
+                        crate::modules::codex_translator::transform_stream_to_responses(resp.bytes_stream(), &model_identifier),
+                        stream_payload,
+                        request_start,
+                    )
                 );
                 return response_builder
                     .body(body)
                     .map_err(|e| format!("Failed to build response: {}", e));
             } else {
                 // Pass-through for non-Responses API streaming.
-                let body = axum::body::Body::from_stream(resp.bytes_stream());
+                let body = axum::body::Body::from_stream(
+                    track_stream_usage(resp.bytes_stream(), stream_payload, request_start)
+                );
                 return response_builder
                     .body(body)
                     .map_err(|e| format!("Failed to build response: {}", e));
@@ -1181,6 +1245,19 @@ async fn forward_with_retry(
         let body_bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
+                // Notify the frontend that the request failed while reading the body.
+                crate::modules::log_bridge::emit_proxy_request(crate::modules::log_bridge::ProxyRequestPayload {
+                    id: request_id.clone(),
+                    platform_name: platform_name.clone(),
+                    platform_id: platform_id.to_string(),
+                    model: model_identifier.clone(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    status: 502,
+                    duration: request_start.elapsed().as_millis() as u64,
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    in_progress: false,
+                });
                 return Err(format!("Failed to read upstream response: {}", e));
             }
         };
@@ -1188,6 +1265,8 @@ async fn forward_with_retry(
         // Try to extract `usage` from the JSON body. Both OpenAI and Anthropic
         // expose prompt/completion token counts under `usage.{prompt_tokens,
         // completion_tokens}`; missing fields are silently ignored.
+        let mut prompt_tokens: u64 = 0;
+        let mut completion_tokens: u64 = 0;
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
             if let Some(usage) = json.get("usage") {
                 let prompt = usage
@@ -1198,11 +1277,27 @@ async fn forward_with_retry(
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                prompt_tokens = prompt;
+                completion_tokens = completion;
                 if prompt > 0 || completion > 0 {
                     crate::modules::token_stats::record_usage(prompt, completion);
                 }
             }
         }
+
+        // Notify the frontend of the completed request with token usage.
+        crate::modules::log_bridge::emit_proxy_request(crate::modules::log_bridge::ProxyRequestPayload {
+            id: request_id.clone(),
+            platform_name: platform_name.clone(),
+            platform_id: platform_id.to_string(),
+            model: model_identifier.clone(),
+            input_tokens: prompt_tokens,
+            output_tokens: completion_tokens,
+            status: status.as_u16(),
+            duration: request_start.elapsed().as_millis() as u64,
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            in_progress: false,
+        });
 
         // ── Responses API response translation ──
         // Translate the response body from Chat Completions format back to
@@ -1250,6 +1345,105 @@ async fn forward_with_retry(
             .map_err(|e| format!("Failed to build response: {}", e));
     }
 
+    // Notify the frontend that the request ultimately failed (all keys exhausted).
+    crate::modules::log_bridge::emit_proxy_request(crate::modules::log_bridge::ProxyRequestPayload {
+        id: request_id.clone(),
+        platform_name: platform_name.clone(),
+        platform_id: platform_id.to_string(),
+        model: model_identifier.clone(),
+        input_tokens: 0,
+        output_tokens: 0,
+        status: 502,
+        duration: request_start.elapsed().as_millis() as u64,
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        in_progress: false,
+    });
+
     Err(format!("All keys exhausted for platform '{}': {}", platform_prefix, last_error))
+}
+
+/// Wrap a streaming response body and scan the SSE chunks for the final
+/// `usage` block so we can emit the `proxy://request` completion event with
+/// real token counts once the stream finishes (Mini View live display).
+///
+/// The upstream returns Chat Completions SSE chunks; the last chunk usually
+/// carries `"usage":{"prompt_tokens":N,"completion_tokens":M}`. Anthropic
+/// style fields (`input_tokens` / `output_tokens`) are handled too. If the
+/// stream errors mid-flight, a completion event with status 502 is emitted so
+/// the frontend never sees a stuck in-flight indicator.
+fn track_stream_usage<S>(
+    stream: S,
+    mut payload: crate::modules::log_bridge::ProxyRequestPayload,
+    request_start: std::time::Instant,
+) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static
+where
+    S: futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(64);
+
+    tokio::spawn(async move {
+        futures::pin_mut!(stream);
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    // Scan this SSE chunk for a `usage` block (the final chunk carries it).
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        for line in text.lines() {
+                            let line = line.trim();
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                    if let Some(usage) = json.get("usage") {
+                                        if let Some(p) = usage.get("prompt_tokens")
+                                            .or_else(|| usage.get("input_tokens"))
+                                            .and_then(|v| v.as_u64())
+                                        {
+                                            input_tokens = p;
+                                        }
+                                        if let Some(c) = usage.get("completion_tokens")
+                                            .or_else(|| usage.get("output_tokens"))
+                                            .and_then(|v| v.as_u64())
+                                        {
+                                            output_tokens = c;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        break; // client went away, stop scanning
+                    }
+                }
+                Err(e) => {
+                    // Stream failed mid-flight — mark the payload as failed;
+                    // the single completion event is emitted after the loop so
+                    // the frontend's in-flight indicator never gets stuck and
+                    // no duplicate events are sent.
+                    payload.status = 502;
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+
+        // Emit the single completion event with real tokens. This runs on the
+        // natural stream end as well as the error / client-disconnect breaks.
+        if input_tokens > 0 || output_tokens > 0 {
+            crate::modules::token_stats::record_usage(input_tokens, output_tokens);
+        }
+        payload.input_tokens = input_tokens;
+        payload.output_tokens = output_tokens;
+        payload.in_progress = false;
+        payload.duration = request_start.elapsed().as_millis() as u64;
+        payload.timestamp = chrono::Utc::now().timestamp_millis();
+        crate::modules::log_bridge::emit_proxy_request(payload);
+    });
+
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
 }
 

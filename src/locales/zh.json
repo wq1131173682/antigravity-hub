@@ -1455,5 +1455,20 @@
         "tip_stream": "如果遇到 'stream disconnected'，请检查代理是否正在运行以及 base_url 是否正确。尝试重启代理服务。",
         "tip_oauth": "如果你之前登录过 OpenAI 账号，请运行 'codex auth logout' 或使用上方的「清除 OAuth 数据」按钮。然后删除 ~/.codex/sqlite/ 目录。",
         "tip_model": "请确保模型名称正确且在所选平台上可用。检查代理是否正在运行以及账号是否有可用配额。"
+    },
+    "mini_view": {
+        "calling": "正在调用",
+        "last_call": "最近调用",
+        "in_flight": "进行中",
+        "recent_requests": "最近请求",
+        "clear": "清空",
+        "expand": "展开",
+        "collapse": "收起",
+        "status": "状态",
+        "duration": "耗时",
+        "time": "时间",
+        "platform": "平台",
+        "model": "模型",
+        "total_tokens": "总计"
     }
 }
