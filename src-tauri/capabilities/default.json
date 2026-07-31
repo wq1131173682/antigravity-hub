@@ -30,6 +30,7 @@
     "opener:default",
     "dialog:default",
     "fs:default",
+    "updater:default",
     "core:tray:default",
     "core:event:default"
   ]

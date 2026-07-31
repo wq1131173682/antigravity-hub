@@ -18,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             info!("App starting up...");
 
@@ -37,6 +38,29 @@ pub fn run() {
 
             // Start background scheduler for cleanup
             modules::scheduler::start_scheduler();
+
+            // Check for updates in the background on release builds.
+            // The updater plugin shows its own native dialog when an update
+            // is found ("dialog": true in tauri.conf.json). Debug builds are
+            // skipped because the updater only works with signed artifacts.
+            #[cfg(not(debug_assertions))]
+            {
+                use tauri_plugin_updater::UpdaterExt;
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // updater() returns Result<Updater>, so unwrap it before check().
+                    match handle.updater() {
+                        Ok(updater) => {
+                            if let Err(e) = updater.check().await {
+                                tracing::debug!("Update check failed (silent): {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("Update check unavailable (silent): {}", e);
+                        }
+                    }
+                });
+            }
 
             // Build tray menu with i18n support
             use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
