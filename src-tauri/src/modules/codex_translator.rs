@@ -353,16 +353,36 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
                     let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("assistant");
 
                     // ── Text content (may be null when tool_calls is present) ──
+                    // Some providers (like Agnes) return thinking content inline in the
+                    // text with a >think prefix. We detect and split it here, emitting
+                    // a separate reasoning output item so Codex CLI can display it as
+                    // a collapsible thinking block instead of raw text.
                     let has_text = message.get("content").and_then(|c| c.as_str()).map_or(false, |s| !s.is_empty());
                     if has_text {
                         if let Some(content_str) = message.get("content").and_then(|c| c.as_str()) {
-                            output.push(serde_json::json!({
-                                "type": "message",
-                                "role": role,
-                                "content": [
-                                    {"type": "output_text", "text": content_str}
-                                ]
-                            }));
+                            let (reasoning_text, actual_text) = split_thinking_content(content_str);
+
+                            // Emit reasoning output item if thinking content was found
+                            if let Some(rt) = reasoning_text {
+                                if !rt.is_empty() {
+                                    output.push(serde_json::json!({
+                                        "type": "reasoning",
+                                        "reasoning": rt
+                                    }));
+                                }
+                            }
+
+                            // Emit text output item for the remaining (actual) content
+                            let text_to_emit = actual_text.as_deref().unwrap_or(content_str);
+                            if !text_to_emit.is_empty() {
+                                output.push(serde_json::json!({
+                                    "type": "message",
+                                    "role": role,
+                                    "content": [
+                                        {"type": "output_text", "text": text_to_emit}
+                                    ]
+                                }));
+                            }
                         }
                     }
 
@@ -483,6 +503,7 @@ pub fn transform_stream_to_responses(
             reasoning_item_id: String::new(),
             has_sent_reasoning: false,
             reasoning_output_index: 0,
+            is_thinking_block: false,
             tool_call_ids: std::collections::HashMap::new(),
             tool_call_names: std::collections::HashMap::new(),
             tool_call_args: std::collections::HashMap::new(),
@@ -668,41 +689,143 @@ pub fn transform_stream_to_responses(
                         })).await;
                     }
 
-                    // ── Text content ──
+                    // ── Text content (with >think thinking block detection) ──
+                    // Some providers (like Agnes) return thinking content inline in the
+                    // text with a >think prefix, instead of in a separate
+                    // reasoning_content field. We detect this at the start of the text
+                    // stream and route it to the reasoning buffer, so Codex CLI can
+                    // display it as a collapsible thinking block.
                     if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                         if !content.is_empty() {
-                            if !st.has_sent_output_item {
-                                st.has_sent_output_item = true;
-                                st.item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-                                sse_send(&tx, &serde_json::json!({
-                                    "type": "response.output_item.added",
-                                    "output_index": st.output_index,
-                                    "item": {
-                                        "id": st.item_id,
-                                        "type": "message",
-                                        "role": "assistant",
-                                        "content": []
-                                    }
-                                })).await;
+                            // Detect >think thinking block at the start of the text stream
+                            if !st.has_sent_output_item && !st.has_sent_reasoning && !st.is_thinking_block {
+                                let trimmed = content.trim_start();
+                                if trimmed.starts_with(">think") || trimmed.starts_with(">thinking") {
+                                    st.is_thinking_block = true;
+                                }
                             }
-                            if !st.has_sent_content_part {
-                                st.has_sent_content_part = true;
+
+                            if st.is_thinking_block {
+                                // ── Thinking block: route to reasoning_buffer ──
+                                // Accumulate text in reasoning_buffer and check if the
+                                // thinking block ends with a double-newline separator.
+                                let combined = format!("{}{}", st.reasoning_buffer, content);
+                                if let Some(delim_pos) = combined.find("\n\n") {
+                                    // End of thinking block found — split at \n\n
+                                    let thinking_part = combined[..delim_pos].to_string();
+                                    let text_after = combined[delim_pos + 2..].trim_start().to_string();
+
+                                    // Emit reasoning output item for the thinking part
+                                    if !st.has_sent_reasoning {
+                                        st.has_sent_reasoning = true;
+                                        st.reasoning_output_index = 0;
+                                        st.reasoning_item_id = format!("reason_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                                        sse_send(&tx, &serde_json::json!({
+                                            "type": "response.output_item.added",
+                                            "output_index": st.reasoning_output_index,
+                                            "item": {
+                                                "id": st.reasoning_item_id,
+                                                "type": "reasoning",
+                                                "reasoning": ""
+                                            }
+                                        })).await;
+                                    }
+                                    st.reasoning_buffer = thinking_part;
+                                    st.is_thinking_block = false;
+
+                                    // Reasoning is at output_index 0, so text should be at 1
+                                    st.output_index = 1;
+                                    // Tool calls start after text (index 2)
+                                    st.tool_call_output_index = 2;
+
+                                    // Now send the remaining text as normal text
+                                    if !text_after.is_empty() {
+                                        if !st.has_sent_output_item {
+                                            st.has_sent_output_item = true;
+                                            st.item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                                            sse_send(&tx, &serde_json::json!({
+                                                "type": "response.output_item.added",
+                                                "output_index": st.output_index,
+                                                "item": {
+                                                    "id": st.item_id,
+                                                    "type": "message",
+                                                    "role": "assistant",
+                                                    "content": []
+                                                }
+                                            })).await;
+                                        }
+                                        if !st.has_sent_content_part {
+                                            st.has_sent_content_part = true;
+                                            sse_send(&tx, &serde_json::json!({
+                                                "type": "response.content_part.added",
+                                                "item_id": st.item_id,
+                                                "output_index": st.output_index,
+                                                "content_index": st.content_index,
+                                                "part": {"type": "output_text", "text": ""}
+                                            })).await;
+                                        }
+                                        st.text_buffer.push_str(&text_after);
+                                        sse_send(&tx, &serde_json::json!({
+                                            "type": "response.output_text.delta",
+                                            "delta": &text_after,
+                                            "item_id": st.item_id,
+                                            "output_index": st.output_index,
+                                            "content_index": st.content_index
+                                        })).await;
+                                    }
+                                } else {
+                                    // Still in thinking block — emit reasoning events
+                                    if !st.has_sent_reasoning {
+                                        st.has_sent_reasoning = true;
+                                        st.reasoning_output_index = 0;
+                                        st.reasoning_item_id = format!("reason_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                                        sse_send(&tx, &serde_json::json!({
+                                            "type": "response.output_item.added",
+                                            "output_index": st.reasoning_output_index,
+                                            "item": {
+                                                "id": st.reasoning_item_id,
+                                                "type": "reasoning",
+                                                "reasoning": ""
+                                            }
+                                        })).await;
+                                    }
+                                    st.reasoning_buffer = combined;
+                                }
+                            } else {
+                                // ── Normal text path (existing behavior) ──
+                                if !st.has_sent_output_item {
+                                    st.has_sent_output_item = true;
+                                    st.item_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                                    sse_send(&tx, &serde_json::json!({
+                                        "type": "response.output_item.added",
+                                        "output_index": st.output_index,
+                                        "item": {
+                                            "id": st.item_id,
+                                            "type": "message",
+                                            "role": "assistant",
+                                            "content": []
+                                        }
+                                    })).await;
+                                }
+                                if !st.has_sent_content_part {
+                                    st.has_sent_content_part = true;
+                                    sse_send(&tx, &serde_json::json!({
+                                        "type": "response.content_part.added",
+                                        "item_id": st.item_id,
+                                        "output_index": st.output_index,
+                                        "content_index": st.content_index,
+                                        "part": {"type": "output_text", "text": ""}
+                                    })).await;
+                                }
+                                st.text_buffer.push_str(content);
                                 sse_send(&tx, &serde_json::json!({
-                                    "type": "response.content_part.added",
+                                    "type": "response.output_text.delta",
+                                    "delta": content,
                                     "item_id": st.item_id,
                                     "output_index": st.output_index,
-                                    "content_index": st.content_index,
-                                    "part": {"type": "output_text", "text": ""}
+                                    "content_index": st.content_index
                                 })).await;
                             }
-                            st.text_buffer.push_str(content);
-                            sse_send(&tx, &serde_json::json!({
-                                "type": "response.output_text.delta",
-                                "delta": content,
-                                "item_id": st.item_id,
-                                "output_index": st.output_index,
-                                "content_index": st.content_index
-                            })).await;
                         }
                     }
 
@@ -828,6 +951,10 @@ pub struct StreamState {
     reasoning_item_id: String,
     has_sent_reasoning: bool,
     reasoning_output_index: u32,
+    /// Whether we are currently inside a >think thinking block (inline thinking
+    /// content from providers that don't use the reasoning_content field).
+    /// When true, text deltas are routed to reasoning_buffer instead of text_buffer.
+    is_thinking_block: bool,
     tool_call_ids: std::collections::HashMap<u32, String>,
     tool_call_names: std::collections::HashMap<u32, String>,
     tool_call_args: std::collections::HashMap<u32, String>,
@@ -935,7 +1062,11 @@ impl StreamState {
         let mut tc_idx_counter = 0u32;
         for tc_idx in &tc_indices {
             if let Some(tc_id) = self.tool_call_ids.get(tc_idx) {
-                let tc_output_idx = if self.has_sent_output_item { 1 + tc_idx_counter } else { tc_idx_counter };
+                let tc_output_idx = if self.has_sent_output_item {
+                    if self.has_sent_reasoning { 2 + tc_idx_counter } else { 1 + tc_idx_counter }
+                } else {
+                    tc_idx_counter
+                };
                 let tc_name = self.tool_call_names.get(tc_idx).cloned().unwrap_or_default();
                 let tc_args = self.tool_call_args.get(tc_idx).cloned().unwrap_or_default();
                 sse_send(tx, &serde_json::json!({
@@ -1018,6 +1149,40 @@ fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> 
         }
     }
     None
+}
+
+/// Check if text starts with a `>think` or `>thinking` prefix, and if so,
+/// split the text into (thinking_content, remaining_text).
+///
+/// Some providers (like Agnes) return thinking/reasoning content inline
+/// in the text content with a `>think` prefix, instead of in a separate
+/// `reasoning_content` field. This function detects and extracts it.
+///
+/// Returns `(Some(thinking), None)` when the entire text is thinking,
+/// `(Some(thinking), Some(remaining))` when there's actual content after
+/// the thinking block, or `(None, Some(original))` when no thinking prefix
+/// is detected.
+fn split_thinking_content(text: &str) -> (Option<String>, Option<String>) {
+    let trimmed = text.trim_start();
+
+    // Check if starts with >think or >thinking (case-insensitive)
+    let lower = trimmed.to_lowercase();
+    let has_prefix = lower.starts_with(">think") || lower.starts_with(">thinking");
+    if !has_prefix {
+        return (None, Some(text.to_string()));
+    }
+
+    // Find the first \n\n (double newline) which separates thinking from actual content.
+    // The thinking block is from the start through the first \n\n.
+    if let Some(pos) = text.find("\n\n") {
+        let thinking = text[..pos].trim_end().to_string();
+        let remaining = text[pos + 2..].trim_start().to_string();
+        let remaining = if remaining.is_empty() { None } else { Some(remaining) };
+        (Some(thinking), remaining)
+    } else {
+        // No separator found — entire text is thinking content
+        (Some(text.to_string()), None)
+    }
 }
 
 /// Helper: send a JSON SSE event through the channel (async, waits for capacity).
