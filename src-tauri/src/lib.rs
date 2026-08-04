@@ -151,6 +151,7 @@ pub fn run() {
             commands::clean_expired_disabled_cmd,
             // Aggregate token I/O counters
             commands::get_token_stats,
+            commands::get_token_stats_by_platform,
             commands::reset_token_stats,
             // Proxy control
             commands::start_proxy,

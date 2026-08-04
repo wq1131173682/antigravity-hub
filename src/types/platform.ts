@@ -11,6 +11,7 @@ export interface Platform {
   notes?: string;
   created_at: number;
   base_url_overrides?: PathOverride[];
+  default_model?: string | null;
 }
 
 export interface Model {

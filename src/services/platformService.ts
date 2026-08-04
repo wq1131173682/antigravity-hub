@@ -232,6 +232,11 @@ export async function getTokenStats(): Promise<TokenStats> {
   return await invoke('get_token_stats');
 }
 
+/** Per-platform token usage counters, keyed by platform_id. */
+export async function getTokenStatsByPlatform(): Promise<Record<string, TokenStats>> {
+  return await invoke('get_token_stats_by_platform');
+}
+
 export async function resetTokenStats(): Promise<void> {
   return await invoke('reset_token_stats');
 }

@@ -126,6 +126,7 @@ const COMMAND_MAPPING: Record<string, { url: string; method: 'GET' | 'POST' | 'D
   'get_token_stats_account_trend_daily': { url: '/api/stats/token/account-trend/daily', method: 'GET' },
   'clear_token_stats': { url: '/api/stats/token/clear', method: 'POST' },
   'get_token_stats': { url: '/api/stats/token/summary', method: 'GET' },
+  'get_token_stats_by_platform': { url: '/api/stats/token/by-platform', method: 'GET' },
   'reset_token_stats': { url: '/api/stats/token/clear', method: 'POST' },
 
   // System

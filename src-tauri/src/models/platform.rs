@@ -36,6 +36,13 @@ pub struct Platform {
     /// Path-specific base URL overrides (e.g., for endpoints at a different API root)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_url_overrides: Vec<PathOverride>,
+    /// Default model name to force for this platform (e.g., set when applying
+    /// Codex config). When a request body's `model` is not in the platform's
+    /// configured model list, the proxy rewrites it to this model so upstream
+    /// never sees unknown model names (e.g., Codex's internal memory agent
+    /// models like gpt-5.6-luna).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
 }
 
 impl Platform {
@@ -49,6 +56,7 @@ impl Platform {
             sort_order: 0,
             created_at: chrono::Utc::now().timestamp(),
             base_url_overrides: Vec::new(),
+            default_model: None,
         }
     }
 }

@@ -231,6 +231,12 @@ pub async fn get_token_stats() -> Result<modules::token_stats::TokenStats, Strin
     Ok(modules::token_stats::get_summary())
 }
 
+/// Get per-platform token I/O counters (keyed by platform_id).
+#[tauri::command]
+pub async fn get_token_stats_by_platform() -> Result<std::collections::HashMap<String, modules::token_stats::TokenStats>, String> {
+    Ok(modules::token_stats::get_platform_summary())
+}
+
 /// Reset aggregate token counters.
 #[tauri::command]
 pub async fn reset_token_stats() -> Result<(), String> {

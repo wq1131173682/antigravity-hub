@@ -258,6 +258,71 @@ fn parse_and_prepare_body(
     }
 }
 
+/// Rewrite the request body's `model` field to the platform's default_model when
+/// the requested model is NOT one of the platform's configured models.
+///
+/// This solves the "Codex sends unknown model" problem: Codex CLI's internal
+/// agents (e.g., the Memory Writing Agent) use built-in model names such as
+/// `gpt-5.6-luna` / `gpt-5.6-terra` that are hardcoded and never follow the
+/// `model` key in config.toml. Without rewriting, those requests get forwarded
+/// upstream with an unknown model name, causing 404/503 and key exhaustion.
+///
+/// When the platform has a `default_model` (persisted when applying Codex
+/// config) and the incoming model is not in the platform's model list, the
+/// model is rewritten so the upstream always sees a valid configured model.
+///
+/// Returns (original_or_rewritten_model_name, modified_body_bytes).
+fn apply_default_model_override(
+    body_bytes: &[u8],
+    platform_id: &str,
+    model_name: Option<&str>,
+) -> (Option<String>, Vec<u8>) {
+    let Some(requested) = model_name else {
+        return (None, body_bytes.to_vec());
+    };
+
+    // Resolve the platform's default_model from app config
+    let default_model = match crate::modules::config::load_app_config() {
+        Ok(cfg) => cfg.platforms.iter()
+            .find(|p| p.id == platform_id)
+            .and_then(|p| p.default_model.as_deref())
+            .map(String::from),
+        Err(_) => None,
+    };
+    let Some(default_model) = default_model else {
+        // No default model configured — pass through unchanged
+        return (Some(requested.to_string()), body_bytes.to_vec());
+    };
+
+    // If the requested model is already the default or is a configured model,
+    // no rewrite is needed.
+    let is_configured = crate::modules::model_manager::list_models(platform_id)
+        .map(|models| models.iter().any(|m| m.model_name == requested))
+        .unwrap_or(false);
+    if is_configured || requested == default_model {
+        return (Some(requested.to_string()), body_bytes.to_vec());
+    }
+
+    // Rewrite the model field in the JSON body
+    match serde_json::from_slice::<serde_json::Value>(body_bytes) {
+        Ok(mut json) => {
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert(
+                    "model".to_string(),
+                    serde_json::Value::String(default_model.clone()),
+                );
+            }
+            let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
+            info!(
+                "Rewriting model '{}' → '{}' for platform '{}' (requested model not configured)",
+                requested, default_model, platform_id
+            );
+            (Some(default_model), modified)
+        }
+        Err(_) => (Some(requested.to_string()), body_bytes.to_vec()),
+    }
+}
+
 /// Handle `/v1/models` requests — return the models configured in Antigravity Hub
 /// in OpenAI-compatible format.
 ///
@@ -767,6 +832,13 @@ async fn proxy_handler(
 
     // Parse once: extract model name AND inject max_tokens in a single pass
     let (model_name, body_bytes) = parse_and_prepare_body(&body_bytes, &target_path);
+
+    // Rewrite unknown model names to the platform's default model.
+    // Codex CLI's internal agents (memory writer, etc.) send hardcoded built-in
+    // model names that may not exist on the upstream — map them to the model
+    // the user applied in the app so upstream always sees a valid model.
+    let (model_name, body_bytes) =
+        apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref());
     let body_bytes: axum::body::Bytes = body_bytes.into();
 
     // Try forwarding the request with key rotation
@@ -1135,7 +1207,7 @@ async fn forward_with_retry(
         }
 
         if is_streaming {
-            crate::modules::token_stats::record_streaming_request();
+            crate::modules::token_stats::record_streaming_for_platform(Some(&platform_id));
             if is_responses_api {
                 // Translate SSE stream from Chat Completions format to
                 // Responses API format on-the-fly so Codex CLI can parse it.
@@ -1180,7 +1252,7 @@ async fn forward_with_retry(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 if prompt > 0 || completion > 0 {
-                    crate::modules::token_stats::record_usage(prompt, completion);
+                    crate::modules::token_stats::record_usage_for_platform(Some(&platform_id), prompt, completion);
                 }
             }
         }

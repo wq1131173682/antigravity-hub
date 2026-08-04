@@ -302,6 +302,20 @@ pub fn apply_codex_config(
     validate_params(proxy_host, proxy_port, path_prefix, model_name)?;
     validate_reasoning_effort(reasoning_effort)?;
 
+    // ── Persist default model for this platform ──
+    // Store the applied model as the platform's default_model so the proxy can
+    // rewrite unknown model names (e.g., Codex's internal memory agent models
+    // like gpt-5.6-luna) to this model before forwarding upstream.
+    if let Ok(mut app_config) = crate::modules::config::load_app_config() {
+        if let Some(platform) = app_config.platforms.iter_mut().find(|p| p.path_prefix == path_prefix) {
+            if platform.default_model.as_deref() != Some(model_name) {
+                platform.default_model = Some(model_name.to_string());
+                let _ = crate::modules::config::save_app_config(&app_config);
+                info!("Persisted default_model='{}' for platform '{}'", model_name, path_prefix);
+            }
+        }
+    }
+
     let codex_dir = resolve_codex_home();
 
     // Ensure ~/.codex/ directory exists

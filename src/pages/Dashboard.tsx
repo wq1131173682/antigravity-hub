@@ -5,7 +5,7 @@ import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw } from 'lucide-react';
-import { getLanIp, getTokenStats, resetTokenStats, TokenStats } from '../services/platformService';
+import { getLanIp, getTokenStats, getTokenStatsByPlatform, resetTokenStats, TokenStats } from '../services/platformService';
 import { isTauri } from '../utils/env';
 import { MODEL_CONFIG } from '../config/modelConfig';
 
@@ -46,6 +46,7 @@ function Dashboard() {
   const [lanIp, setLanIp] = useState('');
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
+  const [platformTokenStats, setPlatformTokenStats] = useState<Record<string, TokenStats>>({});
   const [resettingStats, setResettingStats] = useState(false);
   const startTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -108,15 +109,21 @@ function Dashboard() {
     return () => { if (unlistenFn) unlistenFn(); };
   }, [models, fetchModelUsage]);
 
-  // Poll aggregate token stats every 3s. Counters are in-memory on the
-  // backend, so this is the only way to keep the dashboard live without
-  // re-emitting events from proxy.rs on every successful call.
+  // Poll aggregate + per-platform token stats every 3s. Counters are
+  // persisted on the backend but can change as new requests come in, so
+  // polling keeps the dashboard live.
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
       try {
-        const s = await getTokenStats();
-        if (!cancelled) setTokenStats(s);
+        const [s, byPlatform] = await Promise.all([
+          getTokenStats(),
+          getTokenStatsByPlatform(),
+        ]);
+        if (!cancelled) {
+          setTokenStats(s);
+          setPlatformTokenStats(byPlatform || {});
+        }
       } catch {
         /* non-fatal: backend may not be running yet */
       }
@@ -131,8 +138,12 @@ function Dashboard() {
     setResettingStats(true);
     try {
       await resetTokenStats();
-      const fresh = await getTokenStats();
+      const [fresh, byPlatform] = await Promise.all([
+        getTokenStats(),
+        getTokenStatsByPlatform(),
+      ]);
       setTokenStats(fresh);
+      setPlatformTokenStats(byPlatform || {});
     } catch (e) {
       console.error('Failed to reset token stats', e);
     } finally {
@@ -508,6 +519,49 @@ function Dashboard() {
                   })()}
                 </div>
               </div>
+
+              {/* Per-platform usage breakdown */}
+              {(() => {
+                const platformIds = Object.keys(platformTokenStats);
+                const withUsage = platformIds
+                  .map(id => ({ id, stats: platformTokenStats[id] }))
+                  .filter(p => p.stats.request_count > 0)
+                  .sort((a, b) => b.stats.total_tokens - a.stats.total_tokens);
+                if (withUsage.length === 0) return null;
+                const maxTokens = Math.max(1, ...withUsage.map(p => p.stats.total_tokens));
+                return (
+                  <div className="mt-4 border-t border-gray-100 dark:border-base-300 pt-3">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Globe className="w-3 h-3 text-gray-400 dark:text-gray-500" />
+                      <span className="text-[11px] font-medium text-gray-500 dark:text-gray-400">按平台</span>
+                    </div>
+                    <div className="space-y-2">
+                      {withUsage.map(p => {
+                        const platform = platforms.find(pl => pl.id === p.id);
+                        const name = platform?.name || p.id.slice(0, 8);
+                        const pct = Math.max(2, (p.stats.total_tokens / maxTokens) * 100);
+                        return (
+                          <div key={p.id} className="flex items-center gap-2">
+                            <span className="text-[11px] text-gray-600 dark:text-gray-300 w-24 truncate" title={name}>{name}</span>
+                            <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-gray-100 dark:bg-base-300">
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 dark:from-cyan-500 dark:to-blue-400 transition-all duration-500"
+                                style={{ width: `${pct}%` }}
+                              />
+                            </div>
+                            <span className="text-[10px] font-mono tabular-nums text-gray-500 dark:text-gray-400 w-14 text-right">
+                              {formatTokens(p.stats.total_tokens)}
+                            </span>
+                            <span className="text-[10px] font-mono tabular-nums text-gray-400 dark:text-gray-500 w-8 text-right">
+                              {p.stats.request_count}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           ) : (
             <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500 py-3">
