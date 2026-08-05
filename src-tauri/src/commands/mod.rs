@@ -471,6 +471,7 @@ pub async fn apply_codex_config(
     reasoning_effort: Option<String>,
     disable_response_storage: Option<bool>,
     api_key: Option<String>,
+    enable_model_catalog: Option<bool>,
 ) -> Result<crate::modules::codex_integration::ApplyResult, String> {
     let proxy_host = proxy_host;
     let proxy_port = proxy_port;
@@ -479,6 +480,7 @@ pub async fn apply_codex_config(
     let reasoning_effort = reasoning_effort;
     let disable_response_storage = disable_response_storage;
     let api_key = api_key;
+    let enable_model_catalog = enable_model_catalog;
     tokio::task::spawn_blocking(move || {
         crate::modules::codex_integration::apply_codex_config(
             &proxy_host,
@@ -488,6 +490,7 @@ pub async fn apply_codex_config(
             reasoning_effort.as_deref(),
             disable_response_storage,
             api_key.as_deref(),
+            enable_model_catalog,
         )
     })
     .await

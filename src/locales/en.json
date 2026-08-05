@@ -1468,6 +1468,8 @@
         "api_key_label": "API Key (optional)",
         "api_key_placeholder": "Leave empty to use proxy's API key",
         "api_key_hint": "Optional. If empty, Codex CLI will use the proxy's API key configured in the app.",
+        "enable_model_catalog": "Generate model catalog (Codex Desktop only)",
+        "enable_model_catalog_hint": "Writes model_catalog_json into config.toml so Codex Desktop can see the platform models. Codex CLI does NOT support this key and will fail to start with it — keep it OFF for CLI use.",
         "clear_auth": "Clear OAuth Data",
         "auth_cleared": "Codex CLI OAuth data cleared successfully!",
         "env_conflict_title": "⚠️ Environment Variable Conflicts Detected",

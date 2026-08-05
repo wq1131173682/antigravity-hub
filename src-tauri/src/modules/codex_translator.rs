@@ -269,6 +269,53 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
         }
     }
 
+    // ── Translate `reasoning` (Responses API) → `reasoning_effort` (Chat Completions) ──
+    // Codex CLI sends `{"reasoning": {"effort": "medium"}}`, but OpenAI-compatible
+    // reasoning providers (DeepSeek, Qwen, Kimi, etc.) expect a top-level string
+    // `reasoning_effort`. Passing the `reasoning` object through makes strict
+    // upstreams reject the whole request with HTTP 400.
+    if let Some(reasoning) = obj.remove("reasoning") {
+        let effort = if let Some(e) = reasoning.get("effort").and_then(|e| e.as_str()) {
+            Some(e.to_string())
+        } else if let Some(e) = reasoning.as_str() {
+            // Some clients send a bare string instead of an object
+            Some(e.to_string())
+        } else {
+            None
+        };
+        if let Some(effort) = effort {
+            if !obj.contains_key("reasoning_effort") {
+                obj.insert("reasoning_effort".to_string(), serde_json::Value::String(effort));
+            }
+        }
+        // The `reasoning` object itself is dropped — chat completions upstreams
+        // (other than OpenAI) do not understand it.
+    }
+
+    // ── Convert `tool_choice` from Responses API format to Chat Completions format ──
+    // Responses API:   {"type": "function", "name": "..."}
+    // Chat Completions: {"type": "function", "function": {"name": "..."}}
+    // String values like "auto" / "none" / "required" pass through unchanged.
+    if let Some(tool_choice) = obj.get_mut("tool_choice") {
+        if let Some(tc) = tool_choice.as_object_mut() {
+            if tc.contains_key("name") && !tc.contains_key("function") {
+                if let Some(name) = tc.remove("name") {
+                    tc.insert("function".to_string(), serde_json::json!({ "name": name }));
+                }
+            }
+        }
+    }
+
+    // ── Translate Responses API `text.format` (structured output) → `response_format` ──
+    // The `text` param is Responses-only; strict upstreams reject it.
+    if let Some(text) = obj.remove("text") {
+        if let Some(fmt) = text.get("format") {
+            if !obj.contains_key("response_format") {
+                obj.insert("response_format".to_string(), fmt.clone());
+            }
+        }
+    }
+
     // ── Post-processing: validate messages and clean up Responses API fields ──
 
     // Rename "developer" role to "system" for upstream compatibility.
@@ -309,9 +356,13 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
         }
     }
 
-    // Remove Responses API-specific fields that don't exist in Chat Completions
+    // Remove Responses API-specific fields that don't exist in Chat Completions.
+    // Strict third-party upstreams reject unknown fields with HTTP 400, so drop
+    // every Responses-only param instead of passing it through.
     obj.remove("previous_response_id");
     obj.remove("store");
+    obj.remove("include");
+    obj.remove("truncation");
 
     // Log the transformed request body for debugging
     if let Ok(log_body) = serde_json::to_string_pretty(&json) {
@@ -447,6 +498,29 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
         }
     }
 
+    // ── Complete the Responses API contract ──
+    // Upstream chat completions responses never carry `status` / `created_at`,
+    // but Codex CLI (and other Responses API clients) expect them. Without
+    // `status` the client may treat the response as incomplete and stall.
+    if obj.contains_key("error") {
+        obj.insert("status".to_string(), serde_json::json!("failed"));
+    } else if !obj.contains_key("status") {
+        obj.insert("status".to_string(), serde_json::json!("completed"));
+    }
+    // Map `created` (unix seconds) → `created_at` (Responses API field name).
+    if let Some(created) = obj.remove("created") {
+        if !obj.contains_key("created_at") {
+            obj.insert("created_at".to_string(), created);
+        }
+    }
+    // Always carry a non-empty response id.
+    if obj.get("id").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+        obj.insert(
+            "id".to_string(),
+            serde_json::json!(format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))),
+        );
+    }
+
     // Remove Chat Completions-specific fields
     obj.remove("choices");
 
@@ -456,7 +530,16 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
 /// Maximum time (seconds) to wait for the first valid SSE chunk before
 /// forcing stream completion. Prevents hung streams when a non-standard
 /// upstream sends chunks that don't match the expected OpenAI SSE format.
-const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 15;
+/// Must be generous enough to cover slow first tokens from reasoning models.
+const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum idle time (seconds) allowed between consecutive SSE chunks.
+/// Reasoning models (DeepSeek, Agnes, etc.) can pause for a long time between
+/// chunks while "thinking" (or when the relay buffers output), so this must be
+/// generous — an aggressive idle timeout truncates the stream mid-conversation
+/// and makes Codex end the turn with no output. The reqwest client's 300s
+/// total timeout still caps the overall stream length.
+const STREAM_CHUNK_IDLE_TIMEOUT_SECS: u64 = 120;
 
 /// Translate a Chat Completions streaming SSE response to Responses API SSE format.
 ///
@@ -488,7 +571,11 @@ pub fn transform_stream_to_responses(
 
         let now = chrono::Utc::now().timestamp();
         let mut st = StreamState {
-            response_id: String::new(),
+            // Generate the response id upfront so every emitted event has a
+            // valid id even when the upstream stream turns out to be empty
+            // (previously an empty upstream stream produced a "response.completed"
+            // with id="" which Codex could not associate with any response).
+            response_id: format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
             model_name: model_owned.clone(),
             item_id: String::new(),
             content_index: 0,
@@ -515,11 +602,12 @@ pub fn transform_stream_to_responses(
         futures::pin_mut!(upstream_stream);
 
         loop {
-            // Apply a timeout: if the stream hasn't produced a valid "choices"
-            // chunk within STREAM_FIRST_CHUNK_TIMEOUT_SECS, force completion.
+            // Apply an idle timeout: if the stream hasn't produced a valid
+            // "choices" chunk within the expected window, force completion.
+            // The per-chunk idle timeout must be generous — reasoning models
+            // can pause for a long time between chunks.
             let timeout_duration = if st.has_sent_created {
-                // After first valid chunk, use a longer per-chunk timeout
-                std::time::Duration::from_secs(30)
+                std::time::Duration::from_secs(STREAM_CHUNK_IDLE_TIMEOUT_SECS)
             } else {
                 std::time::Duration::from_secs(STREAM_FIRST_CHUNK_TIMEOUT_SECS)
             };
@@ -546,9 +634,12 @@ pub fn transform_stream_to_responses(
                     } else if !st.is_completed {
                         // Stream ended before any valid chunk — this can happen
                         // if the upstream returns an empty body (e.g., 204 No Content
-                        // disguised as a 200) or a non-SSE response.
+                        // disguised as a 200), a non-SSE response, or a body whose
+                        // format we couldn't parse. Surface this as a FAILED
+                        // response instead of a silent empty "completed" event
+                        // (which previously made Codex end the turn with no output).
                         warn!("transform_stream: upstream stream ended without any valid data");
-                        st.send_completed(&tx).await;
+                        st.send_error_response(&tx, "Upstream returned an empty or unparseable streaming response. Check the upstream provider / relay for errors.").await;
                     }
                     break;
                 }
@@ -567,7 +658,7 @@ pub fn transform_stream_to_responses(
                             "Upstream did not return a valid streaming response within {} seconds. The provider may use an unsupported SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS
                         )).await;
                     } else {
-                        warn!("transform_stream: timeout waiting for next chunk (30s), forcing completion");
+                        warn!("transform_stream: timeout waiting for next chunk ({}s), forcing completion", STREAM_CHUNK_IDLE_TIMEOUT_SECS);
                         st.flush_done_events(&tx).await;
                         st.send_completed(&tx).await;
                     }
@@ -583,18 +674,35 @@ pub fn transform_stream_to_responses(
                 if line.is_empty() {
                     continue;
                 }
-                let data = match line.strip_prefix("data: ") {
-                    Some(d) => d.trim(),
-                    None => {
-                        // Log non-SSE lines for debugging non-standard providers
-                        warn!("transform_stream: skipping non-SSE line (no 'data: ' prefix): {:.80}", line);
-                        continue;
-                    }
+                let data = if let Some(d) = line.strip_prefix("data:") {
+                    // Standard "data: {...}" — also handles relays/providers that
+                    // emit "data:{...}" without a space after the colon.
+                    d.trim()
+                } else {
+                    // Non-"data:" line — some relays/providers emit raw JSON
+                    // lines (NDJSON) without the SSE prefix. Try parsing it as a
+                    // chunk below; non-JSON lines (event:/comment lines) are
+                    // skipped with a warning.
+                    line.trim()
                 };
 
                 if data == "[DONE]" {
-                    st.flush_done_events(&tx).await;
-                    st.send_completed(&tx).await;
+                    // Guard against duplicate terminal events: some relays emit
+                    // multiple [DONE] lines, or an error may already have been
+                    // emitted for this stream.
+                    if st.is_completed {
+                        continue;
+                    }
+                    if st.has_sent_created {
+                        st.flush_done_events(&tx).await;
+                        st.send_completed(&tx).await;
+                    } else {
+                        // [DONE] arrived with no valid chunk before it — the
+                        // upstream sent an empty stream. Surface an error rather
+                        // than a silent empty completion.
+                        warn!("transform_stream: [DONE] received before any valid chunk (empty upstream stream)");
+                        st.send_error_response(&tx, "Upstream returned no streaming data ([DONE] with empty body).").await;
+                    }
                     continue;
                 }
 
@@ -606,12 +714,12 @@ pub fn transform_stream_to_responses(
                     }
                 };
 
-                if st.response_id.is_empty() {
-                    st.response_id = if let Some(id) = json.get("id").and_then(|i| i.as_str()) {
-                        format!("resp_{}", id.trim_start_matches("chatcmpl-"))
-                    } else {
-                        format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))
-                    };
+                // Prefer the upstream chunk id for continuity; keep the
+                // pre-generated UUID when the upstream provides none.
+                if let Some(id) = json.get("id").and_then(|i| i.as_str()) {
+                    if !id.is_empty() {
+                        st.response_id = format!("resp_{}", id.trim_start_matches("chatcmpl-"));
+                    }
                 }
 
                 if st.model_name.is_empty() {
@@ -697,10 +805,10 @@ pub fn transform_stream_to_responses(
                     // display it as a collapsible thinking block.
                     if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                         if !content.is_empty() {
-                            // Detect >think thinking block at the start of the text stream
+                            // Detect an inline thinking block at the start of the
+                            // text stream (markers vary by provider: >think, <think>, ...)
                             if !st.has_sent_output_item && !st.has_sent_reasoning && !st.is_thinking_block {
-                                let trimmed = content.trim_start();
-                                if trimmed.starts_with(">think") || trimmed.starts_with(">thinking") {
+                                if is_thinking_marker(content) {
                                     st.is_thinking_block = true;
                                 }
                             }
@@ -710,10 +818,14 @@ pub fn transform_stream_to_responses(
                                 // Accumulate text in reasoning_buffer and check if the
                                 // thinking block ends with a double-newline separator.
                                 let combined = format!("{}{}", st.reasoning_buffer, content);
-                                if let Some(delim_pos) = combined.find("\n\n") {
-                                    // End of thinking block found — split at \n\n
+                                // End of the thinking block (shared logic with
+                                // split_thinking_content — handles both prefix
+                                // style `>think` and tag style `<think>` blocks).
+                                let delim = find_thinking_delimiter(&combined);
+                                if let Some((delim_pos, delim_len)) = delim {
+                                    // End of thinking block found — split at the delimiter
                                     let thinking_part = combined[..delim_pos].to_string();
-                                    let text_after = combined[delim_pos + 2..].trim_start().to_string();
+                                    let text_after = combined[delim_pos + delim_len..].trim_start().to_string();
 
                                     // Emit reasoning output item for the thinking part
                                     if !st.has_sent_reasoning {
@@ -1094,6 +1206,10 @@ impl StreamState {
             return;
         }
         self.is_completed = true;
+        // Defensive: never emit a response.completed with an empty id.
+        if self.response_id.is_empty() {
+            self.response_id = format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+        }
         let mut output: Vec<serde_json::Value> = Vec::new();
 
         // ── Reasoning output ──
@@ -1141,7 +1257,18 @@ impl StreamState {
 /// field names that different providers use: reasoning_content, reasoning,
 /// thinking, thinking_content.
 fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> {
-    for key in &["reasoning_content", "reasoning", "thinking", "thinking_content"] {
+    // Reasoning field names vary across providers/models: DeepSeek/Qwen/Kimi
+    // use `reasoning_content`; others use `thinking`, `reasoning`,
+    // `thinking_content`, `reasoning_text`, `thought`, `thoughts`.
+    for key in &[
+        "reasoning_content",
+        "reasoning",
+        "thinking",
+        "thinking_content",
+        "reasoning_text",
+        "thought",
+        "thoughts",
+    ] {
         if let Some(val) = obj.get(*key).and_then(|v| v.as_str()) {
             if !val.is_empty() {
                 return Some(val);
@@ -1151,37 +1278,87 @@ fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> 
     None
 }
 
-/// Check if text starts with a `>think` or `>thinking` prefix, and if so,
+/// Check if text starts with a known inline thinking-block marker, and if so,
 /// split the text into (thinking_content, remaining_text).
 ///
-/// Some providers (like Agnes) return thinking/reasoning content inline
-/// in the text content with a `>think` prefix, instead of in a separate
-/// `reasoning_content` field. This function detects and extracts it.
+/// Many providers return thinking/reasoning content inline in the text with a
+/// marker instead of in a separate `reasoning_content` field. Markers vary by
+/// platform/model — Agnes uses `>think`, Qwen3/GLM/Kimi use `<think>` tags,
+/// others use `[think]` / `[reasoning]`. This function detects and extracts it.
 ///
 /// Returns `(Some(thinking), None)` when the entire text is thinking,
 /// `(Some(thinking), Some(remaining))` when there's actual content after
-/// the thinking block, or `(None, Some(original))` when no thinking prefix
+/// the thinking block, or `(None, Some(original))` when no thinking marker
 /// is detected.
 fn split_thinking_content(text: &str) -> (Option<String>, Option<String>) {
-    let trimmed = text.trim_start();
-
-    // Check if starts with >think or >thinking (case-insensitive)
-    let lower = trimmed.to_lowercase();
-    let has_prefix = lower.starts_with(">think") || lower.starts_with(">thinking");
-    if !has_prefix {
+    if !is_thinking_marker(text) {
         return (None, Some(text.to_string()));
     }
 
-    // Find the first \n\n (double newline) which separates thinking from actual content.
-    // The thinking block is from the start through the first \n\n.
-    if let Some(pos) = text.find("\n\n") {
+    // Find the delimiter separating thinking from actual content (shared logic
+    // with the streaming path — see find_thinking_delimiter).
+    let delim = find_thinking_delimiter(text);
+
+    if let Some((pos, len)) = delim {
         let thinking = text[..pos].trim_end().to_string();
-        let remaining = text[pos + 2..].trim_start().to_string();
+        let remaining = text[pos + len..].trim_start().to_string();
         let remaining = if remaining.is_empty() { None } else { Some(remaining) };
         (Some(thinking), remaining)
     } else {
-        // No separator found — entire text is thinking content
+        // No closing delimiter found — entire text is thinking content
         (Some(text.to_string()), None)
+    }
+}
+
+/// Check whether text starts with a known inline "thinking block" marker.
+/// Markers vary across providers/models:
+///   - Agnes: `>think ...` (no closing tag)
+///   - Qwen3 / GLM / Kimi: `<think>...</think>` / `<thinking>...</thinking>`
+///   - Others: `>thinking`, `>reasoning`, `[think]`, `[thinking]`, `[reasoning]`
+fn is_thinking_marker(text: &str) -> bool {
+    let lower = text.trim_start().to_lowercase();
+    const MARKERS: [&str; 9] = [
+        ">think",
+        ">thinking",
+        ">reasoning",
+        "<think",
+        "<thinking",
+        "<reasoning",
+        "[think",
+        "[thinking",
+        "[reasoning",
+    ];
+    MARKERS.iter().any(|m| lower.starts_with(m))
+}
+
+/// Find the delimiter that ends an inline thinking block, returning its
+/// position and length. Shared by the streaming and non-streaming paths.
+///
+/// - Tag-style blocks (`<think>`, `<thinking>`, `<reasoning>`) end at their
+///   closing tag. A `\n\n` inside multi-paragraph reasoning is content, NOT a
+///   terminator — so it is only used as a fallback when no closing tag exists
+///   (malformed / unclosed block).
+/// - Prefix-style blocks (`>think`, `[think]`, ...) end at the first `\n\n`.
+///
+/// Closing tags are checked longest-first so that `</thinking>` wins over its
+/// prefix `</think>` at the same position (otherwise the leftover `"ing>"`
+/// would leak into the visible answer).
+fn find_thinking_delimiter(text: &str) -> Option<(usize, usize)> {
+    let lower = text.trim_start().to_lowercase();
+    let tag_style = lower.starts_with('<');
+
+    if tag_style {
+        let mut best: Option<(usize, usize)> = None;
+        for d in ["</thinking>", "</reasoning>", "</think>"] {
+            if let Some(pos) = text.find(d) {
+                if best.map_or(true, |(bp, _)| pos < bp) {
+                    best = Some((pos, d.len()));
+                }
+            }
+        }
+        best.or_else(|| text.find("\n\n").map(|pos| (pos, 2)))
+    } else {
+        text.find("\n\n").map(|pos| (pos, 2))
     }
 }
 

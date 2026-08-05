@@ -289,6 +289,9 @@ pub fn backup_codex_config() -> Result<Option<String>, String> {
 /// * `proxy_port` - Proxy port (e.g., 8045)
 /// * `path_prefix` - Platform path prefix for routing (e.g., "sensenova", "openai")
 /// * `model_name` - The model ID to set as default (e.g., "gpt-4o")
+/// * `enable_model_catalog` - Whether to write a `model_catalog_json` for Codex
+///   Desktop (default: false). Codex CLI does NOT support this key and fails to
+///   initialize when it is present, so it is opt-in only.
 pub fn apply_codex_config(
     proxy_host: &str,
     proxy_port: u16,
@@ -297,6 +300,7 @@ pub fn apply_codex_config(
     reasoning_effort: Option<&str>,
     disable_response_storage: Option<bool>,
     api_key: Option<&str>,
+    enable_model_catalog: Option<bool>,
 ) -> Result<ApplyResult, String> {
     // ── Input validation ──
     validate_params(proxy_host, proxy_port, path_prefix, model_name)?;
@@ -437,23 +441,35 @@ pub fn apply_codex_config(
         toml::Value::Table(model_providers),
     );
 
-    // ── Model catalog for Codex Desktop ──
+    // ── Model catalog (OPT-IN, Codex Desktop only) ──
     // Codex Desktop requires a `model_catalog_json` file to know which models
     // are available. Without it, Desktop falls back to a built-in catalog that
     // may contain models not configured in Antigravity Hub, causing 404 errors.
-    // We generate a catalog with all models from the selected platform.
-    match generate_model_catalog(path_prefix) {
-        Ok(catalog_path) => {
-            info!("model_catalog_json set to: {}", catalog_path);
-            config.insert(
-                "model_catalog_json".to_string(),
-                toml::Value::String(catalog_path),
-            );
+    //
+    // IMPORTANT: This is opt-in. Codex CLI (the terminal version) does NOT
+    // support `model_catalog_json` and will fail to initialize when the key is
+    // present in config.toml, so we only write it when the user explicitly
+    // enables Desktop support.
+    if enable_model_catalog.unwrap_or(false) {
+        match generate_model_catalog(path_prefix) {
+            Ok(catalog_path) => {
+                info!("model_catalog_json set to: {}", catalog_path);
+                config.insert(
+                    "model_catalog_json".to_string(),
+                    toml::Value::String(catalog_path),
+                );
+            }
+            Err(e) => {
+                // Non-fatal: if catalog generation fails, the config still works
+                // for CLI users, and Desktop users will see a warning.
+                warn!("Failed to generate model catalog (non-fatal): {}", e);
+            }
         }
-        Err(e) => {
-            // Non-fatal: if catalog generation fails, the config still works
-            // for CLI users, and Desktop users will see a warning.
-            warn!("Failed to generate model catalog (non-fatal): {}", e);
+    } else {
+        // Remove any previously written model_catalog_json — leaving it in a
+        // CLI config breaks Codex CLI initialization.
+        if config.remove("model_catalog_json").is_some() {
+            info!("Removed stale model_catalog_json from Codex config (CLI mode)");
         }
     }
 

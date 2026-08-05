@@ -31,6 +31,7 @@ export interface ApplyCodexConfigParams {
   reasoningEffort?: string | null;
   disableResponseStorage?: boolean | null;
   apiKey?: string | null;
+  enableModelCatalog?: boolean;
 }
 
 export async function checkCodexStatus(): Promise<CodexStatus> {
@@ -46,6 +47,7 @@ export async function applyCodexConfig(params: ApplyCodexConfigParams): Promise<
     reasoningEffort: params.reasoningEffort ?? null,
     disableResponseStorage: params.disableResponseStorage ?? null,
     apiKey: params.apiKey ?? null,
+    enableModelCatalog: params.enableModelCatalog ?? false,
   });
 }
 

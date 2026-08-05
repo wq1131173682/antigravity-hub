@@ -28,6 +28,9 @@ export default function CodexIntegration() {
   const [disableResponseStorage, setDisableResponseStorage] = useState(true);
   const [apiKey, setApiKey] = useState<string>('');
   const [showApiKey, setShowApiKey] = useState(false);
+  // OPT-IN: write model_catalog_json for Codex Desktop. OFF by default because
+  // Codex CLI does not support this key and fails to initialize with it.
+  const [enableModelCatalog, setEnableModelCatalog] = useState(false);
 
   // Env conflict detection
   const [envConflicts, setEnvConflicts] = useState<codexService.EnvConflictResult | null>(null);
@@ -109,6 +112,7 @@ export default function CodexIntegration() {
         reasoningEffort: reasoningEffort || null,
         disableResponseStorage,
         apiKey: apiKey || null,
+        enableModelCatalog,
       });
       setResult(res);
       setStatus('success');
@@ -120,7 +124,7 @@ export default function CodexIntegration() {
       showToast(`${t('common.error')}: ${e}`, 'error');
       setStatus('error');
     }
-  }, [selectedModelName, config, platforms, selectedPlatformId, t, reasoningEffort, disableResponseStorage, apiKey]);
+  }, [selectedModelName, config, platforms, selectedPlatformId, t, reasoningEffort, disableResponseStorage, apiKey, enableModelCatalog]);
 
   const handleRestore = useCallback(async () => {
     setStatus('applying');
@@ -323,6 +327,24 @@ export default function CodexIntegration() {
               </span>
             </label>
 
+            {/* Model Catalog (Codex Desktop only — opt-in) */}
+            <div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-sm checkbox-success rounded"
+                  checked={enableModelCatalog}
+                  onChange={(e) => setEnableModelCatalog(e.target.checked)}
+                />
+                <span className="text-xs text-gray-600 dark:text-gray-400">
+                  {t('codex.enable_model_catalog')}
+                </span>
+              </label>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 pl-6">
+                {t('codex.enable_model_catalog_hint')}
+              </p>
+            </div>
+
             {/* API Key (optional) */}
             <div>
               <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1.5">
@@ -368,6 +390,7 @@ export default function CodexIntegration() {
   ];
   if (disableResponseStorage) lines.push('disable_response_storage = true');
   if (reasoningEffort) lines.push('model_reasoning_effort = "' + reasoningEffort + '"');
+  if (enableModelCatalog) lines.push('model_catalog_json = "~/.codex/model-catalogs/' + pathPrefix + '-models.json"');
   lines.push('');
   lines.push('[model_providers.custom]');
   lines.push('name = "custom"');

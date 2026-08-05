@@ -1433,6 +1433,8 @@
         "api_key_label": "API 密钥（可选）",
         "api_key_placeholder": "留空则使用代理的 API 密钥",
         "api_key_hint": "可选。留空则 Codex CLI 将使用应用中配置的代理 API 密钥。",
+        "enable_model_catalog": "生成模型目录（仅 Codex Desktop）",
+        "enable_model_catalog_hint": "会向 config.toml 写入 model_catalog_json，供 Codex Desktop 识别平台模型。Codex CLI 不支持该配置项，写入会导致初始化失败——CLI 用户请保持关闭。",
         "clear_auth": "清除 OAuth 数据",
         "auth_cleared": "Codex CLI OAuth 数据已清除成功！",
         "env_conflict_title": "⚠️ 检测到环境变量冲突",

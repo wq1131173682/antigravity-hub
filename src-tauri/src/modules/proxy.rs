@@ -276,10 +276,21 @@ fn apply_default_model_override(
     body_bytes: &[u8],
     platform_id: &str,
     model_name: Option<&str>,
+    is_responses_api: bool,
 ) -> (Option<String>, Vec<u8>) {
     let Some(requested) = model_name else {
         return (None, body_bytes.to_vec());
     };
+
+    // Only rewrite for Responses API requests (i.e. Codex CLI). Codex's internal
+    // agents send hardcoded built-in model names that must be mapped to the
+    // configured default model. Direct Chat Completions / other clients may
+    // legitimately request a model that is valid upstream but not yet in the
+    // local list (e.g. a newly released model) — silently rewriting those would
+    // break them, so pass those requests through untouched.
+    if !is_responses_api {
+        return (Some(requested.to_string()), body_bytes.to_vec());
+    }
 
     // Resolve the platform's default_model from app config
     let default_model = match crate::modules::config::load_app_config() {
@@ -838,7 +849,7 @@ async fn proxy_handler(
     // model names that may not exist on the upstream — map them to the model
     // the user applied in the app so upstream always sees a valid model.
     let (model_name, body_bytes) =
-        apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref());
+        apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref(), is_responses_api);
     let body_bytes: axum::body::Bytes = body_bytes.into();
 
     // Try forwarding the request with key rotation
@@ -1174,9 +1185,16 @@ async fn forward_with_retry(
             break;
         }
 
-        // Success case - record the API call
-        if let Some(mid) = &model_id {
-            let _ = crate::modules::quota_window::record_api_call(key_id, mid, platform_id);
+        // Success case - record the API call.
+        // IMPORTANT: only 2xx responses count toward the quota windows.
+        // 4xx errors (401/403/404 etc.) must NOT be counted — doing so would
+        // inflate usage and eventually make filter_available_keys exclude the
+        // key, causing conversations to fail with "No active API keys" for no
+        // apparent reason (a key hitting repeated 404s would be "used up").
+        if status.is_success() {
+            if let Some(mid) = &model_id {
+                let _ = crate::modules::quota_window::record_api_call(key_id, mid, platform_id);
+            }
         }
 
         // Capture response headers before consuming body.
