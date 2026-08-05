@@ -755,6 +755,12 @@ pub fn transform_stream_to_responses(
         // ── Main stream processing loop with timeout ──
         futures::pin_mut!(upstream_stream);
 
+        // Buffer for reassembling SSE payloads that some relays split across
+        // multiple physical lines (see try_parse_sse_fragments). Declared
+        // outside the chunk loop so a fragment cut off at a chunk boundary can
+        // be completed by the first line of the next chunk.
+        let mut pending_sse_fragments: Vec<String> = Vec::new();
+
         loop {
             // Apply an idle timeout: if the stream hasn't produced a valid
             // "choices" chunk within the expected window, force completion.
@@ -826,6 +832,12 @@ pub fn transform_stream_to_responses(
             for line in &lines {
                 let line = line.trim();
                 if line.is_empty() {
+                    // An SSE blank line terminates the current event. If a
+                    // multi-line payload never completed, discard the fragment.
+                    if !pending_sse_fragments.is_empty() {
+                        warn!("transform_stream: discarding incomplete SSE fragment at event boundary");
+                        pending_sse_fragments.clear();
+                    }
                     continue;
                 }
                 let data = if let Some(d) = line.strip_prefix("data:") {
@@ -841,6 +853,9 @@ pub fn transform_stream_to_responses(
                 };
 
                 if data == "[DONE]" {
+                    // A complete payload may be followed by [DONE]; drop any
+                    // leftover unparsed fragment.
+                    pending_sse_fragments.clear();
                     // Guard against duplicate terminal events: some relays emit
                     // multiple [DONE] lines, or an error may already have been
                     // emitted for this stream.
@@ -860,9 +875,17 @@ pub fn transform_stream_to_responses(
                     continue;
                 }
 
-                let json: serde_json::Value = match serde_json::from_str(data) {
-                    Ok(j) => j,
-                    Err(_) => {
+                // Try to parse this line as a complete JSON document. Some
+                // relays (Agnes et al.) wrap a single payload across multiple
+                // physical lines — a truncated `data:` line followed by bare
+                // continuation lines, or a pretty-printed multi-line error
+                // body. Accumulate fragments and parse once the combined text
+                // forms valid JSON, so no chunk is silently dropped (dropped
+                // fragments previously truncated tool-call arguments and made
+                // the whole stream look empty, aborting the conversation).
+                let json = match parse_sse_line(&mut pending_sse_fragments, data) {
+                    Some(j) => j,
+                    None => {
                         warn!("transform_stream: skipping non-JSON SSE data: {:.80}", data);
                         continue;
                     }
@@ -1442,6 +1465,91 @@ fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> 
     None
 }
 
+/// Maximum accumulated size of unparseable SSE fragments before discarding.
+/// Prevents unbounded memory growth when an upstream emits garbage that never
+/// forms valid JSON.
+const SSE_FRAGMENT_BUFFER_LIMIT: usize = 1024 * 1024;
+
+/// Parse one SSE line into a JSON document, transparently reassembling
+/// multi-line fragments left by relays that wrap a single payload across
+/// multiple physical lines (Agnes et al.).
+///
+/// - A line that parses standalone with an empty buffer → used as-is.
+/// - A line that parses standalone while the buffer holds a stale fragment →
+///   the stale fragment is discarded (it never completed) and the standalone
+///   document is used.
+/// - A line that does not parse standalone → appended to the buffer and the
+///   combined text is retried; the buffer is cleared once it parses.
+///
+/// The buffer is cleared on every success. On failure the buffer is retained
+/// for the next line, up to `SSE_FRAGMENT_BUFFER_LIMIT`.
+fn parse_sse_line(pending: &mut Vec<String>, data: &str) -> Option<serde_json::Value> {
+    let standalone = serde_json::from_str::<serde_json::Value>(data).ok();
+    match standalone {
+        Some(j) if pending.is_empty() => Some(j),
+        Some(j) => {
+            // The pending buffer holds an earlier fragment. If appending this
+            // line completes it, use the combined document; otherwise the
+            // buffer was garbage — drop it and use this complete line alone.
+            pending.push(data.to_string());
+            match try_parse_sse_fragments(pending) {
+                Some(combined) => {
+                    pending.clear();
+                    Some(combined)
+                }
+                None => {
+                    pending.clear();
+                    Some(j)
+                }
+            }
+        }
+        None => {
+            // Not valid JSON on its own — accumulate and retry once the
+            // combined text parses.
+            pending.push(data.to_string());
+            match try_parse_sse_fragments(pending) {
+                Some(combined) => {
+                    pending.clear();
+                    Some(combined)
+                }
+                None => {
+                    // Still incomplete — guard against unbounded growth.
+                    let total: usize = pending.iter().map(|s| s.len()).sum();
+                    if total > SSE_FRAGMENT_BUFFER_LIMIT {
+                        warn!(
+                            "transform_stream: SSE fragment buffer exceeded {} bytes, discarding",
+                            SSE_FRAGMENT_BUFFER_LIMIT
+                        );
+                        pending.clear();
+                    }
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Try to parse a JSON document from accumulated SSE line fragments.
+///
+/// Some relays (e.g. Agnes) wrap a single JSON payload across multiple
+/// physical lines — a truncated `data:` line followed by bare continuation
+/// lines, or a pretty-printed multi-line error body. Dropping the fragments
+/// truncates tool-call arguments and makes the whole stream look empty,
+/// which aborts the conversation. Returns the parsed value when the combined
+/// fragments form valid JSON.
+fn try_parse_sse_fragments(fragments: &[String]) -> Option<serde_json::Value> {
+    // 1. Direct concatenation — relays that wrap mid-token (e.g.
+    //    `...reasoning_cont` + `ent":" should"}}]}`) need no separator.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&fragments.concat()) {
+        return Some(v);
+    }
+    // 2. Join with a newline — pretty-printed multi-line error bodies.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&fragments.join("\n")) {
+        return Some(v);
+    }
+    None
+}
+
 /// Check if text starts with a known inline thinking-block marker, and if so,
 /// split the text into (thinking_content, remaining_text).
 ///
@@ -1601,5 +1709,71 @@ mod tests {
             repair_truncated_json("{\"a\": {\"b\": 1").as_deref(),
             Some("{\"a\": {\"b\": 1}}")
         );
+    }
+
+    #[test]
+    fn sse_fragment_reassembles_mid_token_wrap() {
+        // A relay splits `{"a": 1, "b": 2}` mid-token: `{"a": 1, "b` + `": 2}`
+        let frags = vec!["{\"a\": 1, \"b\"".to_string(), ": 2}".to_string()];
+        let v = try_parse_sse_fragments(&frags).expect("fragments should reassemble");
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+    }
+
+    #[test]
+    fn sse_fragment_reassembles_pretty_printed_error_body() {
+        // A pretty-printed multi-line error body without the data: prefix
+        let frags = vec![
+            "{\"error\": {".to_string(),
+            "  \"message\": \"boom\"".to_string(),
+            "}}".to_string(),
+        ];
+        let v = try_parse_sse_fragments(&frags).expect("fragments should reassemble");
+        assert_eq!(v.pointer("/error/message").and_then(|m| m.as_str()), Some("boom"));
+    }
+
+    #[test]
+    fn sse_fragment_single_complete_document() {
+        let frags = vec!["{\"ok\": true}".to_string()];
+        let v = try_parse_sse_fragments(&frags).expect("single fragment should parse");
+        assert_eq!(v["ok"], true);
+    }
+
+    #[test]
+    fn sse_fragment_garbage_returns_none() {
+        let frags = vec!["not json".to_string(), "at all".to_string()];
+        assert!(try_parse_sse_fragments(&frags).is_none());
+    }
+
+    #[test]
+    fn sse_line_uses_complete_doc_when_buffer_empty() {
+        let mut pending: Vec<String> = Vec::new();
+        let v = parse_sse_line(&mut pending, "{\"ok\": true}").expect("complete doc should parse");
+        assert_eq!(v["ok"], true);
+        assert!(pending.is_empty(), "buffer must stay empty");
+    }
+
+    #[test]
+    fn sse_line_discards_stale_fragment_for_complete_doc() {
+        // Buffer holds a stale fragment from a previous (malformed) event;
+        // a new complete document arrives — the stale fragment must be
+        // discarded and the standalone document used.
+        let mut pending = vec!["{\"a\": 1,".to_string()];
+        let v = parse_sse_line(&mut pending, "{\"b\": 2}").expect("complete doc should parse");
+        assert_eq!(v["b"], 2);
+        assert!(pending.is_empty(), "stale fragment must be cleared");
+    }
+
+    #[test]
+    fn sse_line_accumulates_then_reassembles() {
+        let mut pending: Vec<String> = Vec::new();
+        // First line: truncated fragment, still incomplete
+        assert!(parse_sse_line(&mut pending, "{\"a\": 1, \"b\"").is_none());
+        assert_eq!(pending.len(), 1);
+        // Second line: continuation completes the document
+        let v = parse_sse_line(&mut pending, ": 2}").expect("combined doc should parse");
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], 2);
+        assert!(pending.is_empty());
     }
 }
