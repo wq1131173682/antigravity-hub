@@ -331,7 +331,21 @@ pub fn apply_codex_config(
     let cfg_path = config_path();
     let bak_path = backup_path();
 
-    // Backup existing config
+    // ── Restore previous backup before applying ──
+    // On a repeat apply, config.toml already contains the Antigravity Hub
+    // modifications. If we backed that up again, the previous backup (the
+    // user's ORIGINAL config) would be overwritten and lost forever. So we
+    // first restore the previous backup — config.toml is back to the user's
+    // original — then back it up below and apply on top of it. The backup
+    // file always holds the original config, and re-applying never destroys
+    // it, so the user can always restore their original settings.
+    if bak_path.exists() {
+        std::fs::copy(&bak_path, &cfg_path)
+            .map_err(|e| format!("Failed to restore previous backup before apply: {}", e))?;
+        info!("Restored previous Codex config backup before re-applying: {:?}", bak_path);
+    }
+
+    // Backup existing config (now the user's original after the restore above)
     let backup_path_str = if cfg_path.exists() {
         std::fs::copy(&cfg_path, &bak_path)
             .map_err(|e| format!("Failed to backup existing config: {}", e))?;
