@@ -416,6 +416,66 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
     // Responses API:   {"type": "function", "name": "..."}
     // Chat Completions: {"type": "function", "function": {"name": "..."}}
     // String values like "auto" / "none" / "required" pass through unchanged.
+    //
+    // CRITICAL: unsupported tool types (namespace, web_search, computer_use,
+    // etc.) were removed from `tools` above. Any `tool_choice` that references
+    // a removed tool — or any `tool_choice` left behind when `tools` became
+    // empty — makes strict upstreams reject the whole request with HTTP 400
+    // ("'tool_choice' is only allowed when 'tools' are specified"), which
+    // aborts the conversation. Reconcile tool_choice against the surviving
+    // tools so the request still goes through.
+    let surviving_tool_names: std::collections::HashSet<String> = obj
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|tool| {
+                    tool.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Decide whether to drop tool_choice (borrow-check friendly: decide first,
+    // mutate after).
+    let drop_tool_choice: bool = if !obj.contains_key("tools") {
+        // `tools` was removed entirely (all types were unsupported) — a
+        // tool_choice is now invalid and strict upstreams reject it.
+        warn!("transform: removing tool_choice (request has no tools after translation)");
+        obj.get("tool_choice").is_some()
+    } else {
+        match obj.get("tool_choice") {
+            None => false,
+            Some(v) => {
+                let choice_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("function");
+                if choice_type != "function" {
+                    // tool_choice references a removed non-function tool type
+                    // (e.g. web_search_preview) — drop it.
+                    warn!("transform: removing tool_choice of unsupported type '{}'", choice_type);
+                    true
+                } else {
+                    // If tool_choice names a specific function, ensure it still
+                    // exists among the surviving tools (Borrow<str> avoids a
+                    // String allocation per request).
+                    match v.get("name").and_then(|n| n.as_str()) {
+                        Some(name) if !surviving_tool_names.contains(name) => {
+                            warn!("transform: tool_choice references removed tool '{}', dropping it", name);
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+            }
+        }
+    };
+    if drop_tool_choice {
+        obj.remove("tool_choice");
+    }
+
+    // Convert surviving tool_choice from Responses API format to Chat Completions format.
     if let Some(tool_choice) = obj.get_mut("tool_choice") {
         if let Some(tc) = tool_choice.as_object_mut() {
             if tc.contains_key("name") && !tc.contains_key("function") {
@@ -428,10 +488,51 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
 
     // ── Translate Responses API `text.format` (structured output) → `response_format` ──
     // The `text` param is Responses-only; strict upstreams reject it.
+    //
+    // Shape conversion: Responses API puts the JSON schema at the top level
+    // ({"type":"json_schema","name":...,"schema":...}), while Chat
+    // Completions nests it under a `json_schema` key
+    // ({"type":"json_schema","json_schema":{"name":...,"schema":...}}).
+    // Passing the Responses API shape through makes strict upstreams reject the
+    // request with HTTP 400 "response_format: missing field json_schema", which
+    // aborts the conversation — so wrap the schema fields into the nested
+    // `json_schema` object.
     if let Some(text) = obj.remove("text") {
         if let Some(fmt) = text.get("format") {
             if !obj.contains_key("response_format") {
-                obj.insert("response_format".to_string(), fmt.clone());
+                let mut response_format = fmt.clone();
+                let mut keep_response_format = true;
+                if let Some(fmt_obj) = response_format.as_object_mut() {
+                    let fmt_type = fmt_obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match fmt_type {
+                        "json_schema" => {
+                            let mut inner = serde_json::Map::new();
+                            if let Some(name) = fmt_obj.remove("name") {
+                                inner.insert("name".to_string(), name);
+                            }
+                            if let Some(schema) = fmt_obj.remove("schema") {
+                                inner.insert("schema".to_string(), schema);
+                            }
+                            if let Some(strict) = fmt_obj.remove("strict") {
+                                inner.insert("strict".to_string(), strict);
+                            }
+                            if let Some(desc) = fmt_obj.remove("description") {
+                                inner.insert("description".to_string(), desc);
+                            }
+                            fmt_obj.insert("json_schema".to_string(), serde_json::Value::Object(inner));
+                        }
+                        "text" => {
+                            // `{"type":"text"}` is the default output format;
+                            // some strict relays reject an explicit
+                            // response_format, so omit it entirely.
+                            keep_response_format = false;
+                        }
+                        _ => {} // "json_object" and anything else pass through
+                    }
+                }
+                if keep_response_format {
+                    obj.insert("response_format".to_string(), response_format);
+                }
             }
         }
     }
@@ -1775,5 +1876,159 @@ mod tests {
         assert_eq!(v["a"], 1);
         assert_eq!(v["b"], 2);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn tool_choice_dropped_when_no_tools_remain() {
+        // All tool types are unsupported (namespace/web_search) → `tools` is
+        // removed entirely. A leftover tool_choice would make the upstream 400
+        // with "tool_choice is only allowed when 'tools' are specified".
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {"type": "namespace", "name": "my_namespace"},
+                {"type": "web_search"}
+            ],
+            "tool_choice": {"type": "function", "name": "my_namespace"}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert!(v.get("tools").is_none(), "tools must be removed");
+        assert!(
+            v.get("tool_choice").is_none(),
+            "tool_choice must be dropped when no tools remain"
+        );
+    }
+
+    #[test]
+    fn tool_choice_dropped_when_referencing_removed_tool() {
+        // tools survives with only function tools, but tool_choice references a
+        // tool type that was filtered out — the choice must be dropped.
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "keep_me", "description": "d", "parameters": {"type": "object"}},
+                {"type": "web_search"}
+            ],
+            "tool_choice": {"type": "function", "name": "web_search"}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert!(v.get("tools").is_some(), "tools must remain");
+        assert!(
+            v.get("tool_choice").is_none(),
+            "tool_choice referencing a removed tool must be dropped"
+        );
+    }
+
+    #[test]
+    fn tool_choice_kept_and_converted_for_surviving_tool() {
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "my_tool", "description": "d", "parameters": {"type": "object"}}
+            ],
+            "tool_choice": {"type": "function", "name": "my_tool"}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let tc = v.get("tool_choice").expect("tool_choice must be kept");
+        assert_eq!(tc["type"], "function");
+        assert_eq!(
+            tc["function"]["name"],
+            "my_tool",
+            "must be converted to chat completions format"
+        );
+    }
+
+    #[test]
+    fn tool_choice_dropped_for_non_function_type() {
+        // tool_choice referencing a removed non-function tool type (e.g.
+        // web_search_preview) must be dropped, not forwarded to the upstream.
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "keep_me", "description": "d", "parameters": {"type": "object"}}
+            ],
+            "tool_choice": {"type": "web_search_preview"}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert!(v.get("tools").is_some(), "tools must remain");
+        assert!(v.get("tool_choice").is_none(), "non-function tool_choice must be dropped");
+    }
+
+    #[test]
+    fn response_format_text_is_omitted() {
+        // `{"type":"text"}` is the default output — strict relays may reject
+        // an explicit response_format, so it must not be forwarded.
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "text": {"format": {"type": "text"}}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert!(v.get("response_format").is_none(), "text format must be omitted");
+    }
+
+    #[test]
+    fn tool_choice_string_passes_through_when_tools_remain() {
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {"type": "function", "name": "my_tool", "parameters": {"type": "object"}}
+            ],
+            "tool_choice": "auto"
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(v["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn response_format_json_schema_is_nested() {
+        // Responses API text.format shape → Chat Completions response_format with
+        // the schema wrapped under `json_schema` (upstream 400s otherwise with
+        // "response_format: missing field json_schema").
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                    "strict": true
+                }
+            }
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let rf = v.get("response_format").expect("response_format must be present");
+        assert_eq!(rf["type"], "json_schema");
+        assert_eq!(
+            rf["json_schema"]["name"], "answer",
+            "schema fields must be nested under json_schema"
+        );
+        assert_eq!(rf["json_schema"]["schema"]["type"], "object");
+        assert_eq!(rf["json_schema"]["strict"], true);
+    }
+
+    #[test]
+    fn response_format_json_object_passes_through() {
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "text": {"format": {"type": "json_object"}}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(v["response_format"]["type"], "json_object");
     }
 }
