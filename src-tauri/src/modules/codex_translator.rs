@@ -6,6 +6,121 @@ use tracing::{info, warn, error};
 // upstream providers only support Chat Completions (/v1/chat/completions).
 // These functions translate between the two formats transparently.
 
+/// Sanitize tool call `arguments` so upstream providers never reject them.
+///
+/// OpenAI-compatible upstreams require `function.arguments` to be a valid JSON
+/// string (the tool-call arguments object). Some platforms/models emit:
+///   - empty strings / whitespace-only
+///   - truncated JSON (missing closing braces)
+///   - prose wrapped around JSON (e.g. "The file is: {"path": "/tmp/x"}")
+///   - markdown code fences around JSON
+///
+/// Any of these cause upstream HTTP 400 "Assistant tool call arguments must be
+/// valid JSON", which aborts the whole conversation. This function repairs
+/// what it can and falls back to `{}` (empty arguments object) as a safe
+/// default so the request still goes through.
+fn sanitize_tool_arguments(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "{}".to_string();
+    }
+
+    // Already valid JSON → use as-is (the common case).
+    if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return trimmed.to_string();
+    }
+
+    // JSON embedded in prose or wrapped in markdown code fences:
+    // extract the first balanced {...} object.
+    if let Some(extracted) = extract_json_object(trimmed) {
+        if serde_json::from_str::<serde_json::Value>(&extracted).is_ok() {
+            return extracted;
+        }
+    }
+
+    // Truncated JSON: attempt brace repair (append missing closing braces).
+    if let Some(repaired) = repair_truncated_json(trimmed) {
+        return repaired;
+    }
+
+    warn!(
+        "sanitize_tool_arguments: unrepairable arguments, falling back to {{}} (preview={:.120})",
+        raw
+    );
+    "{}".to_string()
+}
+
+/// Extract the first balanced `{...}` JSON object from a string that may
+/// contain prose or markdown code fences around it.
+fn extract_json_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, ch) in text[start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[start..start + i + ch.len_utf8()].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Attempt to repair truncated JSON by appending the missing closing braces.
+/// E.g. `{"file": "/tmp/x"` → `{"file": "/tmp/x"}`.
+fn repair_truncated_json(text: &str) -> Option<String> {
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    if depth <= 0 {
+        return None;
+    }
+    let mut candidate = text.to_string();
+    for _ in 0..depth {
+        candidate.push('}');
+    }
+    if serde_json::from_str::<serde_json::Value>(&candidate).is_ok() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 /// Translate a Responses API request body to Chat Completions API format.
 ///
 /// Responses API format:  {"model":"...","input":"...","max_output_tokens":...}
@@ -18,7 +133,12 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
     let fn_call_to_tool_call = |fc: &serde_json::Value| -> serde_json::Value {
         let id = fc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
         let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-        let arguments = fc.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}").to_string();
+        // Sanitize arguments so the upstream never rejects the request with
+        // 400 "arguments must be valid JSON". Codex echoes back the arguments
+        // we emitted, so an unvalidated value would break the NEXT request too.
+        let arguments = sanitize_tool_arguments(
+            fc.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}")
+        );
         serde_json::json!({
             "id": id,
             "type": "function",
@@ -356,6 +476,34 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
         }
     }
 
+    // ── Post-processing: sanitize ALL tool_call arguments ──
+    // OpenAI-compatible upstreams reject assistant tool_calls whose
+    // `function.arguments` is not valid JSON (HTTP 400 "Assistant tool call
+    // arguments must be valid JSON"). Run a unified pass over every message
+    // so every input path is covered — including the `from_messages`
+    // passthrough and role-bearing messages with embedded tool_calls, in
+    // addition to the function_call items converted above.
+    if let Some(messages) = obj.get_mut("messages") {
+        if let Some(arr) = messages.as_array_mut() {
+            for msg in arr.iter_mut() {
+                if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+                    for tc in tool_calls.iter_mut() {
+                        if let Some(fn_obj) = tc.get_mut("function").and_then(|f| f.as_object_mut()) {
+                            if let Some(serde_json::Value::String(s)) = fn_obj.get_mut("arguments") {
+                                *s = sanitize_tool_arguments(s);
+                            } else {
+                                // Missing or non-string arguments → replace with
+                                // an empty arguments object so strict upstreams
+                                // don't reject the whole request.
+                                fn_obj.insert("arguments".to_string(), serde_json::json!("{}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Remove Responses API-specific fields that don't exist in Chat Completions.
     // Strict third-party upstreams reject unknown fields with HTTP 400, so drop
     // every Responses-only param instead of passing it through.
@@ -446,10 +594,16 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
                                 .and_then(|f| f.get("name"))
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("");
-                            let arguments = tc.get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|a| a.as_str())
-                                .unwrap_or("{}");
+                            // Sanitize arguments: some providers emit empty,
+                            // truncated or prose-wrapped arguments. Codex stores
+                            // this value and echoes it back in the next request,
+                            // so it must be valid JSON or the upstream 400s.
+                            let arguments = sanitize_tool_arguments(
+                                tc.get("function")
+                                    .and_then(|f| f.get("arguments"))
+                                    .and_then(|a| a.as_str())
+                                    .unwrap_or("{}")
+                            );
                             output.push(serde_json::json!({
                                 "type": "function_call",
                                 "id": id,
@@ -1180,7 +1334,13 @@ impl StreamState {
                     tc_idx_counter
                 };
                 let tc_name = self.tool_call_names.get(tc_idx).cloned().unwrap_or_default();
-                let tc_args = self.tool_call_args.get(tc_idx).cloned().unwrap_or_default();
+                // Sanitize the accumulated arguments before emitting them: the
+                // upstream model may stream empty/truncated/prose-wrapped JSON
+                // fragments. Codex stores this value and echoes it back in the
+                // next request, so it must be valid JSON or the upstream 400s.
+                let tc_args = sanitize_tool_arguments(
+                    &self.tool_call_args.get(tc_idx).cloned().unwrap_or_default()
+                );
                 sse_send(tx, &serde_json::json!({
                     "type": "response.function_call_arguments.done",
                     "item_id": tc_id, "output_index": tc_output_idx, "arguments": tc_args
@@ -1235,7 +1395,11 @@ impl StreamState {
         for tc_idx in &tc_indices {
             if let Some(tc_id) = self.tool_call_ids.get(tc_idx) {
                 let tc_name = self.tool_call_names.get(tc_idx).cloned().unwrap_or_default();
-                let tc_args = self.tool_call_args.get(tc_idx).cloned().unwrap_or_default();
+                // Sanitize before including in the final response payload —
+                // must be valid JSON for Codex to echo back on the next turn.
+                let tc_args = sanitize_tool_arguments(
+                    &self.tool_call_args.get(tc_idx).cloned().unwrap_or_default()
+                );
                 output.push(serde_json::json!({
                     "id": tc_id, "type": "function_call",
                     "call_id": tc_id, "name": tc_name, "arguments": tc_args
@@ -1373,5 +1537,69 @@ async fn sse_send(
     );
     if let Err(e) = tx.send(Ok(axum::body::Bytes::from(sse))).await {
         warn!("sse_send: send failed: {:?}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_passes_through_valid_json() {
+        assert_eq!(sanitize_tool_arguments("{\"path\": \"/tmp/x\"}"), "{\"path\": \"/tmp/x\"}");
+        assert_eq!(sanitize_tool_arguments("  {\"a\": 1}  "), "{\"a\": 1}");
+    }
+
+    #[test]
+    fn sanitize_handles_empty_and_whitespace() {
+        assert_eq!(sanitize_tool_arguments(""), "{}");
+        assert_eq!(sanitize_tool_arguments("   "), "{}");
+        assert_eq!(sanitize_tool_arguments("\n\t"), "{}");
+    }
+
+    #[test]
+    fn sanitize_extracts_json_from_prose() {
+        assert_eq!(
+            sanitize_tool_arguments("The file is at {\"path\": \"/tmp/x\"} please check"),
+            "{\"path\": \"/tmp/x\"}"
+        );
+    }
+
+    #[test]
+    fn sanitize_extracts_json_from_code_fence() {
+        assert_eq!(
+            sanitize_tool_arguments("```json\n{\"path\": \"/tmp/x\"}\n```"),
+            "{\"path\": \"/tmp/x\"}"
+        );
+    }
+
+    #[test]
+    fn sanitize_repairs_truncated_json() {
+        assert_eq!(
+            sanitize_tool_arguments("{\"path\": \"/tmp/x\""),
+            "{\"path\": \"/tmp/x\"}"
+        );
+    }
+
+    #[test]
+    fn sanitize_falls_back_to_empty_object() {
+        // Unrepairable garbage → empty object so the upstream accepts it
+        assert_eq!(sanitize_tool_arguments("not json at all"), "{}");
+        assert_eq!(sanitize_tool_arguments("hello world"), "{}");
+    }
+
+    #[test]
+    fn extract_json_object_handles_braces_in_strings() {
+        // The closing brace inside the string must NOT end the object
+        let s = "{\"a\": \"}\", \"b\": 2}";
+        assert_eq!(extract_json_object(s).as_deref(), Some(s));
+    }
+
+    #[test]
+    fn repair_truncated_json_handles_nested_braces() {
+        assert_eq!(
+            repair_truncated_json("{\"a\": {\"b\": 1").as_deref(),
+            Some("{\"a\": {\"b\": 1}}")
+        );
     }
 }
