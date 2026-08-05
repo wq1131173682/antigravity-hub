@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "antigravity_tools"
-version = "5.2.12"
+version = "5.2.13"
 dependencies = [
  "anyhow",
  "axum",
