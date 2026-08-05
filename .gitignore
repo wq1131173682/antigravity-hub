@@ -47,8 +47,8 @@ pnpm-lock.yaml
 .omo
 .qwen
 
-# Non-core: removed from git tracking
-# Auxiliary files that are not part of the desktop app core code or build pipeline.
+# Non-core: auxiliary files that are not part of the desktop app core code or build pipeline.
+# NOTE: .github/ and README_EN.md are intentionally tracked for the open-source repo.
 Casks/
 deploy/
 web_site/
@@ -56,14 +56,12 @@ docker/
 docs/
 workflows/
 scripts/
-.github/
 .dockerignore
 test.rs
 install.ps1
 install.sh
 knowledge.md
 QWEN.md
-README_EN.md
 SETUP_NOTES.md
 DOCKER_DEPLOYMENT.md
 
