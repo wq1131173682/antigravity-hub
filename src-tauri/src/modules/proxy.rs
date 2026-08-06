@@ -860,6 +860,19 @@ async fn proxy_handler(
     // the user applied in the app so upstream always sees a valid model.
     let (model_name, body_bytes) =
         apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref(), is_responses_api);
+
+    // ── Reasoning effort normalization ──
+    // Mistral codestral models only accept `reasoning_effort` ∈ {none, high};
+    // Codex sends low/medium, which the upstream rejects with HTTP 400 and
+    // aborts the conversation. Normalize while preserving the user's effort
+    // ordering: low → none (fast/cheap), medium → high (other models pass
+    // through untouched).
+    let body_bytes = match model_name.as_deref() {
+        Some(m) => crate::modules::codex_translator::normalize_reasoning_effort_for_model(&body_bytes, m)
+            .unwrap_or(body_bytes),
+        None => body_bytes,
+    };
+
     let body_bytes: axum::body::Bytes = body_bytes.into();
 
     // Try forwarding the request with key rotation

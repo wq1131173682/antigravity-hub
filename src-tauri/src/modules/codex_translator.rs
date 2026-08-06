@@ -450,7 +450,7 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                         let has_function_nesting = tool_obj.contains_key("function");
 
                         if has_top_level_name && !has_function_nesting {
-                            // Move name, description, parameters into a nested "function" object
+                            // Move name, description, parameters, strict into a nested "function" object
                             let mut fn_obj = serde_json::Map::new();
                             if let Some(name) = tool_obj.remove("name") {
                                 fn_obj.insert("name".to_string(), name);
@@ -461,9 +461,57 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                             if let Some(params) = tool_obj.remove("parameters") {
                                 fn_obj.insert("parameters".to_string(), params);
                             }
+                            // `strict` belongs INSIDE the function object in
+                            // OpenAI-compatible Chat Completions format. Left at
+                            // the tool level it makes strict upstreams (Mistral's
+                            // Pydantic union of WebSearchTool/CodeInterpreterTool/
+                            // Tool) reject the request with HTTP 422
+                            // extra_forbidden.
+                            if let Some(strict) = tool_obj.remove("strict") {
+                                fn_obj.insert("strict".to_string(), strict);
+                            }
                             if !fn_obj.is_empty() {
                                 tool_obj.insert("function".to_string(), serde_json::Value::Object(fn_obj));
                             }
+                        } else if has_function_nesting {
+                            // Already nested (Chat Completions style) — sweep
+                            // any stray top-level function fields into the nested
+                            // object (covers `strict`, and the rare mixed format
+                            // that carries name/description/parameters at BOTH
+                            // levels) so they don't 422 upstream.
+                            let stray_strict = tool_obj.remove("strict");
+                            let stray_name = tool_obj.remove("name");
+                            let stray_desc = tool_obj.remove("description");
+                            let stray_params = tool_obj.remove("parameters");
+                            if let Some(fn_obj) = tool_obj.get_mut("function").and_then(|f| f.as_object_mut()) {
+                                if let Some(strict) = stray_strict {
+                                    fn_obj.insert("strict".to_string(), strict);
+                                }
+                                if let Some(name) = stray_name {
+                                    fn_obj.insert("name".to_string(), name);
+                                }
+                                if let Some(desc) = stray_desc {
+                                    fn_obj.insert("description".to_string(), desc);
+                                }
+                                if let Some(params) = stray_params {
+                                    fn_obj.insert("parameters".to_string(), params);
+                                }
+                            }
+                        }
+                        // Whitelist the tool-level keys. The Responses API
+                        // function tool schema also accepts `metadata` (and Codex
+                        // may send other per-tool fields in future versions);
+                        // strict upstreams reject ANY unknown tool-level key with
+                        // 422 extra_forbidden, so drop everything except `type`
+                        // and `function` rather than whack-a-mole each field.
+                        let stray_keys: Vec<String> = tool_obj
+                            .keys()
+                            .filter(|k| k.as_str() != "type" && k.as_str() != "function")
+                            .cloned()
+                            .collect();
+                        for key in stray_keys {
+                            info!("Removing Responses API-only tool field '{}'", key);
+                            tool_obj.remove(&key);
                         }
                     }
                     converted.push(tool);
@@ -574,6 +622,19 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                 if let Some(name) = tc.remove("name") {
                     tc.insert("function".to_string(), serde_json::json!({ "name": name }));
                 }
+            }
+            // Whitelist tool_choice object keys the same way as tools: strict
+            // upstreams (Mistral) reject unknown keys (e.g. `strict`) in the
+            // ToolChoice union member with HTTP 422 extra_forbidden. Only
+            // `type` and `function` are valid Chat Completions keys.
+            let stray_keys: Vec<String> = tc
+                .keys()
+                .filter(|k| k.as_str() != "type" && k.as_str() != "function")
+                .cloned()
+                .collect();
+            for key in stray_keys {
+                info!("Removing Responses API-only tool_choice field '{}'", key);
+                tc.remove(&key);
             }
         }
     }
@@ -724,6 +785,60 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
     }
 
     Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
+}
+
+/// Normalize `reasoning_effort` to a value the upstream model accepts.
+///
+/// Codex CLI sends Responses API `reasoning.effort` (low/medium/high), which
+/// the request translation above maps to Chat Completions `reasoning_effort`.
+/// Most OpenAI-compatible providers accept all three values, but Mistral's
+/// codestral models only accept `none` and `high`, rejecting `low`/`medium`
+/// with HTTP 400 ("reasoning_effort='low' is not supported for this model. Must
+/// be one of (none, high)"), which aborts the conversation mid-turn.
+///
+/// Map to the closest supported value for codestral models while preserving
+/// the user's effort ordering — a user who configured `model_reasoning_effort
+/// = "low"` wants fast/cheap turns, so `low` must NOT be raised to `high`
+/// (that would force full extended thinking on every turn):
+///   low → none, medium → high, high → high, none → none.
+/// Any other unrecognized value is clamped to `high` (extended thinking on)
+/// so a future value (e.g. "maximum") can't re-trigger the same HTTP 400
+/// whack-a-mole. Other models (and bodies without `reasoning_effort`) are
+/// left unchanged and None is returned.
+pub fn normalize_reasoning_effort_for_model(body_bytes: &[u8], model_name: &str) -> Option<Vec<u8>> {
+    // Only Mistral codestral models restrict reasoning_effort to none/high.
+    if !model_name.to_lowercase().contains("codestral") {
+        return None;
+    }
+    let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
+    let obj = json.as_object_mut()?;
+    let effort = match obj.get("reasoning_effort").and_then(|v| v.as_str()) {
+        Some(e) => e.to_string(),
+        None => return None,
+    };
+    let normalized = match effort.as_str() {
+        "none" => "none",
+        "high" => "high",
+        // Preserve the user's effort ordering: "low" → none (fast/cheap, no
+        // extended thinking) — raising it to "high" would force full extended
+        // thinking every turn, slower and more expensive than the user asked
+        // for. "medium" and any future unknown value → high (extended
+        // thinking on), the safest default for a coding model.
+        "low" => "none",
+        _ => "high",
+    };
+    if normalized == effort {
+        return None;
+    }
+    obj.insert(
+        "reasoning_effort".to_string(),
+        serde_json::Value::String(normalized.to_string()),
+    );
+    info!(
+        "normalize_reasoning_effort: model '{}': reasoning_effort '{}' → '{}' (codestral supports none/high only)",
+        model_name, effort, normalized
+    );
+    Some(serde_json::to_vec(&json).ok()?)
 }
 
 /// Translate a Chat Completions API response body to Responses API format.
@@ -2075,6 +2190,190 @@ mod tests {
         assert!(
             v.get("tool_choice").is_none(),
             "tool_choice must be dropped when no tools remain"
+        );
+    }
+
+    #[test]
+    fn function_tool_strict_moved_into_function_object() {
+        // Codex CLI sends Responses API tools with a top-level `strict` field:
+        //   {"type": "function", "name": "...", "description": "...", "parameters": {...}, "strict": false}
+        // The Chat Completions translation must move `strict` INSIDE the nested
+        // `function` object (alongside name/description/parameters). Left at the
+        // tool level, strict upstreams (Mistral's Pydantic union of
+        // WebSearchTool/CodeInterpreterTool/Tool) reject it with HTTP 422
+        // extra_forbidden.
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "description": "Runs a command",
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                    "strict": false
+                }
+            ]
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let tools = v.get("tools").and_then(|t| t.as_array()).expect("tools must remain");
+        let tool = &tools[0];
+        assert_eq!(tool["type"], "function");
+        assert!(
+            tool.get("strict").is_none(),
+            "top-level strict must be removed from the tool object"
+        );
+        let fn_obj = tool.get("function").expect("function must be nested");
+        assert_eq!(fn_obj["name"], "shell_command");
+        assert_eq!(fn_obj["description"], "Runs a command");
+        assert_eq!(fn_obj["strict"], false, "strict must live inside function");
+        assert_eq!(fn_obj["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn already_nested_tool_strict_swept_into_function() {
+        // A tool that already uses Chat Completions nesting but still carries a
+        // stray top-level `strict` must have it swept into `function`.
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "strict": true,
+                    "function": {"name": "get_weather", "parameters": {"type": "object"}}
+                }
+            ]
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let tools = v.get("tools").and_then(|t| t.as_array()).expect("tools must remain");
+        let tool = &tools[0];
+        assert!(tool.get("strict").is_none(), "top-level strict must be swept");
+        assert_eq!(tool["function"]["strict"], true);
+    }
+
+    #[test]
+    fn tool_metadata_and_choice_strict_whitelisted() {
+        // The Responses API function tool schema also accepts `metadata`;
+        // strict upstreams (Mistral) reject ANY unknown tool-level key with
+        // 422 extra_forbidden, so metadata must be dropped. tool_choice must
+        // likewise have unknown keys (e.g. strict) stripped.
+        let body = br#"{
+            "model": "gpt-5",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "shell_command",
+                    "description": "Runs a command",
+                    "parameters": {"type": "object"},
+                    "strict": false,
+                    "metadata": {"some": "value"}
+                }
+            ],
+            "tool_choice": {"type": "function", "name": "shell_command", "strict": true}
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let tools = v.get("tools").and_then(|t| t.as_array()).expect("tools must remain");
+        let tool = &tools[0];
+        // Order-agnostic whitelist assertions (serde_json Map key order is
+        // not guaranteed across the preserve_order feature).
+        assert!(tool.get("metadata").is_none(), "tool metadata must be stripped");
+        assert!(tool.get("strict").is_none(), "top-level tool strict must be stripped");
+        assert!(tool.get("name").is_none(), "top-level tool name must be moved into function");
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["strict"], false);
+        let tc = v.get("tool_choice").expect("tool_choice must remain");
+        assert!(tc.get("strict").is_none(), "tool_choice strict must be stripped");
+        assert_eq!(tc["function"]["name"], "shell_command");
+    }
+
+    #[test]
+    fn reasoning_effort_normalized_for_codestral() {
+        // Regression test for Mistral HTTP 400: codestral-latest only accepts
+        // `reasoning_effort` ∈ {none, high}; Codex sends low/medium, which the
+        // upstream rejects ("reasoning_effort='low' is not supported for this
+        // model"), aborting the conversation. The mapping preserves effort
+        // ordering: low → none (cheap/fast), medium → high.
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": "hi",
+            "reasoning": {"effort": "low"}
+        }"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let out = normalize_reasoning_effort_for_model(&translated, "codestral-latest").expect("normalize should apply");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(
+            v["reasoning_effort"], "none",
+            "low must map to none (fast/cheap), not raise to high"
+        );
+
+        // medium → high
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": "hi",
+            "reasoning": {"effort": "medium"}
+        }"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let out = normalize_reasoning_effort_for_model(&translated, "codestral-latest").expect("normalize should apply");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(v["reasoning_effort"], "high", "medium must map to codestral default high");
+
+        // high / none are already valid → no change (None returned)
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": "hi",
+            "reasoning": {"effort": "high"}
+        }"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        assert!(
+            normalize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
+            "high must pass through unchanged"
+        );
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": "hi",
+            "reasoning": {"effort": "none"}
+        }"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        assert!(
+            normalize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
+            "none must pass through unchanged"
+        );
+
+        // Unknown future values (e.g. "maximum") are clamped to codestral's
+        // default high so they can't re-trigger the same 400.
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": "hi",
+            "reasoning": {"effort": "maximum"}
+        }"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let out = normalize_reasoning_effort_for_model(&translated, "codestral-latest").expect("normalize should apply");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(v["reasoning_effort"], "high", "unknown effort must clamp to high");
+
+        // Non-codestral models are never touched
+        let body = br#"{
+            "model": "mistral-small-latest",
+            "input": "hi",
+            "reasoning": {"effort": "low"}
+        }"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        assert!(
+            normalize_reasoning_effort_for_model(&translated, "mistral-small-latest").is_none(),
+            "non-codestral models must pass through unchanged"
+        );
+
+        // No reasoning_effort in body → no change
+        let body = br#"{"model": "codestral-latest", "input": "hi"}"#;
+        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        assert!(
+            normalize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
+            "body without reasoning_effort must be unchanged"
         );
     }
 
