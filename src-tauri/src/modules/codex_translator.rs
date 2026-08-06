@@ -179,6 +179,22 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                     // output_text → text (in input context, e.g. assistant messages)
                     obj["type"] = serde_json::Value::String("text".to_string());
                 }
+                Some("output_image") => {
+                    // output_image → image_url (Chat Completions part type)
+                    obj["type"] = serde_json::Value::String("image_url".to_string());
+                    if let Some(image_url) = obj.get("image_url") {
+                        if image_url.is_string() {
+                            let url = image_url.as_str().unwrap_or("").to_string();
+                            obj["image_url"] = serde_json::json!({"url": url});
+                        }
+                    }
+                }
+                Some("output_file") | Some("output_audio") => {
+                    // Strip "output_" prefix: output_file → file, output_audio → audio
+                    if let Some(rest) = part_type.as_deref().and_then(|t| t.strip_prefix("output_")) {
+                        obj["type"] = serde_json::Value::String(rest.to_string());
+                    }
+                }
                 _ => {}
             }
         }
@@ -198,6 +214,96 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                 }
             }
         }
+    };
+
+    // Helper: sanitize a history message from Responses API format to Chat
+    // Completions format before forwarding upstream.
+    //
+    // Responses API history messages carry fields that strict Chat Completions
+    // upstreams (e.g. Mistral's Pydantic schema) reject with HTTP 422
+    // extra_forbidden:
+    //   - `id` (msg_...), `status` ("completed"), `metadata` (client telemetry)
+    //   - assistant replies under `output` instead of `content`
+    // Strip / fold these so the upstream accepts the request.
+    let sanitize_message_for_chat = |msg: &mut serde_json::Value| {
+        if let Some(obj) = msg.as_object_mut() {
+            // Assistant messages in Responses API history carry their reply
+            // under `output` (array of output_text / function_call / reasoning
+            // items) instead of `content`. Fold it into Chat Completions fields.
+            // Only fold when the message has no `content` yet — if Codex sends
+            // both, keep the original content (never overwrite it).
+            if let Some(output) = obj.remove("output") {
+                if !obj.contains_key("content") {
+                    if let Some(items) = output.as_array() {
+                        let mut content_parts: Vec<serde_json::Value> = Vec::new();
+                        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+                        for item in items {
+                            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match item_type {
+                                "function_call" => tool_calls.push(fn_call_to_tool_call(item)),
+                                "message" => {
+                                    // Nested assistant message item → take its
+                                    // content parts (flatten, don't nest arrays).
+                                    if let Some(content) = item.get("content") {
+                                        if let Some(arr) = content.as_array() {
+                                            content_parts.extend(arr.iter().cloned());
+                                        } else {
+                                            content_parts.push(content.clone());
+                                        }
+                                    }
+                                }
+                                "reasoning" | "function_call_output" | "computer_call"
+                                | "file_search_call" | "web_search_call"
+                                | "refusal" | "output_refusal" => {
+                                    // Non-text output items are Responses API-only;
+                                    // dropping them (rather than pushing them as
+                                    // content parts) prevents strict upstreams from
+                                    // rejecting unknown content part types.
+                                }
+                                _ => content_parts.push(item.clone()), // output_text & others
+                            }
+                        }
+                        // Always produce an array for multi-part content, and wrap a
+                        // single non-string part in an array so convert_message_content
+                        // below can convert part types (output_text → text). A single
+                        // plain string stays a string.
+                        if content_parts.len() == 1 {
+                            if content_parts[0].is_string() {
+                                obj.insert("content".to_string(), content_parts.remove(0));
+                            } else {
+                                obj.insert("content".to_string(), serde_json::Value::Array(content_parts));
+                            }
+                        } else if !content_parts.is_empty() {
+                            obj.insert("content".to_string(), serde_json::Value::Array(content_parts));
+                        }
+                        if !tool_calls.is_empty() {
+                            obj.insert("tool_calls".to_string(), serde_json::Value::Array(tool_calls));
+                        }
+                        // An assistant message whose output contained only tool calls
+                        // (or only dropped reasoning items) must still carry an
+                        // explicit `content: null` — matching flush_fn_calls below —
+                        // so strict upstreams don't reject a content-less message.
+                        if !obj.contains_key("content") {
+                            obj.insert("content".to_string(), serde_json::Value::Null);
+                        }
+                    } else if output.is_string() {
+                        obj.insert("content".to_string(), output);
+                    }
+                }
+            }
+            // Responses API-only fields that strict upstreams reject.
+            obj.remove("id");
+            obj.remove("status");
+            obj.remove("metadata");
+            obj.remove("type");
+            obj.remove("input");
+            obj.remove("from_messages");
+            obj.remove("call_id");
+            obj.remove("reasoning");
+            obj.remove("annotations");
+            obj.remove("sender");
+        }
+        convert_message_content(msg);
     };
 
     // Helper: flush pending function_calls into an assistant message with tool_calls
@@ -249,16 +355,8 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                             } else if has_role {
                                 // ── Regular message with role (user/assistant/system) ──
                                 flush_fn_calls(&mut pending_function_calls, &mut messages);
-                                // Convert Responses API content types (input_text, input_image)
-                                // to Chat Completions types (text, image_url) for upstream compatibility
                                 let mut msg = serde_json::Value::Object(m);
-                                // Remove Responses API-specific fields that are not valid in Chat Completions
-                                if let Some(obj) = msg.as_object_mut() {
-                                    obj.remove("type");
-                                    obj.remove("input");
-                                    obj.remove("from_messages");
-                                }
-                                convert_message_content(&mut msg);
+                                sanitize_message_for_chat(&mut msg);
                                 messages.push(msg);
                             } else if let Some(content) = m.get("content") {
                                 // ── Object with content but no role → assume user message ──
@@ -299,13 +397,7 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
             let mut messages: Vec<serde_json::Value> = Vec::new();
             let mut arr_clone = arr.clone();
             for mut msg in arr_clone.drain(..) {
-                // Remove Responses API-specific fields
-                if let Some(obj) = msg.as_object_mut() {
-                    obj.remove("type");
-                    obj.remove("input");
-                    obj.remove("from_messages");
-                }
-                convert_message_content(&mut msg);
+                sanitize_message_for_chat(&mut msg);
                 messages.push(msg);
             }
             obj.insert("messages".to_string(), serde_json::Value::Array(messages));
@@ -606,12 +698,20 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
     }
 
     // Remove Responses API-specific fields that don't exist in Chat Completions.
-    // Strict third-party upstreams reject unknown fields with HTTP 400, so drop
-    // every Responses-only param instead of passing it through.
+    // Strict third-party upstreams reject unknown fields with HTTP 400/422, so
+    // drop every Responses-only param instead of passing it through.
     obj.remove("previous_response_id");
     obj.remove("store");
     obj.remove("include");
     obj.remove("truncation");
+    // Codex sends cache/telemetry metadata on every request; strict upstreams
+    // (e.g. Mistral's Pydantic schema) reject unknown top-level fields with
+    // HTTP 422 extra_forbidden, so strip them like the other Responses-only
+    // params.
+    obj.remove("prompt_cache_key");
+    obj.remove("client_metadata");
+    obj.remove("x-codex-turn-metadata");
+    obj.remove("turn_id");
 
     // Log the transformed request body for debugging
     if let Ok(log_body) = serde_json::to_string_pretty(&json) {
@@ -785,16 +885,20 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
 /// Maximum time (seconds) to wait for the first valid SSE chunk before
 /// forcing stream completion. Prevents hung streams when a non-standard
 /// upstream sends chunks that don't match the expected OpenAI SSE format.
-/// Must be generous enough to cover slow first tokens from reasoning models.
-const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 30;
+/// Must be generous enough to cover slow first tokens from reasoning models
+/// and relays that buffer the whole response before streaming it (Agnes
+/// buffers; a long reasoning + web_search turn can exceed 30s before the
+/// first chunk). 120s still catches genuinely dead streams, while the reqwest
+/// client's 3600s total timeout remains the last-resort backstop.
+const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 120;
 
 /// Maximum idle time (seconds) allowed between consecutive SSE chunks.
 /// Reasoning models (DeepSeek, Agnes, etc.) can pause for a long time between
 /// chunks while "thinking" (or when the relay buffers output), so this must be
 /// generous — an aggressive idle timeout truncates the stream mid-conversation
-/// and makes Codex end the turn with no output. The reqwest client's 300s
-/// total timeout still caps the overall stream length.
-const STREAM_CHUNK_IDLE_TIMEOUT_SECS: u64 = 120;
+/// and makes Codex end the turn with no output. The reqwest client's 3600s
+/// total timeout still caps the overall stream length as a backstop.
+const STREAM_CHUNK_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Translate a Chat Completions streaming SSE response to Responses API SSE format.
 ///
@@ -823,6 +927,11 @@ pub fn transform_stream_to_responses(
 
     tokio::spawn(async move {
         info!("transform_stream_to_responses: stream processing started");
+        // Wall-clock timer for termination diagnostics: every exit path below
+        // logs how long the stream ran and why it ended, so a "conversation got
+        // interrupted" report can be traced to a specific cause (upstream error,
+        // idle timeout, empty stream, client disconnect, natural end).
+        let started = std::time::Instant::now();
 
         let now = chrono::Utc::now().timestamp();
         let mut st = StreamState {
@@ -878,7 +987,7 @@ pub fn transform_stream_to_responses(
             let chunk = match chunk_result {
                 Ok(Some(Ok(c))) => c,
                 Ok(Some(Err(e))) => {
-                    warn!("transform_stream_to_responses: upstream stream error: {}", e);
+                    warn!("transform_stream_to_responses: upstream stream error: {} (after {:?})", e, started.elapsed());
                     // Emit error as a Responses API error event if we haven't completed
                     if !st.is_completed {
                         st.send_error_response(&tx, &format!("Upstream stream error: {}", e)).await;
@@ -889,7 +998,7 @@ pub fn transform_stream_to_responses(
                 Ok(None) => {
                     // Stream ended naturally
                     if st.has_sent_created && !st.is_completed {
-                        info!("transform_stream: upstream stream ended naturally, flushing remaining events");
+                        info!("transform_stream: upstream stream ended naturally (after {:?}), flushing remaining events", started.elapsed());
                         st.flush_done_events(&tx).await;
                         st.send_completed(&tx).await;
                     } else if !st.is_completed {
@@ -899,7 +1008,7 @@ pub fn transform_stream_to_responses(
                         // format we couldn't parse. Surface this as a FAILED
                         // response instead of a silent empty "completed" event
                         // (which previously made Codex end the turn with no output).
-                        warn!("transform_stream: upstream stream ended without any valid data");
+                        warn!("transform_stream: upstream stream ended without any valid data (after {:?})", started.elapsed());
                         st.send_error_response(&tx, "Upstream returned an empty or unparseable streaming response. Check the upstream provider / relay for errors.").await;
                     }
                     break;
@@ -913,13 +1022,13 @@ pub fn transform_stream_to_responses(
                         break;
                     }
                     if !st.has_sent_created {
-                        warn!("transform_stream: timeout waiting for first valid chunk ({}s). Upstream may be using non-standard SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS);
+                        warn!("transform_stream: timeout waiting for first valid chunk ({}s, stream ran {:?}). Upstream may be using non-standard SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS, started.elapsed());
                         // Send a minimal error response so Codex CLI doesn't hang
                         st.send_error_response(&tx, &format!(
                             "Upstream did not return a valid streaming response within {} seconds. The provider may use an unsupported SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS
                         )).await;
                     } else {
-                        warn!("transform_stream: timeout waiting for next chunk ({}s), forcing completion", STREAM_CHUNK_IDLE_TIMEOUT_SECS);
+                        warn!("transform_stream: timeout waiting for next chunk ({}s, stream ran {:?}), forcing completion", STREAM_CHUNK_IDLE_TIMEOUT_SECS, started.elapsed());
                         st.flush_done_events(&tx).await;
                         st.send_completed(&tx).await;
                     }
@@ -1305,13 +1414,13 @@ pub fn transform_stream_to_responses(
         // ── Final safety net: ensure stream completion ──
         if !st.is_completed {
             if st.has_sent_created {
-                info!("transform_stream: final safety net — forcing stream completion");
+                info!("transform_stream: final safety net — forcing stream completion (after {:?})", started.elapsed());
                 st.flush_done_events(&tx).await;
                 st.send_completed(&tx).await;
             } else {
                 // Stream ended without ever sending "response.created".
                 // This means no valid chunks were recognized at all.
-                error!("transform_stream: stream ended without any valid SSE data (provider may use incompatible format)");
+                error!("transform_stream: stream ended without any valid SSE data after {:?} (provider may use incompatible format)", started.elapsed());
                 st.send_error_response(&tx, "Upstream returned no valid streaming data. The provider may use an incompatible SSE format.").await;
             }
         }
@@ -1752,6 +1861,74 @@ async fn sse_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_history_messages_strips_responses_api_fields() {
+        // Regression test for Mistral HTTP 422 extra_forbidden: Codex history
+        // messages carry `id`/`status`/`metadata`, and assistant messages carry
+        // their reply under `output` instead of `content`. All of these must be
+        // stripped / folded before forwarding to strict chat-completions
+        // upstreams (Mistral rejects them with 422 extra_forbidden).
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": [
+                {"type": "message", "role": "system", "id": "msg_sys_1", "status": "completed",
+                 "content": [{"type": "input_text", "text": "You are helpful."}]},
+                {"type": "message", "role": "user", "id": "msg_user_1", "status": "completed",
+                 "content": [{"type": "input_text", "text": "hi"}],
+                 "metadata": {"thread_id": "t1"}},
+                {"type": "message", "role": "assistant", "id": "msg_asst_1", "status": "completed",
+                 "output": [
+                    {"type": "output_text", "text": "Let me look."},
+                    {"type": "function_call", "id": "call_1", "name": "shell",
+                     "arguments": "{\"command\": \"ls\"}"}
+                 ]}
+            ],
+            "max_output_tokens": 16
+        }"#;
+
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let json: serde_json::Value = serde_json::from_slice(&out).expect("output should be valid JSON");
+
+        let messages = json.get("messages").and_then(|m| m.as_array()).expect("messages array");
+        assert_eq!(messages.len(), 3);
+
+        // Helper: extract text from a content array of converted parts
+        let content_text = |msg: &serde_json::Value| -> String {
+            msg.get("content")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|p| p.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")  .to_string()
+        };
+
+        // System message: id/status stripped, content preserved (input_text→text)
+        let sys = &messages[0];
+        assert!(sys.get("id").is_none(), "system message must not carry id");
+        assert!(sys.get("status").is_none(), "system message must not carry status");
+        assert_eq!(content_text(sys), "You are helpful.");
+        assert_eq!(sys["content"][0]["type"], "text");
+
+        // User message: id/status/metadata stripped, content preserved
+        let user = &messages[1];
+        assert!(user.get("id").is_none());
+        assert!(user.get("status").is_none());
+        assert!(user.get("metadata").is_none(), "user message must not carry metadata");
+        assert_eq!(content_text(user), "hi");
+
+        // Assistant message: output folded into content + tool_calls, no id/status/output
+        let asst = &messages[2];
+        assert!(asst.get("id").is_none());
+        assert!(asst.get("status").is_none());
+        assert!(asst.get("output").is_none(), "assistant message must not carry output");
+        assert_eq!(content_text(asst), "Let me look.");
+        assert_eq!(asst["content"][0]["type"], "text", "output_text part must be converted to text");
+        let tool_calls = asst.get("tool_calls").and_then(|t| t.as_array()).expect("tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["function"]["name"], "shell");
+        assert_eq!(tool_calls[0]["function"]["arguments"], "{\"command\": \"ls\"}");
+    }
 
     #[test]
     fn sanitize_passes_through_valid_json() {
