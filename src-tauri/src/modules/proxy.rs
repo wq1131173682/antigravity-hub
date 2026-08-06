@@ -25,7 +25,17 @@ fn error_response(status: u16, body: String) -> axum::response::Response {
         })
 }
 
-/// Shared HTTP client with 300s timeout for LLM API calls.
+/// Shared HTTP client for LLM API calls.
+///
+/// The total timeout is a generous 1 hour (3600s). It MUST NOT be a short
+/// wall-clock cap like 300s: reqwest's `.timeout()` bounds the ENTIRE request
+/// including streaming body reads, and relays such as Agnes buffer the full
+/// response before streaming it out. A single generation (long reasoning +
+/// web_search + tool calls) can legitimately exceed 5 minutes — a 300s cap
+/// aborts the stream mid-response, which surfaced as "conversation got
+/// interrupted after a few minutes". Genuinely dead streams are still caught
+/// by the idle timeouts in `transform_stream_to_responses` (first-chunk /
+/// inter-chunk) and by this total cap as a last resort.
 /// Wrapped in RwLock so the proxy URL can be changed at runtime.
 /// Default: direct connection (no proxy).
 static PROXY_CLIENT: Lazy<RwLock<Client>> = Lazy::new(|| {
@@ -36,7 +46,7 @@ static PROXY_CLIENT: Lazy<RwLock<Client>> = Lazy::new(|| {
 /// When `proxy_url` is None or empty, direct connection is used.
 fn build_http_client(proxy_url: Option<&str>) -> Client {
     let mut builder = Client::builder()
-        .timeout(std::time::Duration::from_secs(300));
+        .timeout(std::time::Duration::from_secs(3600));
     if let Some(url) = proxy_url {
         if !url.is_empty() {
             match reqwest::Proxy::all(url) {
@@ -1078,10 +1088,24 @@ async fn forward_with_retry(
         // Build the forwarded request
         let mut req_builder = client.request(method.clone(), target_url.as_str());
 
-        // Forward all headers except Host, Authorization, Content-Length
+        // Forward all headers except Host, Authorization, Content-Length, and
+        // Content-Type.
+        //
+        // Content-Type is re-added explicitly below, so it must NOT also be
+        // copied here: sending the header twice (e.g. two
+        // "Content-Type: application/json" lines) makes Mistral's edge gateway
+        // mis-parse the request body as a JSON-encoded string, returning
+        // HTTP 422 "model_attributes_type / Input should be a valid dictionary
+        // or object to extract fields from" — which surfaced as Mistral
+        // conversations failing with "unexpected status 422" through the proxy
+        // while the in-app test (single Content-Type) worked fine.
         for (key, value) in original_headers.iter() {
             let key_str = key.as_str().to_lowercase();
-            if key_str != "host" && key_str != "authorization" && key_str != "content-length" {
+            if key_str != "host"
+                && key_str != "authorization"
+                && key_str != "content-length"
+                && key_str != "content-type"
+            {
                 req_builder = req_builder.header(key.clone(), value.clone());
             }
         }
