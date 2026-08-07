@@ -131,7 +131,20 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
 
     // Helper: convert a pending function_call item into a Chat Completions tool_call object
     let fn_call_to_tool_call = |fc: &serde_json::Value| -> serde_json::Value {
-        let id = fc.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+        // Responses API function_call items carry BOTH `id` (the item id, e.g.
+        // "fc_...") and `call_id` (the identifier the matching
+        // function_call_output references). Chat Completions requires the
+        // assistant tool_calls[].id to EXACTLY equal the tool message's
+        // tool_call_id; strict upstreams (Mistral) reject a mismatch with
+        // HTTP 400 code 3230 "Unexpected tool call id ... in tool results".
+        // Prefer `call_id` (the value tool results reference), falling back
+        // to `id` for clients that only send one.
+        let id = fc.get("call_id")
+            .and_then(|i| i.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| fc.get("id").and_then(|i| i.as_str()))
+            .unwrap_or("")
+            .to_string();
         let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
         // Sanitize arguments so the upstream never rejects the request with
         // 400 "arguments must be valid JSON". Codex echoes back the arguments
@@ -755,6 +768,48 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                     }
                 }
             }
+        }
+    }
+
+    // ── Post-processing: drop orphan tool messages ──
+    // Strict upstreams (Mistral) require every `tool` message's
+    // `tool_call_id` to match an assistant message's `tool_calls[].id` in the
+    // SAME request; a tool result whose assistant tool_call is absent (e.g.
+    // history truncated between the call and its result, or a
+    // function_call_output that arrived without its function_call) is
+    // rejected with HTTP 400 code 3230 "Unexpected tool call id ... in tool
+    // results". Collect all assistant tool_call ids first, then drop orphan
+    // tool messages so the request still goes through.
+    if let Some(messages) = obj.get_mut("messages") {
+        if let Some(arr) = messages.as_array_mut() {
+            // Collect all assistant tool_call ids first, then drop tool
+            // messages whose tool_call_id doesn't match. NOTE: this pass must
+            // run even when the set is EMPTY — with zero assistant tool_calls
+            // (e.g. history truncated between a call and its result, or a
+            // function_call_output that arrived without its function_call)
+            // ANY tool message is by definition orphan and must be dropped,
+            // or the strict upstream (Mistral 3230) rejects the whole
+            // conversation.
+            let tool_call_ids: std::collections::HashSet<String> = arr.iter()
+                .filter_map(|m| m.get("tool_calls").and_then(|t| t.as_array()))
+                .flatten()
+                .filter_map(|tc| tc.get("id").and_then(|i| i.as_str()))
+                .map(|s| s.to_string())
+                .collect();
+            arr.retain(|m| {
+                let is_tool = m.get("role").and_then(|r| r.as_str()) == Some("tool");
+                // A tool message whose tool_call_id is missing or doesn't
+                // match any assistant tool_call is orphan (truncated history
+                // or an unpaired function_call_output). Drop it.
+                let is_orphan = is_tool
+                    && !m.get("tool_call_id")
+                        .and_then(|c| c.as_str())
+                        .map_or(false, |cid| tool_call_ids.contains(cid));
+                if is_orphan {
+                    warn!("transform: dropping orphan tool message (tool_call_id not found in assistant tool_calls)");
+                }
+                !is_orphan
+            });
         }
     }
 
@@ -2375,6 +2430,66 @@ mod tests {
             tc["function"]["name"],
             "my_tool",
             "must be converted to chat completions format"
+        );
+    }
+
+    #[test]
+    fn tool_call_id_uses_call_id_not_item_id() {
+        // Regression test for Mistral HTTP 400 code 3230
+        // (invalid_request_message_order "Unexpected tool call id ... in tool
+        // results"): Responses API function_call items carry BOTH `id` (item
+        // id, e.g. fc_xxx) and `call_id` (the identifier the matching
+        // function_call_output references). The translated assistant
+        // tool_calls[].id must equal the tool message's tool_call_id, so the
+        // assistant side must use `call_id` (falling back to `id`).
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "list files"}]},
+                {"type": "function_call", "id": "fc_item_1", "call_id": "call_abc123", "name": "shell_command", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_abc123", "output": "file1\nfile2"}
+            ]
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let messages = v["messages"].as_array().expect("messages array");
+
+        let assistant = messages.iter()
+            .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+            .expect("assistant tool_calls message");
+        assert_eq!(
+            assistant["tool_calls"][0]["id"], "call_abc123",
+            "assistant tool_call id must use call_id (not item id fc_item_1)"
+        );
+
+        let tool_msg = messages.iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool message");
+        assert_eq!(
+            tool_msg["tool_call_id"], "call_abc123",
+            "tool message tool_call_id must match assistant tool_call id"
+        );
+    }
+
+    #[test]
+    fn orphan_tool_message_is_dropped() {
+        // Regression test for Mistral 3230: a tool result whose call_id has
+        // no matching assistant tool_call in the same request (e.g. truncated
+        // history) must be dropped so the upstream doesn't reject the whole
+        // conversation.
+        let body = br#"{
+            "model": "codestral-latest",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+                {"type": "function_call_output", "call_id": "call_orphan_1", "output": "result text"}
+            ]
+        }"#;
+        let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        let messages = v["messages"].as_array().expect("messages array");
+        assert!(
+            messages.iter().all(|m| m["role"] != "tool"),
+            "orphan tool message must be dropped (no matching assistant tool_call)"
         );
     }
 
