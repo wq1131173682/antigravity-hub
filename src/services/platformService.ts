@@ -75,6 +75,19 @@ export interface RefreshModelsResult {
   message: string;
 }
 
+export interface UpstreamModelInfo {
+  model_name: string;
+  display_name: string;
+  max_input_tokens?: number | null;
+  already_imported: boolean;
+}
+
+export interface ImportModelsResult {
+  imported: string[];
+  skipped: string[];
+  message: string;
+}
+
 export interface TestModelResult {
   success: boolean;
   latency_ms: number;
@@ -85,6 +98,21 @@ export interface TestModelResult {
 /** Fetch model info from the upstream API and update local model config. */
 export async function refreshModelsFromUpstream(platformId: string): Promise<RefreshModelsResult> {
   return await invoke('refresh_models_from_upstream', { platformId });
+}
+
+/** List upstream models WITHOUT importing them (each marked already_imported). */
+export async function listUpstreamModels(platformId: string): Promise<UpstreamModelInfo[]> {
+  return await invoke('list_upstream_models', { platformId });
+}
+
+/** Import only the selected model names from the upstream list. */
+export async function importModels(platformId: string, modelNames: string[]): Promise<ImportModelsResult> {
+  return await invoke('import_models', { platformId, modelNames });
+}
+
+/** Batch delete models by id. */
+export async function deleteModels(modelIds: string[]): Promise<void> {
+  return await invoke('delete_models', { modelIds });
 }
 
 /** Test a model by sending a minimal chat completion request. */

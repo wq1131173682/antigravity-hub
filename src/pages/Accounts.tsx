@@ -2,15 +2,16 @@ import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
-import type { Model } from '../types/platform';
-import type { TestModelResult } from '../services/platformService';
+import type { Model, Platform } from '../types/platform';
+import type { TestModelResult, UpstreamModelInfo } from '../services/platformService';
 import { showToast } from '../components/common/ToastContainer';
 import ModalDialog from '../components/common/ModalDialog';
 import * as codexService from '../services/codexService';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  Terminal, X, RefreshCw, Wifi, Loader2
+  Terminal, X, Wifi, Loader2,
+  CheckSquare, Square, Search, Download
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -357,11 +358,14 @@ function Accounts() {
     platforms, keys, models, modelUsage, modelKeyIds,
     fetchPlatforms, fetchKeys, fetchModels, fetchModelUsage,
     deletePlatform, deleteKey, setKeyStatus,
-    deleteModel, disassociateKeyFromModel,
-    refreshModelsFromUpstream, testModel
+    deleteModel, deleteModels, disassociateKeyFromModel,
+    testModel
   } = usePlatformStore();
   const [selectedPlatformId, setSelectedPlatformId] = useState<string | null>(null);
   const [showAddPlatform, setShowAddPlatform] = useState(false);
+  const [showEditPlatform, setShowEditPlatform] = useState(false);
+  const [editingPlatform, setEditingPlatform] = useState<Platform | null>(null);
+  const [showImportModels, setShowImportModels] = useState(false);
   const [showAddModel, setShowAddModel] = useState(false);
   const [showAddKey, setShowAddKey] = useState(false);
   const [showEditQuota, setShowEditQuota] = useState(false);
@@ -369,6 +373,8 @@ function Accounts() {
   const [assigningModelId, setAssigningModelId] = useState<string | null>(null);
   const [applyingModelToCodex, setApplyingModelToCodex] = useState<string | null>(null);
   const [showKeyValues, setShowKeyValues] = useState<Set<string>>(new Set());
+  const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
+  const [showBatchDeleteConfirm, setShowBatchDeleteConfirm] = useState(false);
   // Delete confirmation modal state
   const [deleteConfirm, setDeleteConfirm] = useState<{
     type: 'platform' | 'key' | 'model';
@@ -422,6 +428,22 @@ function Accounts() {
     }
   };
 
+  const handleBatchDeleteConfirm = async () => {
+    if (!selectedPlatformId || selectedModelIds.size === 0) {
+      setShowBatchDeleteConfirm(false);
+      return;
+    }
+    try {
+      await deleteModels(selectedPlatformId, [...selectedModelIds]);
+      setSelectedModelIds(new Set());
+      showToast(t('common.success'), 'success');
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    } finally {
+      setShowBatchDeleteConfirm(false);
+    }
+  };
+
   const handleToggleKey = async (keyId: string, disabled: boolean) => {
     try {
       await setKeyStatus(keyId, !disabled);
@@ -461,11 +483,18 @@ function Accounts() {
               <div className="flex items-center gap-2 min-w-0">
                 <Server className="w-4 h-4 shrink-0" />
                 <span className="text-sm font-medium truncate">{p.name}</span>
-              </div>                              <button
-                                className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-500 transition-all shrink-0"
-                                onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'platform', id: p.id }); }}
-                                title={t('common.delete')}
-                              ><Trash2 className="w-3.5 h-3.5" /></button>
+              </div>                              <div className="flex items-center opacity-0 group-hover:opacity-100 shrink-0">
+                                <button
+                                  className="p-1 text-gray-400 hover:text-blue-500 transition-all"
+                                  onClick={e => { e.stopPropagation(); setEditingPlatform(p); setShowEditPlatform(true); }}
+                                  title={t('accounts.edit_platform')}
+                                ><Edit3 className="w-3.5 h-3.5" /></button>
+                                <button
+                                  className="p-1 text-gray-400 hover:text-red-500 transition-all"
+                                  onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'platform', id: p.id }); }}
+                                  title={t('common.delete')}
+                                ><Trash2 className="w-3.5 h-3.5" /></button>
+                              </div>
             </div>
           ))}
         </div>
@@ -492,34 +521,37 @@ function Accounts() {
                 <button className="px-3 py-1.5 bg-blue-500 text-white text-xs font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm" onClick={() => setShowAddModel(true)}>
                   <Layers className="w-3.5 h-3.5" /> {t('accounts.add_model')}
                 </button>
-                <button className="px-3 py-1.5 bg-emerald-500 text-white text-xs font-medium rounded-lg hover:bg-emerald-600 transition-colors flex items-center gap-1.5 shadow-sm" onClick={async () => {
-                  if (!selectedPlatformId) return;
-                  try {
-                    showToast('正在从上游获取模型信息...', 'info');
-                    const result = await refreshModelsFromUpstream(selectedPlatformId);
-                    if (result.created.length > 0) {
-                      showToast(`新建 ${result.created.length} 个模型: ${result.created.join(', ')}`, 'success');
-                    }
-                    if (result.updated.length > 0) {
-                      showToast(`更新 ${result.updated.length} 个模型: ${result.updated.join(', ')}`, 'success');
-                    }
-                    if (result.created.length === 0 && result.updated.length === 0) {
-                      showToast(`已同步，所有 ${result.total_upstream} 个上游模型已是最新状态`, 'info');
-                    }
-                  } catch (e) {
-                    showToast(`从上游获取模型信息失败: ${e}`, 'error');
-                  }
-                }}>
-                  <RefreshCw className="w-3.5 h-3.5" /> 从上游同步
+                <button className="px-3 py-1.5 bg-emerald-500 text-white text-xs font-medium rounded-lg hover:bg-emerald-600 transition-colors flex items-center gap-1.5 shadow-sm" onClick={() => setShowImportModels(true)} title={t('accounts.import_models')}>
+                  <Download className="w-3.5 h-3.5" /> {t('accounts.import_models')}
                 </button>
               </div>
             </div>
 
             {/* Models section */}
             <div>
-              <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3 flex items-center gap-2">
-                <Layers className="w-4 h-4" /> {t('accounts.models')} ({platformModels.length})
-              </h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                  <Layers className="w-4 h-4" /> {t('accounts.models')} ({platformModels.length})
+                </h3>
+                <div className="flex items-center gap-2">
+                  {platformModels.length > 0 && (
+                    <button
+                      className="px-2.5 py-1 text-xs text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-base-300 rounded-lg transition-colors flex items-center gap-1"
+                      onClick={() => setSelectedModelIds(prev => prev.size === platformModels.length ? new Set() : new Set(platformModels.map(m => m.id)))}
+                    >
+                      <CheckSquare className="w-3 h-3" /> {selectedModelIds.size === platformModels.length && platformModels.length > 0 ? t('common.deselect_all') : t('common.select_all')}
+                    </button>
+                  )}
+                  {selectedModelIds.size > 0 && (
+                    <button
+                      className="px-2.5 py-1 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition-colors flex items-center gap-1"
+                      onClick={() => setShowBatchDeleteConfirm(true)}
+                    >
+                      <Trash2 className="w-3 h-3" /> {t('common.delete_selected').replace('{count}', String(selectedModelIds.size))}
+                    </button>
+                  )}
+                </div>
+              </div>
               {platformModels.length === 0 ? (
                 <div className="bg-white dark:bg-base-100 rounded-xl p-8 shadow-sm border border-gray-100 dark:border-base-200 text-center">
                   <Layers className="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-2" />
@@ -536,6 +568,17 @@ function Accounts() {
                         {/* Model header */}
                         <div className="px-4 py-3 border-b border-gray-100 dark:border-base-200 flex items-center justify-between">
                           <div className="flex items-center gap-2 min-w-0">
+                            <button
+                              className={`p-0.5 rounded transition-colors shrink-0 ${selectedModelIds.has(model.id) ? 'text-blue-500' : 'text-gray-300 hover:text-gray-400'}`}
+                              onClick={() => setSelectedModelIds(prev => {
+                                const next = new Set(prev);
+                                if (next.has(model.id)) next.delete(model.id); else next.add(model.id);
+                                return next;
+                              })}
+                              title={selectedModelIds.has(model.id) ? t('common.deselect') : t('common.select')}
+                            >
+                              {selectedModelIds.has(model.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                            </button>
                             <Layers className="w-4 h-4 text-purple-500 shrink-0" />
                             <span className="font-medium text-sm text-gray-900 dark:text-base-content">{model.display_name || model.model_name}</span>
                             <span className="text-xs text-gray-400 font-mono">{model.model_name}</span>
@@ -718,11 +761,17 @@ function Accounts() {
 
       {/* Dialogs */}
       <AddPlatformDialog open={showAddPlatform} onClose={() => setShowAddPlatform(false)} />
+      <EditPlatformDialog
+        open={showEditPlatform}
+        onClose={() => { setShowEditPlatform(false); setEditingPlatform(null); }}
+        platform={editingPlatform}
+      />
       {selectedPlatformId && (
         <>
           <AddKeyDialog open={showAddKey} onClose={() => setShowAddKey(false)} platformId={selectedPlatformId} />
           <AddModelDialog open={showAddModel} onClose={() => setShowAddModel(false)} platformId={selectedPlatformId} />
           <AssignKeyDialog open={assigningModelId !== null} onClose={() => setAssigningModelId(null)} modelId={assigningModelId || ''} platformId={selectedPlatformId} />
+          <ImportModelsDialog open={showImportModels} onClose={() => setShowImportModels(false)} platformId={selectedPlatformId} />
         </>
       )}
       <EditModelQuotaDialog open={showEditQuota} onClose={() => { setShowEditQuota(false); setEditingModel(null); }} model={editingModel} />
@@ -749,6 +798,239 @@ function Accounts() {
         confirmText={t('common.delete')}
         cancelText={t('common.cancel')}
       />
+
+      {/* Batch Delete Models Confirmation Modal */}
+      <ModalDialog
+        isOpen={showBatchDeleteConfirm}
+        title={t('accounts.confirm_batch_delete_models')}
+        message={t('accounts.batch_delete_models_warning', '此操作将删除选中的 {count} 个模型及其关联，不可恢复。').replace('{count}', String(selectedModelIds.size))}
+        type="confirm"
+        isDestructive={true}
+        onConfirm={handleBatchDeleteConfirm}
+        onCancel={() => setShowBatchDeleteConfirm(false)}
+        confirmText={t('common.delete')}
+        cancelText={t('common.cancel')}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dialog: Edit Platform (modify name / base_url / path_prefix)
+// ---------------------------------------------------------------------------
+function EditPlatformDialog({ open, onClose, platform }: { open: boolean; onClose: () => void; platform: Platform | null }) {
+  const { t } = useTranslation();
+  const { updatePlatform } = usePlatformStore();
+  const [name, setName] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [pathPrefix, setPathPrefix] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open && platform) {
+      setName(platform.name);
+      setBaseUrl(platform.base_url);
+      setPathPrefix(platform.path_prefix);
+    }
+  }, [open, platform]);
+
+  const handleSave = async () => {
+    if (!platform) return;
+    if (!name.trim() || !baseUrl.trim() || !pathPrefix.trim()) {
+      showToast(t('accounts.fill_all_fields'), 'error');
+      return;
+    }
+    setSaving(true);
+    try {
+      await updatePlatform(platform.id, name.trim(), baseUrl.trim(), pathPrefix.trim());
+      showToast(t('common.success'), 'success');
+      onClose();
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    } finally { setSaving(false); }
+  };
+
+  if (!open || !platform) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.edit_platform')}</h3>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('accounts.platform_name')}</label>
+            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Gemini" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('accounts.base_url')}</label>
+            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://generativelanguage.googleapis.com/v1beta/openai" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('accounts.path_prefix')}</label>
+            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={pathPrefix} onChange={e => setPathPrefix(e.target.value.replace(/[\s\/]/g, ''))} placeholder="gemini" />
+            <p className="text-xs text-gray-400 mt-1">{t('accounts.path_prefix_hint').replace('{prefix}', pathPrefix || 'gemini')}</p>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <button className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-base-300 rounded-lg transition-colors" onClick={onClose}>{t('common.cancel')}</button>
+          <button className={`px-4 py-2 text-sm text-white rounded-lg transition-colors ${saving ? 'bg-blue-400' : 'bg-blue-500 hover:bg-blue-600'}`} onClick={handleSave} disabled={saving}>{saving ? t('common.saving') : t('common.save')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dialog: Import Models from Upstream (select which to import)
+// ---------------------------------------------------------------------------
+function ImportModelsDialog({ open, onClose, platformId }: { open: boolean; onClose: () => void; platformId: string }) {
+  const { t } = useTranslation();
+  const { listUpstreamModels, importModels } = usePlatformStore();
+  const [models, setModels] = useState<UpstreamModelInfo[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    setLoading(true);
+    setError('');
+    setModels([]);
+    setSelected(new Set());
+    setSearch('');
+    listUpstreamModels(platformId)
+      .then(list => setModels(list))
+      .catch(e => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [open, platformId]);
+
+  const toggle = (name: string, alreadyImported: boolean) => {
+    if (alreadyImported) return;
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
+  const toggleAll = () => {
+    const importable = models.filter(m => !m.already_imported).map(m => m.model_name);
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (prev.size === importable.length && importable.length > 0) {
+        importable.forEach(n => next.delete(n));
+      } else {
+        importable.forEach(n => next.add(n));
+      }
+      return next;
+    });
+  };
+
+  const handleImport = async () => {
+    if (selected.size === 0) {
+      showToast(t('accounts.select_models_to_import'), 'warning');
+      return;
+    }
+    setImporting(true);
+    try {
+      const result = await importModels(platformId, [...selected]);
+      showToast(result.message || t('common.success'), 'success');
+      onClose();
+    } catch (e) {
+      showToast(`${t('common.error')}: ${e}`, 'error');
+    } finally { setImporting(false); }
+  };
+
+  const filtered = models.filter(m => {
+    const q = search.trim().toLowerCase();
+    if (!q) return true;
+    return m.model_name.toLowerCase().includes(q) || m.display_name.toLowerCase().includes(q);
+  });
+
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-lg mx-4 p-5 border border-gray-200 dark:border-base-300 max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex justify-between items-center mb-3">
+          <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.import_models')}</h3>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="relative mb-3">
+          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder={t('accounts.search_models')}
+          />
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-10 text-gray-400 text-sm">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" /> {t('common.loading')}
+          </div>
+        ) : error ? (
+          <div className="py-8 text-center">
+            <p className="text-sm text-red-500 mb-3">{error}</p>
+            <button className="px-3 py-1.5 text-xs text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors" onClick={() => { setLoading(true); setError(''); listUpstreamModels(platformId).then(l => setModels(l)).catch(e => setError(String(e))).finally(() => setLoading(false)); }}>
+              {t('common.retry')}
+            </button>
+          </div>
+        ) : models.length === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-8">{t('accounts.no_upstream_models')}</p>
+        ) : (
+          <>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs text-gray-400">{t('accounts.upstream_models_count').replace('{count}', String(models.length))}</p>
+              <button className="text-xs text-blue-500 hover:text-blue-600 transition-colors flex items-center gap-1" onClick={toggleAll}>
+                <CheckSquare className="w-3 h-3" /> {selected.size === models.filter(m => !m.already_imported).length && models.some(m => !m.already_imported) ? t('common.deselect_all') : t('common.select_all')}
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-1 border border-gray-100 dark:border-base-300 rounded-lg p-2 min-h-[160px]">
+              {filtered.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-6">{t('accounts.no_matching_models')}</p>
+              ) : filtered.map(m => (
+                <div
+                  key={m.model_name}
+                  className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
+                    m.already_imported ? 'opacity-50' : 'hover:bg-gray-50 dark:hover:bg-base-200 cursor-pointer'
+                  }`}
+                  onClick={() => toggle(m.model_name, m.already_imported)}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {m.already_imported ? <CheckSquare className="w-4 h-4 text-gray-300 shrink-0" /> : (
+                      selected.has(m.model_name) ? <CheckSquare className="w-4 h-4 text-blue-500 shrink-0" /> : <Square className="w-4 h-4 text-gray-300 shrink-0" />
+                    )}
+                    <span className="text-sm text-gray-700 dark:text-gray-300 font-mono truncate">{m.model_name}</span>
+                  </div>
+                  {m.already_imported && (
+                    <span className="px-1.5 py-0.5 text-[10px] bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 rounded font-medium shrink-0">
+                      {t('accounts.already_imported')}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div className="flex justify-end gap-2 mt-4">
+          <button className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-base-300 rounded-lg transition-colors" onClick={onClose}>{t('common.cancel')}</button>
+          <button
+            className={`px-4 py-2 text-sm text-white rounded-lg transition-colors flex items-center gap-1.5 ${importing || selected.size === 0 ? 'bg-emerald-300' : 'bg-emerald-500 hover:bg-emerald-600'}`}
+            onClick={handleImport}
+            disabled={importing || selected.size === 0}
+          >
+            {importing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+            {t('accounts.import_selected').replace('{count}', String(selected.size))}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

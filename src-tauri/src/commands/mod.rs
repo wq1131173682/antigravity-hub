@@ -508,10 +508,35 @@ pub async fn restore_codex_config() -> Result<crate::modules::codex_integration:
     .map_err(|e| format!("Blocking task failed: {}", e))?
 }
 
-/// Refresh models from upstream API for a given platform
+/// Refresh models from upstream API for a given platform (full-sync variant)
 #[tauri::command]
 pub async fn refresh_models_from_upstream(platform_id: String) -> Result<crate::modules::proxy::RefreshModelsResult, String> {
     modules::proxy::refresh_models_from_upstream(&platform_id).await
+}
+
+/// List models available on the upstream WITHOUT importing them.
+/// Each entry is marked `already_imported` when a local model with the same
+/// name exists, so the UI can pre-check / gray out existing models.
+#[tauri::command]
+pub async fn list_upstream_models(platform_id: String) -> Result<Vec<crate::modules::proxy::UpstreamModelInfo>, String> {
+    modules::proxy::list_upstream_models(&platform_id).await
+}
+
+/// Import ONLY the selected model names from the upstream list.
+#[tauri::command]
+pub async fn import_models(platform_id: String, model_names: Vec<String>) -> Result<crate::modules::proxy::ImportModelsResult, String> {
+    modules::proxy::import_models(&platform_id, model_names).await
+}
+
+/// Batch delete models by id (cleans up associations and quota trackers).
+#[tauri::command]
+pub async fn delete_models(model_ids: Vec<String>) -> Result<(), String> {
+    for model_id in &model_ids {
+        let _ = modules::key_model_map::remove_model_associations(model_id);
+        let _ = modules::quota_window::remove_model_trackers(model_id);
+        modules::model_manager::delete_model(model_id)?;
+    }
+    Ok(())
 }
 
 /// Test a model by sending a minimal chat completion request

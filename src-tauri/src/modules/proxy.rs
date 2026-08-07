@@ -428,7 +428,7 @@ fn handle_models_request() -> axum::response::Response {
 }
 
 
-/// Result of refreshing models from upstream
+/// Result of refreshing models from upstream (full-sync variant)
 #[derive(Debug, Clone, Serialize)]
 pub struct RefreshModelsResult {
     pub updated: Vec<String>,
@@ -438,19 +438,32 @@ pub struct RefreshModelsResult {
     pub message: String,
 }
 
-/// Fetch model information from the upstream API for a given platform.
-/// Calls the upstream `/v1/models` (or `/models`) endpoint, parses
-/// `max_input_tokens` / context window for each model, auto-creates new
-/// models that exist upstream but not locally, and updates context size
-/// for existing ones.
-///
-/// Supports multiple URL patterns:
-///   1. `{base_url}/v1/models` (OpenAI-compatible)
-///   2. `{base_url}/models` (fallback)
-pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshModelsResult, String> {
+/// A single model as reported by the upstream `/v1/models` endpoint,
+/// WITHOUT importing it. Used by the selective-import flow.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpstreamModelInfo {
+    pub model_name: String,
+    pub display_name: String,
+    pub max_input_tokens: Option<u64>,
+    /// Whether a local model with this name already exists for the platform.
+    pub already_imported: bool,
+}
+
+/// Result of a selective model import.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportModelsResult {
+    pub imported: Vec<String>,
+    pub skipped: Vec<String>,
+    pub message: String,
+}
+
+/// Fetch the upstream model list (`/v1/models` or `/models`) for a platform.
+/// Returns (model_name, display_name, max_input_tokens) tuples — nothing is
+/// written to local storage. Shared by the full-sync and selective-import
+/// flows. Handles Gemini's `/v1beta/openai` root via deduplicate_url_path.
+async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, String, Option<u64>)>, String> {
     use crate::modules::config;
     use crate::modules::keystore;
-    use crate::modules::model_manager;
 
     // Load platform info
     let cfg = config::load_app_config()?;
@@ -471,7 +484,8 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
     let base_url = platform.base_url.trim_end_matches('/').to_string();
 
     // Try multiple URL patterns — some providers use /v1/models, others /models.
-    // Use deduplicate_url_path to handle base URLs that already include /v1.
+    // Use deduplicate_url_path to handle base URLs that already include /v1
+    // (or Gemini's /v1beta/openai root, where the /v1 is stripped).
     let url_candidates = vec![
         deduplicate_url_path(&base_url, "/v1/models"),
         deduplicate_url_path(&base_url, "/models"),
@@ -530,14 +544,7 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
             )
         })?;
 
-    let mut updated: Vec<String> = Vec::new();
-    let mut created: Vec<String> = Vec::new();
-    let total_upstream = upstream_models.len();
-
-    // Get local models for this platform
-    let local_models = model_manager::list_models(platform_id)?;
-    let total_local_before = local_models.len();
-
+    let mut result = Vec::new();
     for upstream_model in upstream_models {
         let model_id = upstream_model.get("id")
             .and_then(|v| v.as_str())
@@ -547,6 +554,12 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
             continue;
         }
 
+        let display_name = upstream_model.get("display_name")
+            .or_else(|| upstream_model.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(model_id)
+            .to_string();
+
         // Try to extract context window from various field names
         let max_input_tokens = upstream_model.get("max_input_tokens")
             .or_else(|| upstream_model.get("max_input_length"))
@@ -554,6 +567,94 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
             .or_else(|| upstream_model.get("max_context_length"))
             .and_then(|v| v.as_u64());
 
+        result.push((model_id.to_string(), display_name, max_input_tokens));
+    }
+    Ok(result)
+}
+
+/// List models available on the upstream WITHOUT importing them.
+/// Each entry is marked `already_imported` when a local model with the same
+/// name exists, so the UI can pre-check / gray out existing models.
+pub async fn list_upstream_models(platform_id: &str) -> Result<Vec<UpstreamModelInfo>, String> {
+    let upstream = fetch_upstream_model_list(platform_id).await?;
+    let local_models = crate::modules::model_manager::list_models(platform_id)?;
+    let mut result = Vec::with_capacity(upstream.len());
+    for (model_name, display_name, ctx) in upstream {
+        let already_imported = local_models.iter().any(|m| m.model_name == model_name);
+        result.push(UpstreamModelInfo {
+            model_name,
+            display_name,
+            max_input_tokens: ctx,
+            already_imported,
+        });
+    }
+    Ok(result)
+}
+
+/// Import ONLY the selected model names from the upstream list.
+/// Models already present locally are skipped (their context size is not
+/// clobbered); new models are created with the default quota limits.
+pub async fn import_models(platform_id: &str, model_names: Vec<String>) -> Result<ImportModelsResult, String> {
+    use crate::modules::model_manager;
+
+    let upstream = fetch_upstream_model_list(platform_id).await?;
+    let local_models = model_manager::list_models(platform_id)?;
+
+    let mut imported = Vec::new();
+    let mut skipped = Vec::new();
+
+    for model_name in &model_names {
+        let (display_name, max_input_tokens) = upstream
+            .iter()
+            .find(|(name, _, _)| name == model_name)
+            .map(|(_, dn, ctx)| (dn.clone(), *ctx))
+            .unwrap_or_else(|| (model_name.clone(), None));
+
+        if local_models.iter().any(|m| &m.model_name == model_name) {
+            skipped.push(model_name.clone());
+            continue;
+        }
+
+        model_manager::add_model(
+            platform_id.to_string(),
+            model_name.clone(),
+            display_name,
+            Some(10000),  // per_5hour: default
+            Some(50000),  // per_day: default
+            Some(100000), // per_month: default
+            max_input_tokens,
+        )?;
+        imported.push(model_name.clone());
+    }
+
+    let message = if imported.is_empty() {
+        format!("No new models imported ({} skipped: already exist)", skipped.len())
+    } else {
+        format!("Imported {} model(s): {}", imported.len(), imported.join(", "))
+    };
+
+    Ok(ImportModelsResult {
+        imported,
+        skipped,
+        message,
+    })
+}
+
+/// Fetch model information from the upstream API for a given platform.
+/// (Full-sync variant: auto-creates every upstream model. The UI now prefers
+/// the selective-import flow via list_upstream_models + import_models.)
+pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshModelsResult, String> {
+    use crate::modules::model_manager;
+
+    let upstream = fetch_upstream_model_list(platform_id).await?;
+    let mut updated: Vec<String> = Vec::new();
+    let mut created: Vec<String> = Vec::new();
+    let total_upstream = upstream.len();
+
+    let local_models = model_manager::list_models(platform_id)?;
+    let total_local_before = local_models.len();
+
+    for (model_id, display_name, max_input_tokens) in upstream {
         // Find matching local model by model_name
         if let Some(local) = local_models.iter().find(|m| m.model_name == model_id) {
             // Update context size if it changed
@@ -573,22 +674,16 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
             }
         } else {
             // Auto-create new model from upstream with reasonable defaults
-            let display_name = upstream_model.get("display_name")
-                .or_else(|| upstream_model.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(model_id)
-                .to_string();
-
             let _ = model_manager::add_model(
                 platform_id.to_string(),
-                model_id.to_string(),
+                model_id.clone(),
                 display_name,
                 Some(10000),  // per_5hour: default
                 Some(50000),  // per_day: default
                 Some(100000), // per_month: default
                 max_input_tokens,
             );
-            created.push(model_id.to_string());
+            created.push(model_id.clone());
             info!("Auto-created model '{}' from upstream (context: {:?})", model_id, max_input_tokens);
         }
     }
@@ -861,14 +956,13 @@ async fn proxy_handler(
     let (model_name, body_bytes) =
         apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref(), is_responses_api);
 
-    // ── Reasoning effort normalization ──
-    // Mistral codestral models only accept `reasoning_effort` ∈ {none, high};
-    // Codex sends low/medium, which the upstream rejects with HTTP 400 and
-    // aborts the conversation. Normalize while preserving the user's effort
-    // ordering: low → none (fast/cheap), medium → high (other models pass
-    // through untouched).
+    // ── Reasoning effort sanitization ──
+    // Mistral codestral models do NOT support `reasoning_effort` at all — even
+    // schema-valid none/high are rejected with HTTP 400 "reasoning_effort is
+    // not enabled for this model", aborting the conversation. Strip the field
+    // for codestral models; all other models pass through untouched.
     let body_bytes = match model_name.as_deref() {
-        Some(m) => crate::modules::codex_translator::normalize_reasoning_effort_for_model(&body_bytes, m)
+        Some(m) => crate::modules::codex_translator::sanitize_reasoning_effort_for_model(&body_bytes, m)
             .unwrap_or(body_bytes),
         None => body_bytes,
     };
@@ -965,6 +1059,17 @@ fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
             && first_seg[1..].chars().all(|c| c.is_ascii_digit());
 
         if is_version && base.ends_with(&format!("/{}", first_seg)) {
+            return format!("{}/{}", base, rest_path);
+        }
+
+        // Gemini's OpenAI-compatibility layer: base_url ends with
+        // "/v1beta/openai" and exposes endpoints DIRECTLY under that root
+        // (e.g. /v1beta/openai/chat/completions). The proxy maps
+        // /v1/responses → /v1/chat/completions, so without this rule the
+        // target would become "/v1beta/openai/v1/chat/completions", which
+        // Gemini rejects with HTTP 404. When the base ends with "/openai",
+        // drop the leading version segment from the target path.
+        if is_version && base.ends_with("/openai") {
             return format!("{}/{}", base, rest_path);
         }
     }

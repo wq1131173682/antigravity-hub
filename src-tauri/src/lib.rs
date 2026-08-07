@@ -123,7 +123,10 @@ pub fn run() {
             commands::add_model,
             commands::update_model,
             commands::delete_model,
+            commands::delete_models,
             commands::refresh_models_from_upstream,
+            commands::list_upstream_models,
+            commands::import_models,
             commands::test_model,
             // Key-Model associations
             commands::get_keys_for_model,

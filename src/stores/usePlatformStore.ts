@@ -16,6 +16,7 @@ interface PlatformState {
   // Platform
   fetchPlatforms: () => Promise<void>;
   addPlatform: (name: string, baseUrl: string, pathPrefix: string) => Promise<void>;
+  updatePlatform: (platformId: string, name?: string, baseUrl?: string, pathPrefix?: string) => Promise<void>;
   deletePlatform: (platformId: string) => Promise<void>;
 
   // Keys
@@ -29,7 +30,10 @@ interface PlatformState {
   addModel: (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null) => Promise<void>;
   updateModelLimits: (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null) => Promise<void>;
   deleteModel: (platformId: string, modelId: string) => Promise<void>;
+  deleteModels: (platformId: string, modelIds: string[]) => Promise<void>;
   refreshModelsFromUpstream: (platformId: string) => Promise<platformService.RefreshModelsResult>;
+  listUpstreamModels: (platformId: string) => Promise<platformService.UpstreamModelInfo[]>;
+  importModels: (platformId: string, modelNames: string[]) => Promise<platformService.ImportModelsResult>;
   testModel: (platformId: string, modelName: string) => Promise<platformService.TestModelResult>;
 
   // Model Usage
@@ -75,6 +79,18 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       await platformService.addPlatform(name, baseUrl, pathPrefix);
+      await get().fetchPlatforms();
+      set({ loading: false });
+    } catch (e) {
+      set({ error: String(e), loading: false });
+      throw e;
+    }
+  },
+
+  updatePlatform: async (platformId: string, name?: string, baseUrl?: string, pathPrefix?: string) => {
+    set({ loading: true, error: null });
+    try {
+      await platformService.updatePlatform(platformId, name, baseUrl, pathPrefix);
       await get().fetchPlatforms();
       set({ loading: false });
     } catch (e) {
@@ -204,10 +220,42 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     }
   },
 
+  deleteModels: async (platformId: string, modelIds: string[]) => {
+    try {
+      await platformService.deleteModels(modelIds);
+      await get().fetchModels(platformId);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
   refreshModelsFromUpstream: async (platformId: string) => {
     try {
       const result = await platformService.refreshModelsFromUpstream(platformId);
       // Refresh models list after update
+      await get().fetchModels(platformId);
+      return result;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  listUpstreamModels: async (platformId: string) => {
+    try {
+      const result = await platformService.listUpstreamModels(platformId);
+      return result;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  importModels: async (platformId: string, modelNames: string[]) => {
+    try {
+      const result = await platformService.importModels(platformId, modelNames);
+      // Refresh models list after import
       await get().fetchModels(platformId);
       return result;
     } catch (e) {

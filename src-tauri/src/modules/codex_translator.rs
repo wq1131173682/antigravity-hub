@@ -787,56 +787,40 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
     Some(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
 }
 
-/// Normalize `reasoning_effort` to a value the upstream model accepts.
+/// Strip `reasoning_effort` for models that do not support the parameter.
 ///
 /// Codex CLI sends Responses API `reasoning.effort` (low/medium/high), which
 /// the request translation above maps to Chat Completions `reasoning_effort`.
-/// Most OpenAI-compatible providers accept all three values, but Mistral's
-/// codestral models only accept `none` and `high`, rejecting `low`/`medium`
-/// with HTTP 400 ("reasoning_effort='low' is not supported for this model. Must
-/// be one of (none, high)"), which aborts the conversation mid-turn.
+/// Most OpenAI-compatible providers accept this parameter, but some do NOT
+/// support it at all — sending ANY value (including the schema-valid
+/// `none`/`high`) makes the upstream reject the whole request with HTTP 400,
+/// aborting the conversation mid-turn:
+///   - Mistral codestral models: "reasoning_effort is not enabled for this
+///     model" (the earlier "must be one of (none, high)" error was only the
+///     stateless schema enum check; the model-level capability check rejects
+///     the field entirely).
+///   - Google Gemini OpenAI-compat layer (generativelanguage.googleapis.com/
+///     v1beta/openai): does not implement the `reasoning_effort` parameter.
 ///
-/// Map to the closest supported value for codestral models while preserving
-/// the user's effort ordering — a user who configured `model_reasoning_effort
-/// = "low"` wants fast/cheap turns, so `low` must NOT be raised to `high`
-/// (that would force full extended thinking on every turn):
-///   low → none, medium → high, high → high, none → none.
-/// Any other unrecognized value is clamped to `high` (extended thinking on)
-/// so a future value (e.g. "maximum") can't re-trigger the same HTTP 400
-/// whack-a-mole. Other models (and bodies without `reasoning_effort`) are
-/// left unchanged and None is returned.
-pub fn normalize_reasoning_effort_for_model(body_bytes: &[u8], model_name: &str) -> Option<Vec<u8>> {
-    // Only Mistral codestral models restrict reasoning_effort to none/high.
-    if !model_name.to_lowercase().contains("codestral") {
+/// The correct fix is to REMOVE the field entirely for these models so the
+/// request goes through (the model uses its default reasoning behavior).
+/// Other models (and bodies without `reasoning_effort`) are left unchanged
+/// and None is returned.
+pub fn sanitize_reasoning_effort_for_model(body_bytes: &[u8], model_name: &str) -> Option<Vec<u8>> {
+    // Only models that reject the reasoning_effort field entirely:
+    // Mistral codestral and Google Gemini families.
+    let lower = model_name.to_lowercase();
+    if !lower.contains("codestral") && !lower.contains("gemini") {
         return None;
     }
     let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
     let obj = json.as_object_mut()?;
-    let effort = match obj.get("reasoning_effort").and_then(|v| v.as_str()) {
-        Some(e) => e.to_string(),
-        None => return None,
-    };
-    let normalized = match effort.as_str() {
-        "none" => "none",
-        "high" => "high",
-        // Preserve the user's effort ordering: "low" → none (fast/cheap, no
-        // extended thinking) — raising it to "high" would force full extended
-        // thinking every turn, slower and more expensive than the user asked
-        // for. "medium" and any future unknown value → high (extended
-        // thinking on), the safest default for a coding model.
-        "low" => "none",
-        _ => "high",
-    };
-    if normalized == effort {
+    if obj.remove("reasoning_effort").is_none() {
         return None;
     }
-    obj.insert(
-        "reasoning_effort".to_string(),
-        serde_json::Value::String(normalized.to_string()),
-    );
     info!(
-        "normalize_reasoning_effort: model '{}': reasoning_effort '{}' → '{}' (codestral supports none/high only)",
-        model_name, effort, normalized
+        "sanitize_reasoning_effort: model '{}': removed reasoning_effort (model does not support the parameter)",
+        model_name
     );
     Some(serde_json::to_vec(&json).ok()?)
 }
@@ -2292,69 +2276,43 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_normalized_for_codestral() {
-        // Regression test for Mistral HTTP 400: codestral-latest only accepts
-        // `reasoning_effort` ∈ {none, high}; Codex sends low/medium, which the
-        // upstream rejects ("reasoning_effort='low' is not supported for this
-        // model"), aborting the conversation. The mapping preserves effort
-        // ordering: low → none (cheap/fast), medium → high.
+    fn reasoning_effort_stripped_for_codestral() {
+        // Regression test for Mistral HTTP 400 "reasoning_effort is not
+        // enabled for this model": codestral-latest does NOT support the
+        // reasoning_effort parameter at all — even schema-valid none/high are
+        // rejected (the earlier "low is not supported, must be one of
+        // none/high" error was only the stateless enum check). The field must
+        // be REMOVED, not remapped.
+
+        // low → removed
         let body = br#"{
             "model": "codestral-latest",
             "input": "hi",
             "reasoning": {"effort": "low"}
         }"#;
         let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
-        let out = normalize_reasoning_effort_for_model(&translated, "codestral-latest").expect("normalize should apply");
+        let out = sanitize_reasoning_effort_for_model(&translated, "codestral-latest").expect("sanitize should apply");
         let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
-        assert_eq!(
-            v["reasoning_effort"], "none",
-            "low must map to none (fast/cheap), not raise to high"
-        );
-
-        // medium → high
-        let body = br#"{
-            "model": "codestral-latest",
-            "input": "hi",
-            "reasoning": {"effort": "medium"}
-        }"#;
-        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
-        let out = normalize_reasoning_effort_for_model(&translated, "codestral-latest").expect("normalize should apply");
-        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
-        assert_eq!(v["reasoning_effort"], "high", "medium must map to codestral default high");
-
-        // high / none are already valid → no change (None returned)
-        let body = br#"{
-            "model": "codestral-latest",
-            "input": "hi",
-            "reasoning": {"effort": "high"}
-        }"#;
-        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
         assert!(
-            normalize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
-            "high must pass through unchanged"
-        );
-        let body = br#"{
-            "model": "codestral-latest",
-            "input": "hi",
-            "reasoning": {"effort": "none"}
-        }"#;
-        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
-        assert!(
-            normalize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
-            "none must pass through unchanged"
+            v.get("reasoning_effort").is_none(),
+            "reasoning_effort must be removed for codestral"
         );
 
-        // Unknown future values (e.g. "maximum") are clamped to codestral's
-        // default high so they can't re-trigger the same 400.
-        let body = br#"{
-            "model": "codestral-latest",
-            "input": "hi",
-            "reasoning": {"effort": "maximum"}
-        }"#;
-        let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
-        let out = normalize_reasoning_effort_for_model(&translated, "codestral-latest").expect("normalize should apply");
-        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
-        assert_eq!(v["reasoning_effort"], "high", "unknown effort must clamp to high");
+        // medium / high / none → removed too (field unsupported regardless of value)
+        for effort in ["medium", "high", "none", "maximum"] {
+            let body = format!(
+                r#"{{"model": "codestral-latest", "input": "hi", "reasoning": {{"effort": "{}"}}}}"#,
+                effort
+            );
+            let translated = transform_responses_to_chat_completions(body.as_bytes()).expect("transform should succeed");
+            let out = sanitize_reasoning_effort_for_model(&translated, "codestral-latest").expect("sanitize should apply");
+            let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+            assert!(
+                v.get("reasoning_effort").is_none(),
+                "reasoning_effort '{}' must be removed for codestral",
+                effort
+            );
+        }
 
         // Non-codestral models are never touched
         let body = br#"{
@@ -2364,7 +2322,7 @@ mod tests {
         }"#;
         let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
         assert!(
-            normalize_reasoning_effort_for_model(&translated, "mistral-small-latest").is_none(),
+            sanitize_reasoning_effort_for_model(&translated, "mistral-small-latest").is_none(),
             "non-codestral models must pass through unchanged"
         );
 
@@ -2372,7 +2330,7 @@ mod tests {
         let body = br#"{"model": "codestral-latest", "input": "hi"}"#;
         let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
         assert!(
-            normalize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
+            sanitize_reasoning_effort_for_model(&translated, "codestral-latest").is_none(),
             "body without reasoning_effort must be unchanged"
         );
     }
