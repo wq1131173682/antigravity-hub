@@ -1,5 +1,5 @@
 {
-  "version": "5.2.21",
+  "version": "5.2.22",
   "name": "antigravity-tools",
   "description": "Antigravity Hub - 多平台 API Key 轮询代理工具（Tauri v2 桌面应用）。Multi-platform API key rotation proxy with Codex CLI integration.",
   "homepage": "https://github.com/wq1131173682/antigravity-hub",

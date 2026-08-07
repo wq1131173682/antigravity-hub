@@ -2056,13 +2056,14 @@ fn split_thinking_content(text: &str) -> (Option<String>, Option<String>) {
 ///   - Others: `>thinking`, `>reasoning`, `[think]`, `[thinking]`, `[reasoning]`
 fn is_thinking_marker(text: &str) -> bool {
     let lower = text.trim_start().to_lowercase();
-    const MARKERS: [&str; 9] = [
+    const MARKERS: [&str; 10] = [
         ">think",
         ">thinking",
         ">reasoning",
         "<think",
         "<thinking",
         "<reasoning",
+        "<odk",
         "[think",
         "[thinking",
         "[reasoning",
@@ -2088,7 +2089,7 @@ fn find_thinking_delimiter(text: &str) -> Option<(usize, usize)> {
 
     if tag_style {
         let mut best: Option<(usize, usize)> = None;
-        for d in ["</thinking>", "</reasoning>", "</think>"] {
+        for d in ["</thinking>", "</reasoning>", "</odk>", " response"] {
             if let Some(pos) = text.find(d) {
                 if best.map_or(true, |(bp, _)| pos < bp) {
                     best = Some((pos, d.len()));
@@ -2771,4 +2772,27 @@ mod tests {
         // A single `</s>` embedded mid-sentence (legit HTML) is preserved.
         assert_eq!(sanitize_output_text("a</s>b"), "a</s>b");
     }
+    #[test]
+    fn odk_thought_routed_to_reasoning_channel() {
+        // Codex Desktop's ODK reasoning format (<odk>_..._</odk>) must be
+        // recognized and routed to the reasoning channel, not shown as text.
+        let input = "<odk>_I need to read the pet files first._</odk>\nThen upgrade the pet.";
+        assert!(is_thinking_marker(input), "ODK marker must be detected");
+        let (reasoning, remaining) = split_thinking_content(input);
+        assert!(reasoning.is_some(), "ODK block must yield reasoning");
+        let reason = reasoning.unwrap();
+        assert!(reason.contains("read the pet files"), "reasoning should contain ODK content");
+        let remain = remaining.expect("there should be text after the ODK block");
+        assert_eq!(remain, "Then upgrade the pet.");
+    }
+
+    #[test]
+    fn odm_delimiter_closes_odk_block() {
+        // The </odk> closing tag must terminate the thinking block.
+        let input = "<odk>_think_</odk>answer";
+        let (reasoning, remaining) = split_thinking_content(input);
+        assert!(reasoning.is_some());
+        assert_eq!(remaining.unwrap(), "answer");
+    }
+
 }
