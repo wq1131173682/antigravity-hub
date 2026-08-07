@@ -957,10 +957,12 @@ async fn proxy_handler(
         apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref(), is_responses_api);
 
     // ── Reasoning effort sanitization ──
-    // Mistral codestral models do NOT support `reasoning_effort` at all — even
-    // schema-valid none/high are rejected with HTTP 400 "reasoning_effort is
-    // not enabled for this model", aborting the conversation. Strip the field
-    // for codestral models; all other models pass through untouched.
+    // Mistral family models (codestral, mistral-small, open-mistral-nemo,
+    // pixtral, etc.) and Google Gemini do NOT support `reasoning_effort` at
+    // all — even schema-valid none/high are rejected with HTTP 400
+    // "reasoning_effort is not enabled for this model" (code 3051), aborting
+    // the conversation. Strip the field for Mistral/Gemini models; all other
+    // models pass through untouched.
     let body_bytes = match model_name.as_deref() {
         Some(m) => crate::modules::codex_translator::sanitize_reasoning_effort_for_model(&body_bytes, m)
             .unwrap_or(body_bytes),

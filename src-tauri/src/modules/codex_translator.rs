@@ -850,10 +850,9 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
 /// support it at all — sending ANY value (including the schema-valid
 /// `none`/`high`) makes the upstream reject the whole request with HTTP 400,
 /// aborting the conversation mid-turn:
-///   - Mistral codestral models: "reasoning_effort is not enabled for this
-///     model" (the earlier "must be one of (none, high)" error was only the
-///     stateless schema enum check; the model-level capability check rejects
-///     the field entirely).
+///   - Mistral model families (codestral, mistral-small, open-mistral-nemo,
+///     pixtral, etc.): "reasoning_effort is not enabled for this model"
+///     (code 3051) — the model-level capability check rejects the field.
 ///   - Google Gemini OpenAI-compat layer (generativelanguage.googleapis.com/
 ///     v1beta/openai): does not implement the `reasoning_effort` parameter.
 ///
@@ -862,10 +861,16 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
 /// Other models (and bodies without `reasoning_effort`) are left unchanged
 /// and None is returned.
 pub fn sanitize_reasoning_effort_for_model(body_bytes: &[u8], model_name: &str) -> Option<Vec<u8>> {
-    // Only models that reject the reasoning_effort field entirely:
-    // Mistral codestral and Google Gemini families.
+    // Models that reject the reasoning_effort field entirely:
+    //   - All Mistral family models: codestral, mistral-*, open-mistral-*,
+    //     pixtral-* (Mistral error code 3051)
+    //   - Google Gemini OpenAI-compat layer
     let lower = model_name.to_lowercase();
-    if !lower.contains("codestral") && !lower.contains("gemini") {
+    if !lower.contains("mistral")
+        && !lower.contains("codestral")
+        && !lower.contains("pixtral")
+        && !lower.contains("gemini")
+    {
         return None;
     }
     let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
@@ -2331,15 +2336,17 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_stripped_for_codestral() {
+    fn reasoning_effort_stripped_for_mistral_and_gemini() {
         // Regression test for Mistral HTTP 400 "reasoning_effort is not
-        // enabled for this model": codestral-latest does NOT support the
-        // reasoning_effort parameter at all — even schema-valid none/high are
-        // rejected (the earlier "low is not supported, must be one of
+        // enabled for this model" (code 3051): Mistral family models
+        // (codestral, mistral-small, open-mistral-nemo, pixtral, ...) do NOT
+        // support the reasoning_effort parameter at all — even schema-valid
+        // none/high are rejected (the "low is not supported, must be one of
         // none/high" error was only the stateless enum check). The field must
-        // be REMOVED, not remapped.
+        // be REMOVED, not remapped. Google Gemini's OpenAI-compat layer does
+        // not implement the parameter either.
 
-        // low → removed
+        // low → removed (codestral)
         let body = br#"{
             "model": "codestral-latest",
             "input": "hi",
@@ -2369,17 +2376,50 @@ mod tests {
             );
         }
 
-        // Non-codestral models are never touched
+        // Other Mistral family models (mistral-small, open-mistral-nemo,
+        // pixtral) reject the field too — must be stripped as well
+        for model in ["mistral-small-latest", "open-mistral-nemo", "pixtral-12b", "mistral-large-latest"] {
+            let body = format!(
+                r#"{{"model": "{}", "input": "hi", "reasoning": {{"effort": "low"}}}}"#,
+                model
+            );
+            let translated = transform_responses_to_chat_completions(body.as_bytes()).expect("transform should succeed");
+            let out = sanitize_reasoning_effort_for_model(&translated, model).expect("sanitize should apply");
+            let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+            assert!(
+                v.get("reasoning_effort").is_none(),
+                "reasoning_effort must be removed for '{}'",
+                model
+            );
+        }
+
+        // Gemini OpenAI-compat layer strips it too
         let body = br#"{
-            "model": "mistral-small-latest",
+            "model": "gemini-2.0-flash",
             "input": "hi",
             "reasoning": {"effort": "low"}
         }"#;
         let translated = transform_responses_to_chat_completions(body).expect("transform should succeed");
+        let out = sanitize_reasoning_effort_for_model(&translated, "gemini-2.0-flash").expect("sanitize should apply");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
         assert!(
-            sanitize_reasoning_effort_for_model(&translated, "mistral-small-latest").is_none(),
-            "non-codestral models must pass through unchanged"
+            v.get("reasoning_effort").is_none(),
+            "reasoning_effort must be removed for gemini"
         );
+
+        // Non-Mistral / non-Gemini models are never touched
+        for model in ["gpt-5.6", "claude-sonnet-4-5", "deepseek-v4-flash", "qwen3-coder"] {
+            let body = format!(
+                r#"{{"model": "{}", "input": "hi", "reasoning": {{"effort": "low"}}}}"#,
+                model
+            );
+            let translated = transform_responses_to_chat_completions(body.as_bytes()).expect("transform should succeed");
+            assert!(
+                sanitize_reasoning_effort_for_model(&translated, model).is_none(),
+                "model '{}' must pass through unchanged",
+                model
+            );
+        }
 
         // No reasoning_effort in body → no change
         let body = br#"{"model": "codestral-latest", "input": "hi"}"#;
