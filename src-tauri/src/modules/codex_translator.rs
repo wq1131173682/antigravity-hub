@@ -121,6 +121,96 @@ fn repair_truncated_json(text: &str) -> Option<String> {
     }
 }
 
+/// Sanitize model output text by stripping control tokens that should never
+/// appear as literal text in the client.
+///
+/// Some models emit EOS (end-of-sequence) tokens or format control markers
+/// as literal text, especially when the tokenizer is misconfigured or the
+/// model has not been fine-tuned to suppress these tokens. These are
+/// machine-only control sequences that are meaningless to the end user and
+/// are silently removed from the output stream.
+///
+/// This function is designed to be extremely conservative for compatibility —
+/// it only strips tokens that are unambiguously machine-only control
+/// sequences, and never touches legitimate user-facing content:
+///
+/// 1. Synthetic tokens (pipe-delimited / underscore-marked special sequences
+///    such as `<|endoftext|>`, `<|eot_id|>`, `|im_end|`, `<end_of_turn>`) are
+///    stripped unconditionally — none of these can appear in legitimate text.
+/// 2. `</s>` is BOTH a common EOS token AND a valid HTML/XML closing tag. To
+///    avoid breaking legitimate markup (e.g. `<s>opening</s>`), it is only
+///    stripped when it appears as a RUN of 2+ consecutive occurrences (the
+///    classic EOS-leak signature, e.g. `</s></s>`). A single `</s>` is kept.
+///
+/// It does NOT attempt to fix semantic issues (hallucination loops,
+/// repetition, malformed content).
+///
+/// Returns the original string unchanged (zero-copy via Cow) when no tokens
+/// were removed, avoiding unnecessary allocation on every chunk.
+fn sanitize_output_text<'a>(text: &'a str) -> std::borrow::Cow<'a, str> {
+    if text.is_empty() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    // Step 1: strip synthetic control tokens — these are unambiguous machine
+    // markers (pipe-delimited or underscore-marked) that never appear in
+    // legitimate user-facing text.
+    const SYNTHETIC_TOKENS: &[&str] = &[
+        "<|endoftext|>",      // GPT-2/GPT-3 EOS token
+        "<|eot_id|>",         // Llama 3 EOS token
+        "|im_end|",           // ChatML format boundary
+        "|im_start|",         // ChatML format boundary
+        "<|end|>",            // Some models' EOS (e.g., Yi, DeepSeek)
+        "<end_of_turn>",      // Gemma turn separator
+        "<|END_OF_TURN_TOKEN|>", // Some models' turn separator
+    ];
+
+    let mut result = text.to_string();
+    for token in SYNTHETIC_TOKENS {
+        if result.contains(token) {
+            result = result.replace(token, "");
+        }
+    }
+
+    // Step 2: strip `</s>` ONLY as runs of 2+ consecutive occurrences. A single
+    // `</s>` is preserved because it is a valid HTML/XML closing tag. Scan
+    // byte-by-byte (all tokens here are ASCII, so UTF-8 safety is preserved).
+    const EOS: &str = "</s>";
+    let bytes = result.as_bytes();
+    let mut cleaned = String::with_capacity(result.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(EOS.as_bytes()) {
+            // Count consecutive `</s>` occurrences starting at i.
+            let mut j = i;
+            let mut count = 0;
+            while j + EOS.len() <= bytes.len() && &bytes[j..j + EOS.len()] == EOS.as_bytes() {
+                count += 1;
+                j += EOS.len();
+            }
+            if count >= 2 {
+                // Run of 2+ EOS tokens → skip the entire run (leak signature).
+                i = j;
+            } else {
+                // Single `</s>` → keep (likely legitimate HTML).
+                cleaned.push_str(&result[i..j]);
+                i = j;
+            }
+        } else {
+            // Copy one full UTF-8 character.
+            let ch = result[i..].chars().next().unwrap_or_default();
+            cleaned.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    if cleaned == text {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(cleaned)
+    }
+}
+
 /// Translate a Responses API request body to Chat Completions API format.
 ///
 /// Responses API format:  {"model":"...","input":"...","max_output_tokens":...}
@@ -932,7 +1022,7 @@ pub fn transform_chat_completions_to_responses(body_bytes: &[u8]) -> Option<Vec<
                             }
 
                             // Emit text output item for the remaining (actual) content
-                            let text_to_emit = actual_text.as_deref().unwrap_or(content_str);
+                            let text_to_emit = sanitize_output_text(actual_text.as_deref().unwrap_or(content_str));
                             if !text_to_emit.is_empty() {
                                 output.push(serde_json::json!({
                                     "type": "message",
@@ -1349,12 +1439,18 @@ pub fn transform_stream_to_responses(
                     // reasoning_content field. We detect this at the start of the text
                     // stream and route it to the reasoning buffer, so Codex CLI can
                     // display it as a collapsible thinking block.
-                    if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                        if !content.is_empty() {
+                    // ── Output sanitization ──
+                    // Strip leaked control tokens (EOS markers like </s>, ChatML
+                    // boundaries like |im_end|, etc.) from the model's text stream
+                    // before it reaches the client. See sanitize_output_text().
+                    if let Some(raw_content) = delta.get("content").and_then(|c| c.as_str()) {
+                        if !raw_content.is_empty() {
+                            let content = sanitize_output_text(raw_content);
+                            if !content.is_empty() {
                             // Detect an inline thinking block at the start of the
                             // text stream (markers vary by provider: >think, <think>, ...)
                             if !st.has_sent_output_item && !st.has_sent_reasoning && !st.is_thinking_block {
-                                if is_thinking_marker(content) {
+                                if is_thinking_marker(content.as_ref()) {
                                     st.is_thinking_block = true;
                                 }
                             }
@@ -1475,7 +1571,7 @@ pub fn transform_stream_to_responses(
                                         "part": {"type": "output_text", "text": ""}
                                     })).await;
                                 }
-                                st.text_buffer.push_str(content);
+                                st.text_buffer.push_str(content.as_ref());
                                 sse_send(&tx, &serde_json::json!({
                                     "type": "response.output_text.delta",
                                     "delta": content,
@@ -1483,6 +1579,8 @@ pub fn transform_stream_to_responses(
                                     "output_index": st.output_index,
                                     "content_index": st.content_index
                                 })).await;
+                            }
+                            // Close the inner if !content.is_empty() (sanitization guard)
                             }
                         }
                     }
@@ -2619,5 +2717,58 @@ mod tests {
         let out = transform_responses_to_chat_completions(body).expect("transform should succeed");
         let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
         assert_eq!(v["response_format"]["type"], "json_object");
+    }
+
+    #[test]
+    fn sanitize_output_text_strips_control_tokens() {
+        // Synthetic tokens (pipe-delimited) are stripped unconditionally;
+        // repeated `</s>` runs (the EOS-leak signature) are stripped.
+        let input = "Hello</s></s> world<|endoftext|>! |im_end| <|eot_id|> <|end|> <end_of_turn> done";
+        let out = sanitize_output_text(input);
+        // The `</s></s>` run and all synthetic tokens are removed; surrounding
+        // whitespace is left in place.
+        assert_eq!(out, "Hello world!     done");
+    }
+
+    #[test]
+    fn sanitize_output_text_strips_repeated_eos_runs() {
+        // Repeated `</s>` runs (2+ consecutive) are the EOS-leak signature and
+        // are stripped entirely — including leading and mid-text runs.
+        assert_eq!(sanitize_output_text("</s></s>"), "");
+        assert_eq!(sanitize_output_text("</s></s></s>"), "");
+        assert_eq!(sanitize_output_text("a</s></s>b"), "ab");
+        assert_eq!(sanitize_output_text("</s></s> response"), " response");
+    }
+
+    #[test]
+    fn sanitize_output_text_returns_borrowed_when_clean() {
+        // No tokens to strip → zero-copy (Cow::Borrowed).
+        let input = "This is normal text, no control tokens here.";
+        let out = sanitize_output_text(input);
+        assert_eq!(out, input);
+        assert!(matches!(out, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn sanitize_output_text_handles_empty_and_owned() {
+        // Empty input → empty borrowed.
+        assert_eq!(sanitize_output_text(""), "");
+        // Token that IS stripped → owned Cow + empty result.
+        let out = sanitize_output_text("<|eot_id|>");
+        assert!(matches!(out, std::borrow::Cow::Owned(_)));
+        assert_eq!(out, "");
+        // Multiple consecutive tokens removed fully.
+        assert_eq!(sanitize_output_text("<|eot_id|><|end|>"), "");
+    }
+
+    #[test]
+    fn sanitize_output_text_does_not_break_legitimate_content() {
+        // A single `</s>` is a valid HTML/XML closing tag and is PRESERVED.
+        assert_eq!(sanitize_output_text("<s>opening</s>"), "<s>opening</s>");
+        // Short/common words that merely CONTAIN token substrings are NOT touched.
+        assert_eq!(sanitize_output_text("endoftext is a word"), "endoftext is a word");
+        assert_eq!(sanitize_output_text("eos"), "eos");
+        // A single `</s>` embedded mid-sentence (legit HTML) is preserved.
+        assert_eq!(sanitize_output_text("a</s>b"), "a</s>b");
     }
 }
