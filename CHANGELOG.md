@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.1] - 2026-08-11
+
+### 修复
+- **兼容客户端发送「HTTP 请求文本」作为请求体的场景**（WorkBuddy 等 Agent 客户端会话首请求）：代理收到非 JSON body 时，若为完整 HTTP/1.1 请求文本（请求行 + 请求头），提取内嵌 JSON payload 正常转发；无法解析的非 JSON body 返回明确的 400 错误提示，不再原样透传导致上游 `400 invalid arguments`
+- 新增 6 个单元测试覆盖提取与负例场景
+
 ## [5.3.0] - 2026-08-11
 
 ### 修复（线上 BUG）

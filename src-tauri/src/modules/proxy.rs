@@ -220,6 +220,52 @@ fn create_router() -> axum::Router {
         .route("/*path", axum::routing::any(proxy_handler))
 }
 
+/// Detect a request body that is actually an ENTIRE HTTP/1.1 message
+/// (request line + headers) instead of a JSON payload, and extract the
+/// embedded JSON body (the part after the header/body separator).
+///
+/// Some agent clients (e.g. WorkBuddy's session-opening probe request,
+/// identified by headers such as `X-Agent-Intent: cr`) send their first
+/// request with the full HTTP message text as the POST body. Forwarding that
+/// raw text upstream produces 400 "invalid arguments". This function recovers
+/// the real JSON payload so the proxy can process it normally.
+///
+/// Returns `Some(inner_json_bytes)` when the body looks like an HTTP request
+/// text and its embedded payload is valid JSON; `None` otherwise.
+fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
+    let text = std::str::from_utf8(body).ok()?;
+    let first_line = text.lines().next()?;
+
+    // Request line must look like: "METHOD target HTTP/1.x"
+    let is_http_request_line = first_line.starts_with("POST ")
+        || first_line.starts_with("GET ")
+        || first_line.starts_with("PUT ")
+        || first_line.starts_with("PATCH ")
+        || first_line.starts_with("DELETE ")
+        || first_line.starts_with("OPTIONS ");
+    if !is_http_request_line {
+        return None;
+    }
+
+    // Locate the end of the header block (first blank line).
+    let header_end = if let Some(pos) = text.find("\r\n\r\n") {
+        pos + 4
+    } else if let Some(pos) = text.find("\n\n") {
+        pos + 2
+    } else {
+        return None;
+    };
+
+    let inner = text[header_end..].trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    // Embedded payload must be valid JSON — otherwise we don't touch the body.
+    serde_json::from_str::<serde_json::Value>(inner).ok()?;
+    Some(inner.as_bytes().to_vec())
+}
+
 /// Parse JSON body once and return both the model_name and the modified body bytes
 /// with max_tokens injected if needed. Returns (model_name_opt, modified_body_bytes).
 fn parse_and_prepare_body(
@@ -932,6 +978,32 @@ async fn proxy_handler(
         }
     };
 
+    // ── Malformed body defense (compat for HTTP-text-body clients) ──
+    // Some clients send their first request with the ENTIRE HTTP/1.1 message
+    // (request line + headers) as the POST body instead of a JSON payload.
+    // Forwarding that raw text upstream causes 400 "invalid arguments".
+    // Recover the embedded JSON body when possible; reject unparseable
+    // non-JSON bodies with a clear error instead of proxying garbage upstream.
+    let body_bytes = if body_bytes.is_empty() {
+        body_bytes
+    } else if serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok() {
+        body_bytes
+    } else if let Some(inner) = extract_json_from_http_text(&body_bytes) {
+        info!(
+            "Extracted embedded JSON from HTTP request text body ({} -> {} bytes)",
+            body_bytes.len(),
+            inner.len()
+        );
+        inner.into()
+    } else {
+        let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
+        warn!("Rejecting request with non-JSON, non-HTTP-text body: {}", preview);
+        return error_response(400, format!(
+            "Request body must be valid JSON. Received unparseable payload (first 200 chars): {}",
+            preview
+        ));
+    };
+
     // ── Responses API request body transformation ──
     // Translate request body from Responses API format to Chat Completions format
     // BEFORE parse_and_prepare_body so it sees the correct field names.
@@ -1466,5 +1538,58 @@ async fn forward_with_retry(
     }
 
     Err(format!("All keys exhausted for platform '{}': {}", platform_prefix, last_error))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// 测试
+// ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_json_from_http_text_crlf() {
+        // WorkBuddy 会话首请求：body 为完整 HTTP/1.1 请求文本（\r\n 行尾）
+        let raw = b"POST http://192.168.9.193:5343/sensenova/v1/chat/completions HTTP/1.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nx-stainless-lang: js\r\nX-Conversation-ID: abc123\r\n\r\n{\"model\":\"sensenova-6.8-flash-lite\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        let inner = extract_json_from_http_text(raw).expect("should extract embedded JSON");
+        let v: serde_json::Value = serde_json::from_slice(&inner).expect("embedded payload must be valid JSON");
+        assert_eq!(v["model"], "sensenova-6.8-flash-lite");
+        assert_eq!(v["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_lf() {
+        // \n 行尾同样支持
+        let raw = b"POST /v1/chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\n\n{\"model\":\"gpt-4\"}";
+        let inner = extract_json_from_http_text(raw).expect("should extract");
+        let v: serde_json::Value = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(v["model"], "gpt-4");
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_returns_none_for_normal_json() {
+        let json = br#"{"model":"sensenova-6.8-flash-lite","messages":[]}"#;
+        assert!(extract_json_from_http_text(json).is_none(), "normal JSON must not match");
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_returns_none_for_plain_text() {
+        let plain = b"hello world, this is not an http request";
+        assert!(extract_json_from_http_text(plain).is_none());
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_returns_none_for_bad_inner_json() {
+        // 请求行像 HTTP，但内嵌 payload 不是 JSON → 不动原 body
+        let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{not-json}";
+        assert!(extract_json_from_http_text(raw).is_none());
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_returns_none_without_header_sep() {
+        let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json";
+        assert!(extract_json_from_http_text(raw).is_none(), "no blank line separator");
+    }
 }
 
