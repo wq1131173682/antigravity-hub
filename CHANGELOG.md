@@ -2,6 +2,25 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.0] - 2026-08-11
+
+### 修复（线上 BUG）
+- **多轮工具调用会话提前终止**：Agent 自动多轮连续工具调用场景下，完成单次 `tool_call`、输出一段回复文本之后会话直接终止（ChatGPT Work 等 Chat 客户端不再发起下一轮）
+  - 根因：旧版在收到 `response.completed` / `data: [DONE]` 事件时立即向下游注入 `finish_reason: stop`；且请求方向不维护 `previous_response_id`，依赖 response_id 续接的上游多轮后上下文断裂
+  - 修复：终结信号只在上游 SSE 流真正结束时下发（EOF / 超时 / 硬错误）；`response.completed` 与 `[DONE]` 仅更新状态，绝不注入 stop；`finish_reason` 流末统一判定（出现过 function_call → `tool_calls`，否则 `stop`）
+- **response_id 会话上下文续接**：新增会话上下文缓存（`SessionStore`），为每条下游会话缓存 `previous_response_id`，每轮请求注入 `previous_response_id` + 增量 `input`，维持 Responses API 多轮工具调用链路；上游拒绝续接（400/422）时自动清除缓存并以全量模式重试一次
+- **死流不被清理**：心跳计时与空闲超时解耦（心跳不再重置数据时间），空闲超时仍能清理死流
+- **多 response 会话工具调用串号**：`tool_calls` 改以 `item_id` 为主键 + `output_index→item_id` 辅助映射，多 response 的 output_index 重置不再互相覆盖
+- **`/v1/models` 端点 404**：`models_handler` 此前未注册到路由，现已修复
+- 非流式响应 `status=incomplete`（max_tokens 截断）映射为 `finish_reason: length`，不再误报 `error`
+
+### 变更
+- 新增配置：`context_mode`（`response_id` 多轮续接 / `full` 全量无状态）、`max_session_contexts`（会话缓存上限）
+- 新增文档：`docs/responses_api_mapping.md`（Responses API ↔ Chat Completions 双向往返字段映射 + 可调参数说明）
+
+### 测试
+- `responses_relay` 单元测试 17 → 27 个，新增覆盖：多 response 连续推送不提前终止、流中途 `[DONE]` 不终结、参数分片原样转发、坏块跳过、心跳不无限续命死流、会话上下文（previous_response_id / 增量 input / LRU 淘汰）
+
 ## [5.2.23] - 2026-08-11
 
 ### 新增

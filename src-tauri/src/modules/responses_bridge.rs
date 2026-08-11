@@ -5,6 +5,17 @@
 //   1. 客户端发送 Chat Completions 请求 → 转换为 Responses API 请求向上游转发
 //   2. 上游推送 Responses API SSE 流 → 实时转换为 Chat Completions delta 流下发客户端
 //
+// ── 线上 BUG 修复（v2）：Agent 多轮工具调用会话被提前终止 ──
+// 旧实现的问题：收到 `response.completed` / `data: [DONE]` 就立即向下游发送
+// `finish_reason`（无工具调用时注入 `stop`），而 Chat 客户端（如 ChatGPT Work）
+// 收到 `finish_reason: stop` 即认为对话结束，不再发起下一轮工具调用。
+// 修复原则：
+//   * 终结信号只在「上游 SSE 流真正结束」时下发（EOF / 会话超时 / 硬错误）
+//   * `response.completed` / `[DONE]` 只更新状态，绝不注入 stop
+//   * finish_reason 在流结束时统一判定：出现过 function_call → "tool_calls"，否则 "stop"
+//   * 多 response 会话（上游在一个连接里连续推送多个 response）不再互相覆盖
+//   * 心跳计时与空闲超时解耦，死流仍会被清理
+//
 // 协议字段映射关系（Chat Completions → Responses API）：
 //   ┌──────────────────────┬──────────────────────────────────────┐
 //   │ Chat Completions     │ Responses API                        │
@@ -18,6 +29,7 @@
 //   │ response_format      │ text.format                          │
 //   │ system message       │ instructions (top-level field)       │
 //   │ stream               │ stream (pass-through)                │
+//   │ previous_response_id │ 由会话上下文管理器注入（多轮续接）      │
 //   └──────────────────────┴──────────────────────────────────────┘
 //
 // 协议字段映射关系（Responses API SSE → Chat Completions delta）：
@@ -28,11 +40,15 @@
 //   │ response.output_text.delta     │ → choices[0].delta.content       │
 //   │ function_call output_item.added│ → choices[0].delta.tool_calls    │
 //   │ function_call_arguments.delta  │ → tool_calls[].function.arguments│
-//   │ response.completed             │ → finish_reason chunk            │
-//   │ response.failed                │ → error chunk                    │
+//   │ response.completed             │ → 仅更新状态，不注入 finish      │
+//   │ response.failed                │ → error chunk + 结束流           │
+//   │ data: [DONE]                   │ → 仅标记，不结束流（等待 EOF）    │
+//   │ 上游流 EOF                     │ → finish_reason + [DONE]         │
 //   └────────────────────────────────┴──────────────────────────────────┘
 
 use std::collections::HashMap;
+use std::hash::Hasher;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use futures::StreamExt;
 use tracing::{info, warn};
@@ -72,10 +88,129 @@ impl Default for BridgeConfig {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// 会话上下文（response_id 多轮续接）
+// ────────────────────────────────────────────────────────────────────────────
+
+/// 单条下游会话的上下文缓存项。
+///
+/// Responses API 依靠 `previous_response_id` 维持连续多轮工具调用链路；
+/// Chat 客户端每轮发送完整 messages，但部分上游必须用 response_id 续接。
+/// 转换器为每一条下游会话缓存上一个 response_id 与已处理的消息数，
+/// 下一轮请求时注入 `previous_response_id` + 增量 input，避免上下文断裂。
+#[derive(Debug, Clone, Default)]
+pub struct SessionContext {
+    /// 最近一轮响应的 response_id（resp_xxx），下一轮请求注入 previous_response_id
+    pub previous_response_id: Option<String>,
+    /// 上次请求已处理的消息条数（用于计算增量 input）
+    pub processed_msg_len: usize,
+}
+
+/// 会话上下文存储（线程安全，多请求并发）
+pub struct SessionStore {
+    inner: Mutex<HashMap<String, SessionContext>>,
+    /// 插入顺序（简单 LRU 淘汰用）
+    order: Mutex<std::collections::VecDeque<String>>,
+    max_entries: usize,
+}
+
+impl SessionStore {
+    pub fn new() -> Self {
+        Self::with_capacity(1024)
+    }
+
+    /// 指定缓存条目上限的会话存储
+    pub fn with_capacity(max_entries: usize) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            order: Mutex::new(std::collections::VecDeque::new()),
+            max_entries: max_entries.max(1),
+        }
+    }
+
+    /// 生成稳定的会话 key：model + 第一条 user 消息内容（截断）。
+    /// 同一轮多轮工具调用的所有请求共享同一个根 user 消息 → key 稳定。
+    pub fn key_for_request(model: &str, messages: &[serde_json::Value]) -> String {
+        let root = messages
+            .iter()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .unwrap_or("")
+            .chars()
+            .take(128)
+            .collect::<String>();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write(model.as_bytes());
+        h.write(b"|");
+        h.write(root.as_bytes());
+        let digest = h.finish();
+        format!("{}-{:016x}", model.replace(['/', ':', ' '], "_"), digest)
+    }
+
+    /// 读取会话上下文（不存在则返回默认值）
+    pub fn get(&self, key: &str) -> SessionContext {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(key).cloned().unwrap_or_default()
+    }
+
+    /// 写入/更新会话上下文（LRU 淘汰）
+    pub fn update(&self, key: &str, ctx: SessionContext) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let existed = guard.contains_key(key);
+        guard.insert(key.to_string(), ctx);
+        drop(guard);
+
+        if !existed {
+            let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+            order.push_back(key.to_string());
+            while order.len() > self.max_entries {
+                if let Some(oldest) = order.pop_front() {
+                    let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// 清除某条会话（用于上游拒绝 previous_response_id 时的降级）
+    pub fn clear(&self, key: &str) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.remove(key);
+        drop(guard);
+        let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+        order.retain(|k| k != key);
+    }
+
+    /// 当前缓存条数
+    pub fn len(&self) -> usize {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// 是否为空
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // 1. 请求转换：Chat Completions → Responses API
 // ────────────────────────────────────────────────────────────────────────────
 
-/// 将 Chat Completions 请求体转换为 Responses API 请求体。
+/// 请求转换上下文
+#[derive(Debug, Clone, Default)]
+pub struct RequestContext {
+    /// 上一轮响应的 response_id，注入顶层 previous_response_id
+    pub previous_response_id: Option<String>,
+    /// 增量模式：Some(i) 时只转换 messages[i..]（i 之后为新增消息）
+    pub incremental_from: Option<usize>,
+}
+
+/// 将 Chat Completions 请求体转换为 Responses API 请求体（无上下文，全量模式）。
 ///
 /// # 输入格式（Chat Completions）
 /// ```json
@@ -115,16 +250,32 @@ impl Default for BridgeConfig {
 /// }
 /// ```
 pub fn transform_chat_to_responses_request(body_bytes: &[u8]) -> Option<Vec<u8>> {
+    transform_chat_to_responses_request_ctx(body_bytes, &RequestContext::default())
+}
+
+/// 带会话上下文的请求转换。
+///
+/// - `ctx.previous_response_id`：非空时注入顶层 `previous_response_id`（多轮续接）。
+/// - `ctx.incremental_from`：Some(i) 时只转换 `messages[i..]` 为 input（增量模式），
+///   system 提取为 instructions 仅在非增量模式执行。
+pub fn transform_chat_to_responses_request_ctx(body_bytes: &[u8], ctx: &RequestContext) -> Option<Vec<u8>> {
     let mut json: serde_json::Value = serde_json::from_slice(body_bytes).ok()?;
     let obj = json.as_object_mut()?;
 
-    // 1. 提取 system prompt → instructions（从 messages 中移除第一个 system 消息）
+    // 增量起点：默认从 0 开始
+    let start_idx = ctx.incremental_from.unwrap_or(0);
+    let incremental = ctx.incremental_from.is_some();
+
+    // 1. 提取 system prompt → instructions（仅非增量模式）
     let mut instructions: Option<String> = None;
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(msg_array) = obj.remove("messages").and_then(|m| m.as_array().cloned()) {
         for (i, msg) in msg_array.into_iter().enumerate() {
+            if i < start_idx {
+                continue;
+            }
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user").to_string();
-            if role == "system" && instructions.is_none() && i == 0 {
+            if !incremental && role == "system" && instructions.is_none() && i == 0 {
                 // 只将第一个 system 消息提取为 instructions
                 if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
                     instructions = Some(content.to_string());
@@ -233,11 +384,23 @@ pub fn transform_chat_to_responses_request(body_bytes: &[u8]) -> Option<Vec<u8>>
 
     if !input.is_empty() {
         obj.insert("input".to_string(), serde_json::Value::Array(input));
+    } else {
+        // 增量模式且无新增消息：空 input 数组（上下文由 previous_response_id 携带）
+        obj.insert("input".to_string(), serde_json::Value::Array(Vec::new()));
     }
 
-    // 3. 设置 instructions
-    if let Some(instructions) = instructions {
-        obj.insert("instructions".to_string(), serde_json::Value::String(instructions));
+    // 3. 设置 instructions（仅非增量模式）
+    if !incremental {
+        if let Some(instructions) = instructions {
+            obj.insert("instructions".to_string(), serde_json::Value::String(instructions));
+        }
+    }
+
+    // 3.5 注入 previous_response_id（多轮续接关键）
+    if let Some(prev_id) = &ctx.previous_response_id {
+        if !prev_id.is_empty() {
+            obj.insert("previous_response_id".to_string(), serde_json::Value::String(prev_id.clone()));
+        }
     }
 
     // 4. 转换 max_tokens → max_output_tokens
@@ -327,9 +490,6 @@ pub fn transform_chat_to_responses_request(body_bytes: &[u8]) -> Option<Vec<u8>>
                         text_format.insert("format".to_string(), response_format);
                     }
                 }
-                "json_object" | "text" => {
-                    text_format.insert("format".to_string(), response_format);
-                }
                 _ => {
                     text_format.insert("format".to_string(), response_format);
                 }
@@ -382,12 +542,7 @@ fn convert_chat_content_to_responses(content: Option<&serde_json::Value>) -> ser
                             obj.insert("type".to_string(), serde_json::Value::String("input_image".to_string()));
                         }
                         "image" => {
-                            // OpenAI 的 image 类型（带 image_url/image 字段）
-                            if obj.contains_key("image_url") {
-                                obj.insert("type".to_string(), serde_json::Value::String("input_image".to_string()));
-                            } else {
-                                obj.insert("type".to_string(), serde_json::Value::String("input_image".to_string()));
-                            }
+                            obj.insert("type".to_string(), serde_json::Value::String("input_image".to_string()));
                         }
                         "file" => {
                             obj.insert("type".to_string(), serde_json::Value::String("input_file".to_string()));
@@ -419,6 +574,18 @@ fn convert_chat_content_to_responses(content: Option<&serde_json::Value>) -> ser
 // 2. 流式响应转换：Responses API SSE → Chat Completions delta
 // ────────────────────────────────────────────────────────────────────────────
 
+/// 流结束钩子：上游流结束时由转换器回调（供服务层回写 response_id 上下文）
+pub struct StreamHooks {
+    /// 参数：(response_id, has_tool_calls, has_text_output, duration_ms)
+    pub on_complete: Option<Arc<dyn Fn(Option<String>, bool, bool, u128) + Send + Sync>>,
+}
+
+impl Default for StreamHooks {
+    fn default() -> Self {
+        Self { on_complete: None }
+    }
+}
+
 /// 流式转换器状态
 struct StreamTranslatorState {
     /// 从 response.created 中提取的响应 ID
@@ -434,49 +601,34 @@ struct StreamTranslatorState {
     chunk_counter: u64,
 
     // ── 文本输出跟踪 ──
-    /// 当前文本输出项的 item_id
     text_item_id: Option<String>,
-    /// 当前文本输出项的 output_index
     text_output_index: Option<u32>,
-    /// 是否已发送文本 output_item.added 事件对应的 content delta
     has_sent_text_delta: bool,
 
     // ── 工具调用跟踪 ──
-    /// 工具调用状态：按 Responses API 的 output_index 索引
-    /// 映射到 Chat Completions 的 tool_calls 数组索引
-    tool_calls: HashMap<u32, ToolCallState>,
-    /// 下一个工具调用的 chat 索引
+    /// 工具调用状态：以 item_id 为主键（多 response 会话不串号）
+    tool_calls: HashMap<String, ToolCallState>,
+    /// output_index → item_id 辅助映射（处理只带 output_index 的事件）
+    output_index_to_item_id: HashMap<u32, String>,
+    /// 下一个工具调用的 chat 索引（全流连续，不因 response 重置）
     next_tool_chat_index: u32,
-    /// 工具调用在 output 中的起始索引（用于区分 text 和 tool_calls 的 output_index）
-    tool_call_output_base: Option<u32>,
-
-    // ── Reasoning 跟踪 ──
-    reasoning_buffer: String,
-    has_reasoning: bool,
 
     // ── 完成状态 ──
-    is_completed: bool,
-    /// 流中是否有工具调用（决定 finish_reason）
+    /// 是否已下发 finish（流已终结，幂等）
+    is_finished: bool,
+    /// 整个流中是否出现过 function_call（决定最终 finish_reason）
     has_tool_calls: bool,
-    /// 是否已发送 final finish_reason chunk
-    has_sent_finish: bool,
     /// 是否有文本输出
     has_text_output: bool,
 
-    // ── 完成时输出项列表（用于判断 finish_reason） ──
-    completed_output_items: Vec<serde_json::Value>,
+    // ── 会话钩子 ──
+    complete_hook: Option<Arc<dyn Fn(Option<String>, bool, bool, u128) + Send + Sync>>,
 }
 
 /// 单个工具调用在转换过程中的状态
 #[derive(Debug, Clone)]
 struct ToolCallState {
-    /// 工具调用的 item_id（来自 Responses API）
-    item_id: String,
-    /// call_id（来自 function_call item）
-    call_id: String,
-    /// 工具名称
-    name: String,
-    /// 累积的参数片段
+    /// 累积的参数片段（仅用于统计/校验，转发始终用原始 delta）
     arguments_buffer: String,
     /// Chat Completions 中的索引
     chat_index: u32,
@@ -485,7 +637,9 @@ struct ToolCallState {
 }
 
 impl StreamTranslatorState {
-    fn new() -> Self {
+    fn new(
+        complete_hook: Option<Arc<dyn Fn(Option<String>, bool, bool, u128) + Send + Sync>>,
+    ) -> Self {
         Self {
             response_id: String::new(),
             model_name: String::new(),
@@ -496,15 +650,12 @@ impl StreamTranslatorState {
             text_output_index: None,
             has_sent_text_delta: false,
             tool_calls: HashMap::new(),
+            output_index_to_item_id: HashMap::new(),
             next_tool_chat_index: 0,
-            tool_call_output_base: None,
-            reasoning_buffer: String::new(),
-            has_reasoning: false,
-            is_completed: false,
+            is_finished: false,
             has_tool_calls: false,
-            has_sent_finish: false,
             has_text_output: false,
-            completed_output_items: Vec::new(),
+            complete_hook,
         }
     }
 
@@ -590,7 +741,7 @@ impl StreamTranslatorState {
         }), None);
     }
 
-    /// 发送工具调用参数 delta
+    /// 发送工具调用参数 delta（原始分片原样转发，不合并不截断）
     fn send_tool_call_args_delta(
         &mut self,
         tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
@@ -610,26 +761,42 @@ impl StreamTranslatorState {
         }), None);
     }
 
-    /// 发送 finish chunk
+    /// 流终结：发送 finish chunk（幂等）。
+    /// ⚠️ 规则：绝不主动注入 stop —— 只有整个上游流真正结束（EOF/超时/硬错误）
+    ///    才由本方法统一下发 finish_reason。
     fn send_finish_chunk(
         &mut self,
         tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
     ) {
-        if self.has_sent_finish {
+        if self.is_finished {
             return;
         }
-        self.has_sent_finish = true;
+        self.is_finished = true;
 
-        // 判断 finish_reason
-        // 如果有工具调用，finish_reason = "tool_calls"
-        // 否则 finish_reason = "stop"
+        // 流结束时统一判定：出现过多轮工具调用意图 → "tool_calls"，否则 "stop"
         let reason = if self.has_tool_calls {
             "tool_calls"
         } else {
             "stop"
         };
 
+        info!(
+            "responses_bridge: sending final finish_reason={} (has_text={}, has_tool_calls={})",
+            reason, self.has_text_output, self.has_tool_calls
+        );
         self.send_delta(tx, serde_json::json!({}), Some(reason));
+    }
+
+    /// 触发流结束钩子（回写 response_id 上下文）
+    fn fire_complete_hook(&mut self, duration_ms: u128) {
+        if let Some(hook) = self.complete_hook.take() {
+            let rid = if self.response_id.is_empty() {
+                None
+            } else {
+                Some(self.response_id.clone())
+            };
+            hook(rid, self.has_tool_calls, self.has_text_output, duration_ms);
+        }
     }
 
     /// 处理 response.created 事件
@@ -673,32 +840,31 @@ impl StreamTranslatorState {
                 self.has_sent_text_delta = false;
             }
             "function_call" => {
-                // 工具调用项开始
+                // 工具调用项开始 —— 以 item_id 为主键，多 response 会话不覆盖
                 let item_id = item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
                 let call_id = item.get("call_id").and_then(|c| c.as_str()).unwrap_or(&item_id).to_string();
                 let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
-                // 确定 chat 索引
+                // chat 索引全流连续分配
                 let chat_index = self.next_tool_chat_index;
                 self.next_tool_chat_index += 1;
 
                 let tc_state = ToolCallState {
-                    item_id: item_id.clone(),
-                    call_id: call_id.clone(),
-                    name: name.clone(),
                     arguments_buffer: String::new(),
                     chat_index,
                     has_sent_initial: false,
                 };
-                self.tool_calls.insert(output_index, tc_state);
+                self.tool_calls.insert(item_id.clone(), tc_state);
+                self.output_index_to_item_id.insert(output_index, item_id.clone());
 
-                // 发送初始 tool_call delta
+                // 发送初始 tool_call delta（id + name + type 完整）
                 self.send_tool_call_initial(tx, chat_index, &call_id, &name);
-                self.tool_calls.get_mut(&output_index).map(|s| s.has_sent_initial = true);
+                if let Some(s) = self.tool_calls.get_mut(&item_id) {
+                    s.has_sent_initial = true;
+                }
             }
             "reasoning" => {
                 // Reasoning 项 — Chat Completions 没有对应概念，跳过
-                self.has_reasoning = true;
             }
             _ => {
                 warn!("responses_bridge: unknown output_item type '{}'", item_type);
@@ -720,6 +886,9 @@ impl StreamTranslatorState {
     }
 
     /// 处理 function_call_arguments.delta 事件
+    ///
+    /// 参数分片按「原始 delta」即时转发，不合并、不截断 —— 保证客户端
+    /// 收到的 tool_calls[].function.arguments 分片顺序与上游一致。
     fn handle_function_call_args_delta(
         &mut self,
         tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
@@ -732,47 +901,54 @@ impl StreamTranslatorState {
             return;
         }
 
-        if let Some(tc_state) = self.tool_calls.get(&output_index) {
-            let chat_index = tc_state.chat_index;
-            let has_sent = tc_state.has_sent_initial;
-            if !has_sent {
-                // 如果还没发送初始 delta，先发送
-                // 这里是防御性处理，正常情况 output_item.added 应该先到
-                self.send_tool_call_initial(tx, chat_index, "", "");
-                self.tool_calls.get_mut(&output_index).map(|s| {
-                    s.has_sent_initial = true;
-                    s.arguments_buffer.push_str(delta);
-                });
-            } else {
-                self.tool_calls.get_mut(&output_index).map(|s| {
-                    s.arguments_buffer.push_str(delta);
-                });
-            }
-            self.send_tool_call_args_delta(tx, chat_index, delta);
+        // 定位工具调用：优先 item_id，其次 output_index → item_id，最后回退 output_index
+        let item_id_owned = data.get("item_id").and_then(|i| i.as_str()).map(|s| s.to_string());
+        let found = if let Some(ref iid) = item_id_owned {
+            self.tool_calls.get(iid).map(|s| (s.chat_index, s.has_sent_initial, iid.clone()))
+        } else if let Some(iid) = self.output_index_to_item_id.get(&output_index) {
+            self.tool_calls.get(iid).map(|s| (s.chat_index, s.has_sent_initial, iid.clone()))
         } else {
-            warn!(
-                "responses_bridge: function_call_arguments.delta for unknown output_index {}",
-                output_index
-            );
+            None
+        };
+
+        match found {
+            Some((chat_index, has_sent_initial, iid)) => {
+                if !has_sent_initial {
+                    // 防御性处理：output_item.added 未到（异常上游），先补发初始 delta
+                    self.send_tool_call_initial(tx, chat_index, "", "");
+                    if let Some(s) = self.tool_calls.get_mut(&iid) {
+                        s.has_sent_initial = true;
+                    }
+                }
+                if let Some(s) = self.tool_calls.get_mut(&iid) {
+                    s.arguments_buffer.push_str(delta);
+                }
+                self.send_tool_call_args_delta(tx, chat_index, delta);
+            }
+            None => {
+                // 未知工具调用的参数块：容错 —— 跳过该块，不中断整条流
+                warn!(
+                    "responses_bridge: function_call_arguments.delta for unknown output_index {} (item_id={:?}), skipping",
+                    output_index, item_id_owned
+                );
+            }
         }
     }
 
     /// 处理 response.completed 事件
-    fn handle_response_completed(
-        &mut self,
-        tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
-        data: &serde_json::Value,
-    ) {
-        if self.is_completed {
-            return;
-        }
-        self.is_completed = true;
-
-        // 从 response.completed 中提取输出项列表，判断是否有工具调用
+    ///
+    /// ⚠️ 修复：只更新状态（收集 output、判断是否含 function_call、回写 response_id），
+    ///    绝不在此时下发 finish_reason —— 会话是否结束由「上游流 EOF」决定，
+    ///    避免模型输出阶段性文本后被误判为会话结束、客户端提前终止。
+    fn handle_response_completed(&mut self, data: &serde_json::Value) {
         if let Some(response) = data.get("response") {
+            if let Some(id) = response.get("id").and_then(|i| i.as_str()) {
+                if !id.is_empty() {
+                    self.response_id = id.to_string();
+                }
+            }
+            // 从 output 中检查是否包含 function_call（兜底判定）
             if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
-                self.completed_output_items = output.clone();
-                // 检查输出中是否有 function_call 类型
                 for item in output {
                     if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
                         if item_type == "function_call" {
@@ -782,20 +958,18 @@ impl StreamTranslatorState {
                 }
             }
         }
-
-        self.send_finish_chunk(tx);
     }
 
-    /// 处理 response.failed 事件
+    /// 处理 response.failed 事件（上游明确失败 → 硬错误终结）
     fn handle_response_failed(
         &mut self,
         tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
         data: &serde_json::Value,
     ) {
-        if self.is_completed {
+        if self.is_finished {
             return;
         }
-        self.is_completed = true;
+        self.is_finished = true;
 
         // 提取错误信息
         let error_msg = data.pointer("/response/error/message")
@@ -831,27 +1005,13 @@ impl StreamTranslatorState {
         let _ = tx.try_send(Ok(axum::body::Bytes::from(sse)));
     }
 
-    /// 处理 response.done 事件（非标准，部分上游发送）
-    fn handle_response_done(
-        &mut self,
-        tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
-        data: &serde_json::Value,
-    ) {
-        if self.is_completed {
-            return;
-        }
-        // response.done 通常包含完整的 response 对象
-        // 和 response.completed 类似
-        self.handle_response_completed(tx, data);
+    /// 处理 response.done 事件（非标准，部分上游发送）—— 同 completed，不终结
+    fn handle_response_done(&mut self, data: &serde_json::Value) {
+        self.handle_response_completed(data);
     }
 
     /// 处理 output_item.done 事件
-    fn handle_output_item_done(
-        &mut self,
-        data: &serde_json::Value,
-    ) {
-        // 目前不需要特别处理
-        // 但可以收集输出项信息用于后续判断
+    fn handle_output_item_done(&mut self, data: &serde_json::Value) {
         if let Some(item) = data.get("item") {
             if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
                 if item_type == "function_call" {
@@ -865,6 +1025,35 @@ impl StreamTranslatorState {
     fn handle_content_part_done(&mut self) {
         // 不需要特别处理，文本已通过 delta 发送
     }
+
+    /// 处理协议级 error 事件（type="error"）—— 上游明确报错 → 终结
+    fn handle_error_event(
+        &mut self,
+        tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, String>>,
+        data: &serde_json::Value,
+    ) {
+        if self.is_finished {
+            return;
+        }
+        self.is_finished = true;
+        let error_msg = data.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown upstream error");
+        warn!("responses_bridge: upstream error event: {}", error_msg);
+
+        let chunk = serde_json::json!({
+            "id": self.chunk_id(),
+            "object": "chat.completion.chunk",
+            "created": self.created_at,
+            "model": self.model_name,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "error"
+            }],
+            "error": {"message": error_msg}
+        });
+        let sse = format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default());
+        let _ = tx.try_send(Ok(axum::body::Bytes::from(sse)));
+    }
 }
 
 /// 将 Responses API SSE 流转换为 Chat Completions delta 流。
@@ -875,24 +1064,26 @@ impl StreamTranslatorState {
 /// # 输出
 /// 标准的 OpenAI Chat Completions delta 流（data: {...}\n\n 格式）。
 ///
-/// # 关键特性
-/// - 边接收边转发，无大包缓存
-/// - 正确处理多轮工具调用（function_call → tool_calls 映射）
-/// - 维护 tool_call_id 和索引上下文
-/// - 处理空内容分片和分段参数拼接
-/// - 流空闲保活心跳
-/// - 超时处理
+/// # 关键特性（线上 BUG 修复）
+/// - 边接收边转发，无大包缓存，分片即时转发
+/// - **终结信号只在流真正结束时下发**：response.completed / [DONE] 均不注入 stop
+/// - 多轮工具调用（function_call → tool_calls）跨多 response 会话不串号
+/// - 工具调用参数分片原样转发（不合并、不截断）
+/// - SSE 心跳 `: ping` 保活；心跳计时与空闲超时解耦
+/// - 解析异常分片跳过，不中断整条流
 pub fn transform_responses_stream_to_chat(
     upstream_stream: impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
     model: &str,
     config: BridgeConfig,
+    hooks: Option<StreamHooks>,
 ) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, String>> + Send + 'static {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, String>>(128);
     let model_owned = model.to_string();
+    let complete_hook = hooks.and_then(|h| h.on_complete);
 
     tokio::spawn(async move {
         let started = Instant::now();
-        let mut st = StreamTranslatorState::new();
+        let mut st = StreamTranslatorState::new(complete_hook);
         if !model_owned.is_empty() {
             st.model_name = model_owned;
         }
@@ -900,11 +1091,17 @@ pub fn transform_responses_stream_to_chat(
         // 用于 SSE 分片重组的缓冲区
         let mut pending_sse_fragments: Vec<String> = Vec::new();
 
-        // 心跳定时器
-        let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat_interval_secs);
-        let mut last_data_time = Instant::now();
+        // 心跳间隔（至少 1s，避免 0 值死循环）
+        let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat_interval_secs.max(1));
+        // last_activity：任何上游字节到达都更新（心跳计时）
+        let mut last_activity = Instant::now();
+        // last_data：任何可处理的 SSE 行更新（空闲超时判定，心跳不重置它）
+        let mut last_data = Instant::now();
+        // 是否见过显式 [DONE]（仅标记，不作为结束信号）
+        let mut seen_done = false;
+        // 终结原因（日志用）
+        let mut end_reason: &str = "upstream_eof";
 
-        // 包装上游流为可枚举
         futures::pin_mut!(upstream_stream);
 
         // 主循环：读取上游 SSE 事件 → 翻译为 Chat delta → 发送
@@ -915,35 +1112,34 @@ pub fn transform_responses_stream_to_chat(
                     "responses_bridge: session max duration reached ({}s), forcing completion",
                     config.session_max_duration_secs
                 );
-                if !st.is_completed {
-                    st.send_finish_chunk(&tx);
-                }
+                end_reason = "session_max_duration";
                 break;
             }
 
-            // 计算下一次心跳的时间
-            let time_since_last_data = last_data_time.elapsed();
-            let next_heartbeat = if time_since_last_data < heartbeat_interval {
-                heartbeat_interval - time_since_last_data
+            // 心跳计时（基于 last_activity）
+            let time_since_activity = last_activity.elapsed();
+            let next_heartbeat = if time_since_activity < heartbeat_interval {
+                heartbeat_interval - time_since_activity
             } else {
                 std::time::Duration::from_secs(0)
             };
 
-            // 决定超时：首次分片用较长的超时，后续用空闲超时
+            // 空闲/首片超时（基于 last_data）
             let idle_timeout = if st.has_sent_role {
-                std::time::Duration::from_secs(config.chunk_idle_timeout_secs)
+                std::time::Duration::from_secs(config.chunk_idle_timeout_secs.max(1))
             } else {
-                std::time::Duration::from_secs(config.first_chunk_timeout_secs)
+                std::time::Duration::from_secs(config.first_chunk_timeout_secs.max(1))
             };
+            let time_since_data = last_data.elapsed();
+            let data_idle_remaining = idle_timeout.saturating_sub(time_since_data);
 
-            // 等待上游数据或心跳超时
-            let timeout = std::cmp::min(next_heartbeat, idle_timeout);
+            // 等待上游数据：取「下一次心跳」与「空闲超时剩余」中更早的
+            let timeout = std::cmp::min(next_heartbeat, data_idle_remaining);
             let chunk_result = tokio::time::timeout(timeout, upstream_stream.next()).await;
 
             match chunk_result {
                 Ok(Some(Ok(chunk))) => {
-                    last_data_time = Instant::now();
-                    // 处理上游数据
+                    last_activity = Instant::now();
                     let chunk_str = String::from_utf8_lossy(&chunk);
                     let lines: Vec<&str> = chunk_str.split('\n').collect();
 
@@ -954,6 +1150,12 @@ pub fn transform_responses_stream_to_chat(
                             if !pending_sse_fragments.is_empty() {
                                 pending_sse_fragments.clear();
                             }
+                            continue;
+                        }
+
+                        // 注释行（上游自身心跳）：视为存活信号，仅刷新数据时间
+                        if line.starts_with(':') {
+                            last_data = Instant::now();
                             continue;
                         }
 
@@ -970,22 +1172,22 @@ pub fn transform_responses_stream_to_chat(
 
                         if data == "[DONE]" {
                             pending_sse_fragments.clear();
-                            if st.is_completed {
-                                continue;
-                            }
-                            // 如果还没发送 finish，发送它
-                            st.send_finish_chunk(&tx);
+                            seen_done = true;
+                            // ⚠️ 修复：不在这里终结流！某些上游在每段输出后发 [DONE]，
+                            // 若立即下发 finish_reason，客户端会提前终止多轮工具调用。
+                            // 继续读取，直到上游连接关闭（EOF）才统一收尾。
                             continue;
                         }
 
-                        // 尝试解析 JSON
+                        // 尝试解析 JSON（容错：坏块跳过，不中断流）
                         let json = match parse_sse_line(&mut pending_sse_fragments, data) {
                             Some(j) => j,
                             None => {
-                                // 非 JSON 行（如注释行 :keepalive）
+                                last_data = Instant::now();
                                 continue;
                             }
                         };
+                        last_data = Instant::now();
 
                         // 提取事件类型
                         let event_type = json.get("type")
@@ -1021,43 +1223,27 @@ pub fn transform_responses_stream_to_chat(
                                 st.handle_output_item_done(&json);
                             }
                             "response.completed" => {
-                                st.handle_response_completed(&tx, &json);
+                                // ⚠️ 修复：仅更新状态，不发送 finish
+                                st.handle_response_completed(&json);
                             }
                             "response.failed" => {
+                                // 硬错误 → 终结
                                 st.handle_response_failed(&tx, &json);
+                                end_reason = "response_failed";
+                                break;
                             }
                             "response.done" => {
-                                st.handle_response_done(&tx, &json);
+                                // 非标准，同 completed：仅更新状态
+                                st.handle_response_done(&json);
                             }
                             "response.function_call_arguments.done" => {
-                                // 参数累积完成，不需要额外操作
+                                // 参数累积完成，不需要额外操作（分片已原样转发）
                             }
                             "error" => {
-                                // 错误事件
-                                let error_msg = json.get("message")
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("Unknown upstream error");
-                                warn!("responses_bridge: upstream error event: {}", error_msg);
-                                if !st.is_completed {
-                                    let error_chunk = serde_json::json!({
-                                        "error": {"message": error_msg}
-                                    });
-                                    let chunk = serde_json::json!({
-                                        "id": st.chunk_id(),
-                                        "object": "chat.completion.chunk",
-                                        "created": st.created_at,
-                                        "model": st.model_name,
-                                        "choices": [{
-                                            "index": 0,
-                                            "delta": {},
-                                            "finish_reason": "error"
-                                        }],
-                                        "error": error_chunk
-                                    });
-                                    let sse = format!("data: {}\n\n", serde_json::to_string(&chunk).unwrap_or_default());
-                                    let _ = tx.try_send(Ok(axum::body::Bytes::from(sse)));
-                                    st.is_completed = true;
-                                }
+                                // 协议级错误 → 终结
+                                st.handle_error_event(&tx, &json);
+                                end_reason = "error_event";
+                                break;
                             }
                             "" => {
                                 // 无 type 字段 — 可能是裸输出文本或未知格式
@@ -1069,8 +1255,7 @@ pub fn transform_responses_stream_to_chat(
                                 }
                             }
                             _ => {
-                                // 未知事件类型 — 可能包含我们需要的字段
-                                // 尝试从中提取有用信息
+                                // 未知事件类型 — 可能包含我们需要的字段（容错提取）
                                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                                     if !delta.is_empty() {
                                         st.send_text_delta(&tx, delta);
@@ -1084,72 +1269,59 @@ pub fn transform_responses_stream_to_chat(
                             }
                         }
                     }
+
+                    // 若因硬错误 break 出事件匹配，退出主循环
+                    if st.is_finished && (end_reason == "response_failed" || end_reason == "error_event") {
+                        break;
+                    }
                 }
                 Ok(Some(Err(e))) => {
                     warn!("responses_bridge: upstream stream error: {}", e);
-                    if !st.is_completed {
-                        st.send_finish_chunk(&tx);
-                    }
+                    end_reason = "upstream_stream_error";
                     break;
                 }
                 Ok(None) => {
-                    // 上游流正常结束
-                    if !st.is_completed {
-                        st.send_finish_chunk(&tx);
-                    }
+                    // 上游连接关闭 → 这才是「会话结束」的权威信号
+                    end_reason = if seen_done { "upstream_eof" } else { "upstream_eof_no_done" };
                     break;
                 }
                 Err(_elapsed) => {
-                    // 超时
-                    if st.is_completed {
+                    // 超时分支
+                    if st.is_finished {
                         break;
                     }
 
-                    // 检查是否需要发送心跳
-                    if last_data_time.elapsed() >= heartbeat_interval {
-                        // 发送 SSE 注释心跳行
-                        let heartbeat = ": keepalive\n\n";
+                    // 心跳：超过心跳周期且没有新数据 → 下发注释心跳（不重置 last_data）
+                    if last_activity.elapsed() >= heartbeat_interval {
+                        let heartbeat = ": ping\n\n";
                         let _ = tx.try_send(Ok(axum::body::Bytes::from(heartbeat)));
-                        last_data_time = Instant::now(); // 重置心跳计时器
+                        last_activity = Instant::now();
                         continue;
                     }
 
-                    // 检查空闲超时
-                    if !st.has_sent_role && last_data_time.elapsed().as_secs() > config.first_chunk_timeout_secs {
-                        warn!(
-                            "responses_bridge: timeout waiting for first valid chunk ({}s)",
-                            config.first_chunk_timeout_secs
-                        );
-                        if !st.is_completed {
-                            st.send_finish_chunk(&tx);
-                        }
-                        break;
-                    }
-
-                    if st.has_sent_role && last_data_time.elapsed().as_secs() > config.chunk_idle_timeout_secs {
+                    // 空闲/首片超时：真正的死流 → 强制收尾
+                    if last_data.elapsed() >= idle_timeout {
                         warn!(
                             "responses_bridge: idle timeout ({}s), forcing completion",
-                            config.chunk_idle_timeout_secs
+                            idle_timeout.as_secs()
                         );
-                        if !st.is_completed {
-                            st.send_finish_chunk(&tx);
-                        }
+                        end_reason = "idle_timeout";
                         break;
                     }
                 }
             }
         }
 
-        // 最终安全网
-        if !st.is_completed {
-            st.send_finish_chunk(&tx);
-        }
-
-        // 发送 [DONE]
+        // 统一收尾：finish chunk + [DONE]（幂等）
+        st.send_finish_chunk(&tx);
         let _ = tx.try_send(Ok(axum::body::Bytes::from("data: [DONE]\n\n")));
 
+        let duration_ms = started.elapsed().as_millis();
+        st.fire_complete_hook(duration_ms);
+
         info!(
-            "responses_bridge: stream finished (duration {:?}, has_text={}, has_tool_calls={})",
+            "responses_bridge: stream finished (reason={}, duration={:?}, has_text={}, has_tool_calls={})",
+            end_reason,
             started.elapsed(),
             st.has_text_output,
             st.has_tool_calls
@@ -1219,7 +1391,7 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
 
     // 转换 output → choices
     let output = obj.remove("output");
-    let status = obj.get("status").and_then(|s| s.as_str()).unwrap_or("completed");
+    let status = obj.get("status").and_then(|s| s.as_str()).unwrap_or("completed").to_string();
 
     if let Some(output) = output {
         if let Some(output_array) = output.as_array() {
@@ -1262,7 +1434,6 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                     }
                     "reasoning" => {
                         // Reasoning 在 Chat Completions 中没有标准位置，跳过
-                        // 可选的：可以放入 content 前缀
                     }
                     "output_text" | "output_image" | "output_file" | "output_audio" => {
                         // 这些是 content part 类型，不是 output item 类型
@@ -1304,9 +1475,12 @@ pub fn transform_responses_to_chat_completions(body_bytes: &[u8]) -> Option<Vec<
                 message["tool_calls"] = serde_json::Value::Array(tool_calls);
             }
 
-            // 确定 finish_reason
-            let finish_reason = if status == "failed" || status == "incomplete" {
+            // 确定 finish_reason（非流式：响应完整，直接判定）
+            // 修复：incomplete（max_tokens 截断）→ "length"，不再误报 "error"
+            let finish_reason = if status == "failed" {
                 "error"
+            } else if status == "incomplete" {
+                "length"
             } else if has_tool_calls {
                 // 如果输出中有 function_call，finish_reason = "tool_calls"
                 "tool_calls"
@@ -1396,6 +1570,7 @@ const SSE_FRAGMENT_BUFFER_LIMIT: usize = 1024 * 1024;
 
 /// 解析一行 SSE 数据为 JSON 文档。
 /// 处理分片重组：当一行数据不完整时，累积到缓冲区等待后续行补全。
+/// 解析失败返回 None，调用方跳过该块（容错，不中断流）。
 fn parse_sse_line(pending: &mut Vec<String>, data: &str) -> Option<serde_json::Value> {
     // 尝试直接解析
     let standalone = serde_json::from_str::<serde_json::Value>(data).ok();
@@ -1618,6 +1793,119 @@ mod tests {
         assert!(v.get("response_format").is_none(), "response_format should be removed");
     }
 
+    // ── 请求转换：会话上下文（previous_response_id）测试 ──
+
+    #[test]
+    fn test_chat_to_responses_with_previous_response_id() {
+        // 多轮续接：注入 previous_response_id
+        let body = br#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Search weather"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{\"q\":\"weather\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ]
+        }"#;
+
+        let ctx = RequestContext {
+            previous_response_id: Some("resp_abc123".to_string()),
+            incremental_from: None,
+        };
+        let out = transform_chat_to_responses_request_ctx(body, &ctx).expect("should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+
+        // 验证 previous_response_id
+        assert_eq!(v["previous_response_id"], "resp_abc123");
+
+        // 完整模式：input 包含所有消息
+        let input = v["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 3);
+    }
+
+    #[test]
+    fn test_chat_to_responses_incremental_mode() {
+        // 增量模式：只转换 messages[2..]（最后一条 user 之后的新增消息）
+        let body = br#"{
+            "model": "gpt-4",
+            "messages": [
+                {"role": "user", "content": "Search weather"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ]
+        }"#;
+
+        let ctx = RequestContext {
+            previous_response_id: Some("resp_abc123".to_string()),
+            incremental_from: Some(2),
+        };
+        let out = transform_chat_to_responses_request_ctx(body, &ctx).expect("should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+
+        // 验证 previous_response_id
+        assert_eq!(v["previous_response_id"], "resp_abc123");
+
+        // 增量模式：input 只包含 index=2 的 tool 结果
+        let input = v["input"].as_array().expect("input array");
+        assert_eq!(input.len(), 1, "incremental input should contain only new messages");
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
+        assert_eq!(input[0]["output"], "sunny");
+
+        // 增量模式不应设置 instructions
+        assert!(v.get("instructions").is_none(), "no instructions in incremental mode");
+    }
+
+    #[test]
+    fn test_session_store_context() {
+        // SessionStore 会话上下文：key 稳定 + previous_response_id 往返
+        let store = SessionStore::new();
+
+        let messages: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"role": "user", "content": "帮我查一下北京的天气"},
+            {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "weather", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "25C"}
+        ]"#).unwrap();
+
+        let key1 = SessionStore::key_for_request("gpt-4", &messages);
+        // 同样的首条 user 消息 → 相同 key
+        let key2 = SessionStore::key_for_request("gpt-4", &messages);
+        assert_eq!(key1, key2, "session key should be stable");
+
+        // 空 store：返回默认
+        let ctx = store.get(&key1);
+        assert!(ctx.previous_response_id.is_none());
+        assert_eq!(ctx.processed_msg_len, 0);
+
+        // 写入后读取
+        store.update(&key1, SessionContext {
+            previous_response_id: Some("resp_round1".to_string()),
+            processed_msg_len: 3,
+        });
+        let ctx = store.get(&key1);
+        assert_eq!(ctx.previous_response_id.as_deref(), Some("resp_round1"));
+        assert_eq!(ctx.processed_msg_len, 3);
+
+        // 清除
+        store.clear(&key1);
+        assert!(store.get(&key1).previous_response_id.is_none());
+    }
+
+    #[test]
+    fn test_session_store_eviction() {
+        // LRU 淘汰
+        let store = SessionStore::with_capacity(2);
+        store.update("k1", SessionContext { previous_response_id: Some("r1".into()), processed_msg_len: 1 });
+        store.update("k2", SessionContext { previous_response_id: Some("r2".into()), processed_msg_len: 1 });
+        store.update("k3", SessionContext { previous_response_id: Some("r3".into()), processed_msg_len: 1 });
+        assert_eq!(store.len(), 2, "should evict oldest entry");
+        assert!(store.get("k1").previous_response_id.is_none(), "k1 should be evicted");
+        assert!(store.get("k3").previous_response_id.is_some());
+    }
+
     // ── 非流式响应转换测试 ──
 
     #[test]
@@ -1674,6 +1962,23 @@ mod tests {
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
     }
 
+    #[test]
+    fn test_responses_to_chat_incomplete_status() {
+        // incomplete（max_tokens 截断）应映射为 length，而不是 error
+        let body = br#"{
+            "id": "resp_incomplete",
+            "object": "response",
+            "status": "incomplete",
+            "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Partial..."}]}
+            ]
+        }"#;
+
+        let out = transform_responses_to_chat_completions(body).expect("should succeed");
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
+        assert_eq!(v["choices"][0]["finish_reason"], "length");
+    }
+
     // ── 流式转换测试 ──
 
     /// 辅助：创建模拟上游流
@@ -1721,7 +2026,7 @@ mod tests {
         ];
 
         let upstream = mock_upstream_stream(events);
-        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default());
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
         let results = collect_stream(stream).await;
 
         // 验证输出
@@ -1736,8 +2041,12 @@ mod tests {
         // 验证有 role 初始 chunk
         assert!(output.contains("\"role\":\"assistant\""), "should set role");
 
-        // 验证 finish_reason
-        assert!(output.contains("\"finish_reason\":\"stop\""), "should end with stop");
+        // 验证 finish_reason 出现在流末尾（而非 completed 事件处）
+        let stop_pos = output.find("\"finish_reason\":\"stop\"");
+        let done_pos = output.find("[DONE]");
+        assert!(stop_pos.is_some(), "should end with stop");
+        assert!(done_pos.is_some());
+        assert!(stop_pos.unwrap() < done_pos.unwrap(), "finish should come before [DONE]");
     }
 
     #[tokio::test]
@@ -1756,7 +2065,7 @@ mod tests {
         ];
 
         let upstream = mock_upstream_stream(events);
-        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default());
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
         let results = collect_stream(stream).await;
 
         let output: String = results.iter().map(|s| s.as_str()).collect();
@@ -1770,16 +2079,13 @@ mod tests {
         assert!(output.contains("get_weather"), "should contain tool name");
         assert!(output.contains("Beijing"), "should contain argument");
 
-        // 验证 finish_reason 为 tool_calls
+        // 验证 finish_reason 为 tool_calls（流末尾）
         assert!(output.contains("\"finish_reason\":\"tool_calls\""), "finish_reason should be tool_calls");
     }
 
     #[tokio::test]
     async fn test_stream_multi_round_tool_calls() {
-        // 连续多轮工具调用 — Agent 场景
-        // 第一轮：模型调用 search_tool，返回结果后第二轮调用 send_email
-        // 注意：在实际流中，多轮工具调用会跨多个 response.completed 和新的请求
-        // 这里模拟单次响应中多个工具调用同时发出的情况
+        // 连续多轮工具调用 — Agent 场景（单响应内多个工具调用交错）
         let events = vec![
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_multi\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
             // 第一个工具调用
@@ -1796,7 +2102,7 @@ mod tests {
         ];
 
         let upstream = mock_upstream_stream(events);
-        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default());
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
         let results = collect_stream(stream).await;
 
         let output: String = results.iter().map(|s| s.as_str()).collect();
@@ -1812,20 +2118,149 @@ mod tests {
         assert!(output.contains("a@b.com"), "should contain email recipient");
 
         // 验证索引正确
-        // 第一个工具调用应该有 index=0
-        // 第二个工具调用应该有 index=1
         assert!(output.contains("\"index\":0"), "first tool call should have index 0");
-        // 注意：工具调用是分多次 delta 发送的，每个 delta 都带 index
-        // 至少有一个 index=1 出现
         assert!(output.contains("\"index\":1"), "second tool call should have index 1");
 
-        // 验证 finish_reason
+        // 验证 finish_reason（流末尾，tool_calls）
         assert!(output.contains("\"finish_reason\":\"tool_calls\""));
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 线上 BUG 回归测试：多轮工具调用会话不被提前终止
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_stream_multi_response_no_premature_stop() {
+        // 核心回归：上游在同一个连接里连续推送两个 response——
+        //   response1：纯文本（模型阶段性回复）
+        //   response2：function_call（模型要继续调用工具）
+        // 旧实现会在 response1.completed 时下发 finish_reason=stop，
+        // 客户端收到后终止会话，模型无法发起下一轮工具调用。
+        // 修复后：整个流结束时才下发 finish_reason=tool_calls，且绝不出现 stop。
+        let events = vec![
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"我已经搜索到第一轮结果，\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"接下来继续查找更多资料。\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"我已经搜索到第一轮结果，接下来继续查找更多资料。\"}]}]}}\n\n",
+            // 关键：response.completed 之后，上游继续推送第二个 response（function_call）
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_search_2\",\"name\":\"web_search\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"query\\\":\",\"item_id\":\"fc_2\",\"output_index\":0}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"\\\"deep research\\\"}\",\"item_id\":\"fc_2\",\"output_index\":0}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\",\"output\":[{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_search_2\",\"name\":\"web_search\",\"arguments\":\"{\\\"query\\\":\\\"deep research\\\"}\"}]}}\n\n",
+            "data: [DONE]\n\n",
+        ];
+
+        let upstream = mock_upstream_stream(events);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
+        let results = collect_stream(stream).await;
+
+        let output: String = results.iter().map(|s| s.as_str()).collect();
+
+        // 1. 两轮内容都在
+        assert!(output.contains("我已经搜索到第一轮结果"), "first response text must be present");
+        assert!(output.contains("call_search_2"), "second response tool call must be present");
+        assert!(output.contains("web_search"), "second response tool name must be present");
+
+        // 2. 关键断言：整个流中绝不出现 finish_reason=stop
+        assert!(
+            !output.contains("\"finish_reason\":\"stop\""),
+            "must NOT inject stop mid-stream: {}",
+            output
+        );
+
+        // 3. 流末尾唯一一次 finish_reason = tool_calls
+        //    （每个普通 chunk 都携带 "finish_reason":null，因此只统计带值出现次数）
+        assert!(output.contains("\"finish_reason\":\"tool_calls\""), "final finish should be tool_calls");
+        assert_eq!(output.matches("\"finish_reason\":\"tool_calls\"").count(), 1, "only one valued finish_reason");
+        assert_eq!(output.matches("\"finish_reason\":\"stop\"").count(), 0, "no stop ever");
+    }
+
+    #[tokio::test]
+    async fn test_stream_done_midstream_not_terminate() {
+        // 回归：上游在每段输出之间发送 [DONE]（非标准但存在），
+        // 旧实现收到 [DONE] 即下发 finish，客户端提前终止。
+        // 修复后：[DONE] 仅标记，流继续，直到 EOF 才收尾。
+        let events = vec![
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_done\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"tool_a\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"a\\\":1}\",\"item_id\":\"fc_1\",\"output_index\":0}\n\n",
+            // 中途 [DONE]
+            "data: [DONE]\n\n",
+            // [DONE] 之后仍然有新的 function_call（另一段输出）
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_b\",\"name\":\"tool_b\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"b\\\":2}\",\"item_id\":\"fc_2\",\"output_index\":1}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_done\",\"status\":\"completed\",\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_a\",\"name\":\"tool_a\",\"arguments\":\"{\\\"a\\\":1}\"},{\"id\":\"fc_2\",\"type\":\"function_call\",\"call_id\":\"call_b\",\"name\":\"tool_b\",\"arguments\":\"{\\\"b\\\":2}\"}]}}\n\n",
+        ];
+
+        let upstream = mock_upstream_stream(events);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
+        let results = collect_stream(stream).await;
+
+        let output: String = results.iter().map(|s| s.as_str()).collect();
+
+        // [DONE] 之后的内容仍在
+        assert!(output.contains("call_b"), "tool call after mid-stream [DONE] must be delivered");
+        assert!(output.contains("tool_b"), "tool name after [DONE] must be delivered");
+
+        // 无 stop；最终恰好一次 tool_calls（普通 chunk 携带 finish_reason:null，不计入）
+        assert_eq!(output.matches("\"finish_reason\":\"stop\"").count(), 0, "must not inject stop");
+        assert_eq!(output.matches("\"finish_reason\":\"tool_calls\"").count(), 1, "only one valued finish_reason");
+    }
+
+    #[tokio::test]
+    async fn test_stream_arg_deltas_forwarded_as_is() {
+        // 规范 3/5：参数分片原样即时转发（不合并、不截断），时序一致
+        let events = vec![
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_frag\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"call_id\":\"call_x\",\"name\":\"search\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"q\\\":\",\"item_id\":\"fc_1\",\"output_index\":0}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\" \\\"x\\\",\\\"n\\\":\",\"item_id\":\"fc_1\",\"output_index\":0}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"1}\",\"item_id\":\"fc_1\",\"output_index\":0}\n\n",
+            "data: [DONE]\n\n",
+        ];
+
+        let upstream = mock_upstream_stream(events);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
+        let results = collect_stream(stream).await;
+
+        let output: String = results.iter().map(|s| s.as_str()).collect();
+
+        // 三段参数 delta 各自独立出现在输出中（未被合并成一个大块）
+        assert_eq!(output.matches("\\\"q\\\":").count(), 1, "first fragment");
+        assert!(output.contains(" \\\"x\\\",\\\"n\\\":"), "second fragment must be forwarded as-is");
+        assert!(output.contains("1}"), "third fragment");
+
+        // 4 个 arguments 字段 = 初始 delta（空串）+ 3 个参数分片，全部原样
+        assert_eq!(output.matches("\"arguments\":\"").count(), 4, "initial(1) + three arg deltas(3)");
+    }
+
+    #[tokio::test]
+    async fn test_stream_malformed_chunk_skipped() {
+        // 规范 6：解析异常分片被跳过，流不中断
+        let events = vec![
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_bad\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {this is not valid json\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"still alive\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"still alive\"}]}]}}\n\n",
+            "data: [DONE]\n\n",
+        ];
+
+        let upstream = mock_upstream_stream(events);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
+        let results = collect_stream(stream).await;
+
+        let output: String = results.iter().map(|s| s.as_str()).collect();
+        assert!(output.contains("still alive"), "stream must survive malformed chunk");
+        assert!(output.contains("[DONE]"), "stream must end normally");
+        assert!(output.contains("\"finish_reason\":\"stop\""));
     }
 
     #[tokio::test]
     async fn test_stream_keepalive_heartbeat() {
-        // 验证心跳机制：长时间无数据时发送 keepalive
+        // 规范 4：验证心跳机制：长时间无数据时发送 : ping
         let config = BridgeConfig {
             heartbeat_interval_secs: 1,  // 1 秒心跳
             first_chunk_timeout_secs: 60,
@@ -1853,16 +2288,13 @@ mod tests {
             rx.recv().await.map(|item| (item, rx))
         });
 
-        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", config);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", config, None);
         let results = collect_stream(stream).await;
-
-        // 此时 tx 已被 drop（collect_stream 结束后才会到这里）
-        // 但在流处理期间，tx 保持打开 → 流不会结束 → 触发心跳
 
         let output: String = results.iter().map(|s| s.as_str()).collect();
 
-        // 验证心跳（: keepalive 注释行）
-        assert!(output.contains(": keepalive"), "should contain keepalive heartbeats");
+        // 验证心跳（: ping 注释行）
+        assert!(output.contains(": ping"), "should contain ping heartbeats");
 
         // 验证文本内容
         assert!(output.contains("Hi"), "should contain text content");
@@ -1873,11 +2305,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_idle_timeout() {
-        // 验证空闲超时：长时间无数据后强制完成
+        // 验证空闲超时：长时间无数据后强制完成（心跳不应无限续命死流）
         let config = BridgeConfig {
-            heartbeat_interval_secs: 30,
-            first_chunk_timeout_secs: 5,   // 5 秒首次超时
-            chunk_idle_timeout_secs: 5,    // 5 秒空闲超时
+            heartbeat_interval_secs: 1,   // 1 秒心跳（会持续发）
+            first_chunk_timeout_secs: 5,  // 5 秒首次超时
+            chunk_idle_timeout_secs: 5,   // 5 秒空闲超时
             session_max_duration_secs: 30,
             ..Default::default()
         };
@@ -1888,14 +2320,50 @@ mod tests {
         ];
 
         let upstream = mock_upstream_stream(events);
-        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", config);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", config, None);
+        let started = Instant::now();
         let results = collect_stream(stream).await;
+        let elapsed = started.elapsed();
 
         let output: String = results.iter().map(|s| s.as_str()).collect();
 
-        // 验证最终有完成（即使上游没发 complete）
+        // 死流必须在 idle 超时（5s）附近被清理，而不是被心跳无限续命
+        assert!(elapsed.as_secs() < 15, "idle timeout must fire despite heartbeats (elapsed={}s)", elapsed.as_secs());
+
+        // 最终有完成标记
         assert!(output.contains("finish_reason"), "should have finish_reason");
         assert!(output.contains("[DONE]"), "should end with [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_stream_complete_hook_fires() {
+        // 流结束时钩子被触发并回传 response_id
+        let hook_response_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let hook_calls: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let sink = hook_response_id.clone();
+        let calls = hook_calls.clone();
+        let hooks = StreamHooks {
+            on_complete: Some(Arc::new(move |rid, _ht, _htx, _dur| {
+                *sink.lock().unwrap() = rid;
+                *calls.lock().unwrap() += 1;
+            })),
+        };
+
+        let events = vec![
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_hook\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_hook\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n",
+            "data: [DONE]\n\n",
+        ];
+
+        let upstream = mock_upstream_stream(events);
+        let stream = transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), Some(hooks));
+        let results = collect_stream(stream).await;
+        assert!(!results.is_empty());
+
+        assert_eq!(*hook_calls.lock().unwrap(), 1, "hook should fire exactly once");
+        assert_eq!(hook_response_id.lock().unwrap().as_deref(), Some("resp_hook"));
     }
 
     #[test]
@@ -1995,7 +2463,7 @@ mod tests {
             ]
         }"#;
 
-let out = transform_chat_to_responses_request(body).expect("should succeed");
+        let out = transform_chat_to_responses_request(body).expect("should succeed");
         let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
 
         let input = v["input"].as_array().expect("input array");

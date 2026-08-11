@@ -8,6 +8,13 @@
 2. **连接提前断开** — 长时间执行工具调用时缺少保活包，链路空闲超时被网关强制切断
 3. **分片解析崩溃** — 空内容分片、分段 tool_call 参数拼接导致非法 JSON，客户端解析失败而卡死
 
+> **v2 修复（重点）**：`Agent 自动多轮连续工具调用时，完成单次 tool_call、输出一段回复文本之后
+> 会话直接终止`——根因是旧版在收到 `response.completed` / `data: [DONE]` 时立即向下游注入
+> `finish_reason: stop`，Chat 客户端（如 ChatGPT Work）收到 stop 即认为对话结束。
+> v2 改为：**终结信号只在上游 SSE 流真正结束时下发**（EOF / 超时 / 硬错误），
+> `response.completed` 与 `[DONE]` 仅更新状态；同时新增 **response_id 会话上下文续接**
+> （`previous_response_id` 注入 + 增量 input），详见 [docs/responses_api_mapping.md](docs/responses_api_mapping.md)。
+
 ---
 
 ## 一、架构总览
@@ -99,6 +106,8 @@ http://127.0.0.1:8046
 | `upstream_url` | `https://api.openai.com` | 上游 Responses API 基础 URL |
 | `api_key` | *空* | 上游 API Key（可被请求体 `api_key` 字段覆盖） |
 | `default_model` | `gpt-4o` | 请求未指定 model 时的默认模型 |
+| `context_mode` | `response_id` | 会话续接模式：`response_id`（注入 previous_response_id，默认）/ `full`（全量无状态） |
+| `max_session_contexts` | `1024` | 会话上下文缓存上限（条），超出 LRU 淘汰 |
 | `connect_timeout_secs` | `30` | 上游 **连接超时**（秒） |
 | `read_timeout_secs` | `600` | 上游 **读取超时**（秒）——整体墙钟上限，长任务务必设大 |
 | `session_max_duration_secs` | `600` | **整体会话最大时长**（秒）——超时优雅关闭 |
@@ -115,6 +124,8 @@ http://127.0.0.1:8046
 | `RESPONSES_RELAY_UPSTREAM_URL` | `upstream_url` |
 | `RESPONSES_RELAY_API_KEY` | `api_key` |
 | `RESPONSES_RELAY_MODEL` | `default_model` |
+| `RESPONSES_RELAY_CONTEXT_MODE` | `context_mode` |
+| `RESPONSES_RELAY_MAX_SESSION_CONTEXTS` | `max_session_contexts` |
 | `RESPONSES_RELAY_CONNECT_TIMEOUT` | `connect_timeout_secs` |
 | `RESPONSES_RELAY_READ_TIMEOUT` | `read_timeout_secs` |
 | `RESPONSES_RELAY_SESSION_MAX_DURATION` | `session_max_duration_secs` |
@@ -188,10 +199,15 @@ location / {
 | `response.output_item.added`（message） | 记录文本输出项 |
 | `response.output_text.delta` | `choices[0].delta.content` |
 | `response.output_item.added`（function_call） | `choices[0].delta.tool_calls[].{id,type,function.name}` |
-| `response.function_call_arguments.delta` | `choices[0].delta.tool_calls[].function.arguments` |
-| `response.completed` | `finish_reason`（有工具调用→`tool_calls`，否则`stop`） |
+| `response.function_call_arguments.delta` | `choices[0].delta.tool_calls[].function.arguments`（原始分片） |
+| `response.completed` | **仅更新状态，不注入 finish（v2 修复）** |
+| `data: [DONE]` | **仅标记，不结束流（v2 修复）** |
+| 上游流 EOF | `finish_reason`（有工具调用→`tool_calls`，否则`stop`）+ `[DONE]` |
 | `response.failed` | 错误分片 + `finish_reason:"error"` |
-| `data: [DONE]` | 流结束标记 |
+
+> **v2 终结信号规则**：`finish_reason` 只在「上游 SSE 流真正结束」时下发一次——
+> EOF / 会话超时 / 空闲超时 / 硬错误。`response.completed` 与 `[DONE]` 一律不注入
+> 终止标记，避免模型输出阶段性文本后被误判为会话结束、客户端提前终止多轮工具调用。
 
 ---
 
@@ -199,21 +215,25 @@ location / {
 
 ### 1. 多轮工具调用 index/id 上下文维护
 
-流式转换器维护一个 `tool_calls: HashMap<output_index, ToolCallState>`，以 Responses API 的 `output_index` 为键，稳定映射到 Chat Completions 的 `tool_calls[].index`。每个工具调用的 `call_id`、`name`、累积的 `arguments_buffer` 都被独立跟踪，**不会因为多个工具调用交错出现而串号**。
+流式转换器维护一个 `tool_calls: HashMap<item_id, ToolCallState>`，以 Responses API 的 **item_id 为主键**（`output_index → item_id` 辅助映射处理只带 index 的事件），稳定映射到 Chat Completions 的 `tool_calls[].index`。每个工具调用的 `call_id`、累积的 `arguments_buffer` 都被独立跟踪，**不会因为多个工具调用交错、或多个 response 的 output_index 重置而串号**。
 
 ### 2. 分段参数拼接（防非法 JSON 分片）
 
-`function_call_arguments.delta` 可能被上游拆成多个片段（如 `{"city":` + ` "Beijing"}`），转换器逐片段累积到 `arguments_buffer`，再以完整的 delta 转发。客户端侧收到的每个参数 delta 都是连贯的，不会出现截断的非法 JSON。
+`function_call_arguments.delta` 可能被上游拆成多个片段（如 `{"city":` + ` "Beijing"}`），转换器**按原始分片即时转发**（不合并、不缓冲、不截断），客户端侧按标准 Chat 协议自行拼接，保证时序一致。
 
 ### 3. SSE 分片重组
 
-部分中继会把单个 JSON 事件拆成多行物理行（Agnes 等）。`parse_sse_line` 自动累积不完整片段，直到拼成合法 JSON 再解析，避免事件被静默丢弃导致工具参数丢失。
+部分中继会把单个 JSON 事件拆成多行物理行（Agnes 等）。`parse_sse_line` 自动累积不完整片段，直到拼成合法 JSON 再解析，避免事件被静默丢弃导致工具参数丢失。解析失败的坏块**跳过并继续**，不中断整条流。
 
 ### 4. 心跳保活
 
-`heartbeat_interval_secs` 定时器驱动：上游无数据时，向下游发送标准 SSE 注释行 `: keepalive\n\n`。这是合法的 SSE 事件（客户端忽略），但能有效防止反向代理/网关因连接空闲而切断 TCP。
+`heartbeat_interval_secs` 定时器驱动：上游无数据时，向下游发送标准 SSE 注释行 `: ping\n\n`。这是合法的 SSE 事件（客户端忽略），但能有效防止反向代理/网关因连接空闲而切断 TCP。**心跳只刷新活动计时，不推迟空闲超时**——死流仍会被清理。
 
-### 5. 四层超时防线
+### 5. response_id 会话上下文续接（v2 新增）
+
+每条下游会话（key = model + 首条 user 内容哈希）缓存 `previous_response_id` 与已处理消息数；下一轮请求注入 `previous_response_id` + 增量 input，维持 Responses API 多轮工具调用链路。上游拒绝 `previous_response_id`（400/422）时自动清除缓存并以全量模式重试一次；`context_mode = "full"` 可关闭续接。
+
+### 6. 四层超时防线
 
 - **连接超时** `connect_timeout_secs`：TCP/TLS 建连
 - **读取超时** `read_timeout_secs`：reqwest 整体墙钟上限
@@ -241,12 +261,21 @@ cargo test responses_bridge
 |------|---------|
 | `test_chat_to_responses_tool_calls` | 请求方向：assistant tool_calls → function_call 项 |
 | `test_chat_to_responses_multi_tool_rounds` | **连续多轮工具调用**请求转换，call_id 不串号 |
+| `test_chat_to_responses_with_previous_response_id` | 请求注入 previous_response_id（v2） |
+| `test_chat_to_responses_incremental_mode` | 增量 input 只含新增消息（v2） |
+| `test_session_store_context` / `test_session_store_eviction` | 会话 key 稳定 / LRU 淘汰（v2） |
 | `test_stream_simple_text` | 流式：文本 delta 正确下发，finish_reason=stop |
 | `test_stream_tool_call` | 流式：单工具调用 id/name/参数完整，finish_reason=tool_calls |
 | `test_stream_multi_round_tool_calls` | **流式：两个工具调用交错，index=0/1 不串号** |
-| `test_stream_keepalive_heartbeat` | 心跳：无数据时发送 `: keepalive` |
-| `test_stream_idle_timeout` | 超时：上游死流时强制完成 + `[DONE]` |
+| `test_stream_multi_response_no_premature_stop` | **回归：多 response 连续推送（文本→工具），全流无 stop（v2）** |
+| `test_stream_done_midstream_not_terminate` | **回归：中途 [DONE] 不终结，后续事件正常下发（v2）** |
+| `test_stream_arg_deltas_forwarded_as_is` | 参数分片原样转发，不合并（v2） |
+| `test_stream_malformed_chunk_skipped` | 坏块跳过，流不中断（v2） |
+| `test_stream_keepalive_heartbeat` | 心跳：无数据时发送 `: ping` |
+| `test_stream_idle_timeout` | 超时：死流仍被清理（心跳不无限续命，v2） |
+| `test_stream_complete_hook_fires` | 流结束钩子回传 response_id（v2） |
 | `test_responses_to_chat_with_tool_calls` | 非流式：tool_calls 转换 |
+| `test_responses_to_chat_incomplete_status` | incomplete → finish_reason=length（v2） |
 
 ---
 

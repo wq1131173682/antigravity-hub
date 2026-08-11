@@ -53,7 +53,9 @@ Casks/
 deploy/
 web_site/
 docker/
-docs/
+docs/*
+# 例外：Responses 双向转换字段映射文档（随版本交付）
+!docs/responses_api_mapping.md
 workflows/
 scripts/
 .dockerignore
@@ -64,6 +66,9 @@ knowledge.md
 QWEN.md
 SETUP_NOTES.md
 DOCKER_DEPLOYMENT.md
+
+# Agent workspace memory (not part of the app)
+.workbuddy/
 
 # Temporary test files
 src/pages/test.txt

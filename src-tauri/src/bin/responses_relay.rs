@@ -6,6 +6,12 @@
 // 客户端发送标准 OpenAI /v1/chat/completions 请求 → 转换为 Responses API 格式
 // → 向上游发送 → 将 Responses API SSE 流实时转换为 Chat Completions delta 流
 //
+// 线上 BUG 修复（v2）：
+//   * response_id 会话上下文：为每条下游会话缓存 previous_response_id，
+//     多轮工具调用请求注入 previous_response_id + 增量 input，防止上下文断裂
+//   * 上游拒绝 previous_response_id 时自动降级为全量模式并重试一次
+//   * 终结信号只在流真正结束时下发（详见 responses_bridge.rs）
+//
 // 启动方式：
 //   cargo run --bin responses_relay
 //   cargo run --bin responses_relay -- --config /path/to/config.toml
@@ -16,6 +22,8 @@
 //   RESPONSES_RELAY_UPSTREAM_URL=https://api.openai.com
 //   RESPONSES_RELAY_API_KEY=sk-xxx
 //   RESPONSES_RELAY_MODEL=gpt-4o
+//   RESPONSES_RELAY_CONTEXT_MODE=response_id|full
+//   RESPONSES_RELAY_MAX_SESSION_CONTEXTS=1024
 //   RESPONSES_RELAY_HEARTBEAT_INTERVAL=15
 //   RESPONSES_RELAY_CONNECT_TIMEOUT=30
 //   RESPONSES_RELAY_READ_TIMEOUT=600
@@ -38,14 +46,17 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn, error};
 
 // ── 确保 responses_bridge 模块可见 ──
-// 注：此二进制文件在 src-tauri 包内，但以独立二进制方式运行
-// 需要引用项目内的模块。由于 Cargo 二进制文件不能直接引用 lib 模块，
-// 我们在此重写/引用 responses_bridge 模块。
-// 实际上，我们直接使用嵌入式方式。
+// 注：本二进制以 #[path] 内联该模块；其中部分类型（SessionStore 等）仅在本
+// 二进制内构造，在 lib 目标视角下不可达，故允许 dead_code。
 #[path = "../modules/responses_bridge.rs"]
+#[allow(dead_code)]
 mod responses_bridge;
 
-use responses_bridge::{BridgeConfig, transform_chat_to_responses_request, transform_responses_stream_to_chat, transform_responses_to_chat_completions};
+use responses_bridge::{
+    BridgeConfig, RequestContext, SessionContext, SessionStore, StreamHooks,
+    transform_chat_to_responses_request, transform_chat_to_responses_request_ctx,
+    transform_responses_stream_to_chat, transform_responses_to_chat_completions,
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // 配置
@@ -74,6 +85,14 @@ pub struct RelayConfig {
     /// 默认模型名称（当请求中未指定时使用）
     #[arg(long, default_value = "gpt-4o", env = "RESPONSES_RELAY_MODEL")]
     pub default_model: String,
+
+    /// 会话上下文模式："response_id"（多轮续接，默认）| "full"（全量无状态）
+    #[arg(long, default_value = "response_id", env = "RESPONSES_RELAY_CONTEXT_MODE")]
+    pub context_mode: String,
+
+    /// 会话上下文缓存上限（条目数）
+    #[arg(long, default_value_t = 1024, env = "RESPONSES_RELAY_MAX_SESSION_CONTEXTS")]
+    pub max_session_contexts: usize,
 
     // ── 超时与心跳配置 ──
     /// 上游连接超时（秒）
@@ -119,6 +138,10 @@ impl RelayConfig {
             chunk_idle_timeout_secs: self.chunk_idle_timeout_secs,
         }
     }
+
+    pub fn use_response_id_context(&self) -> bool {
+        self.context_mode.eq_ignore_ascii_case("response_id")
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -129,6 +152,7 @@ impl RelayConfig {
 struct AppState {
     config: Arc<RelayConfig>,
     http_client: reqwest::Client,
+    sessions: Arc<SessionStore>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -157,6 +181,9 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
         config: serde_json::json!({
             "host": state.config.host,
             "port": state.config.port,
+            "context_mode": state.config.context_mode,
+            "max_session_contexts": state.config.max_session_contexts,
+            "active_session_contexts": state.sessions.len(),
             "connect_timeout_secs": state.config.connect_timeout_secs,
             "read_timeout_secs": state.config.read_timeout_secs,
             "session_max_duration_secs": state.config.session_max_duration_secs,
@@ -217,6 +244,89 @@ async fn proxy_handler(
     }
 }
 
+/// 判断上游错误体是否与 previous_response_id 相关（用于自动降级）
+fn is_context_error(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    lower.contains("previous_response_id")
+        || lower.contains("previous_response")
+        || lower.contains("previous response")
+        || lower.contains("previous_response_id")
+}
+
+/// 构造上游错误响应（解析 Responses 错误格式 → Chat 错误格式）
+fn upstream_error_response(status_code: StatusCode, body: &str) -> Response {
+    if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(body) {
+        let err = err_json.get("error").cloned().unwrap_or(err_json);
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": {
+                    "message": err.get("message").and_then(|m| m.as_str()).unwrap_or("Upstream error"),
+                    "code": err.get("code").and_then(|c| c.as_str()).unwrap_or("upstream_error"),
+                    "type": "upstream_error"
+                }
+            })),
+        ).into_response();
+    }
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(serde_json::json!({
+            "error": {"message": format!("Upstream error: HTTP {}", status_code), "type": "upstream_error"}
+        })),
+    ).into_response()
+}
+
+/// 向上游发送 Responses API 请求
+async fn send_upstream_request(
+    state: &AppState,
+    body: Vec<u8>,
+    api_key: &str,
+    user_agent: Option<&str>,
+) -> Result<reqwest::Response, String> {
+    let upstream_base = state.config.upstream_url.trim_end_matches('/');
+    let upstream_url = format!("{}/v1/responses", upstream_base);
+
+    let mut req_builder = state.http_client
+        .post(&upstream_url)
+        .header("Content-Type", "application/json")
+        .body(body);
+
+    if !api_key.is_empty() {
+        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+    if let Some(ua) = user_agent {
+        if !ua.is_empty() {
+            req_builder = req_builder.header("User-Agent", ua);
+        }
+    }
+
+    req_builder.send().await
+        .map_err(|e| format!("Upstream connection failed: {}", e))
+}
+
+/// 非流式响应场景：从上游响应体中提取 response_id 回写会话上下文
+fn maybe_update_session(
+    state: &AppState,
+    key: &str,
+    upstream_body: &[u8],
+    messages_len: usize,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(upstream_body) {
+        if let Some(rid) = v.get("id").and_then(|i| i.as_str()) {
+            if !rid.is_empty() {
+                state.sessions.update(key, SessionContext {
+                    previous_response_id: Some(rid.to_string()),
+                    processed_msg_len: messages_len,
+                });
+            }
+        }
+    }
+}
+
 /// 处理 Chat Completions 请求
 async fn handle_chat_completions(
     state: AppState,
@@ -246,6 +356,7 @@ async fn handle_chat_completions(
             ).into_response();
         }
     };
+    let body_bytes_original = body_bytes.to_vec();
 
     // 解析请求体，判断是否 streaming
     let original_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
@@ -269,211 +380,218 @@ async fn handle_chat_completions(
         .and_then(|k| k.as_str())
         .map(|s| s.to_string());
 
-    // 翻译请求体为 Responses API 格式
-    let translated_body = match transform_chat_to_responses_request(&body_bytes) {
-        Some(b) => b,
-        None => {
-            warn!("Failed to translate request body to Responses API format");
-            // 降级：使用原始请求体直接发送
-            body_bytes.to_vec()
-        }
-    };
+    // ── 会话上下文（response_id 多轮续接）──
+    let messages: Vec<serde_json::Value> = original_json.get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let messages_len = messages.len();
+    let use_response_id = state.config.use_response_id_context();
+    let session_key = SessionStore::key_for_request(&model_name, &messages);
+    let session_ctx = state.sessions.get(&session_key);
 
-    // 构建上游请求 URL
-    let upstream_base = state.config.upstream_url.trim_end_matches('/').to_string();
-    // Responses API 端点
-    let upstream_url = format!("{}/v1/responses", upstream_base);
+    // 构建转换后请求体
+    let (translated_body, used_context) = if use_response_id {
+        // 增量模式：有 previous_response_id 时只发送新增消息，其余由上下文携带
+        let incremental_from = if session_ctx.previous_response_id.is_some() {
+            if messages_len > session_ctx.processed_msg_len {
+                Some(session_ctx.processed_msg_len)
+            } else {
+                Some(messages_len) // 无新增消息：空增量（上下文由 previous_response_id 携带）
+            }
+        } else {
+            None
+        };
+        let ctx = RequestContext {
+            previous_response_id: session_ctx.previous_response_id.clone(),
+            incremental_from,
+        };
+        match transform_chat_to_responses_request_ctx(&body_bytes, &ctx) {
+            Some(b) => (b, true),
+            None => (body_bytes_original.clone(), false),
+        }
+    } else {
+        (
+            transform_chat_to_responses_request(&body_bytes)
+                .unwrap_or_else(|| body_bytes_original.clone()),
+            false,
+        )
+    };
 
     // 获取 API Key
     let effective_api_key = api_key.unwrap_or_else(|| state.config.api_key.clone());
 
-    // 构建上游请求
-    let mut req_builder = state.http_client
-        .post(&upstream_url)
-        .header("Content-Type", "application/json")
-        .body(translated_body);
-
-    if !effective_api_key.is_empty() {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", effective_api_key));
-    }
-
-    // 转发客户端请求中的一些头信息
-    if let Some(ct) = headers.get("content-type") {
-        // 保留原始 content-type
-    }
-    // 转发用户代理
-    if let Some(ua) = headers.get("user-agent") {
-        req_builder = req_builder.header("User-Agent", ua.clone());
-    }
+    // 转发 user-agent（若有）
+    let user_agent = headers.get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     info!(
-        "Forwarding Chat Completions request → Responses API upstream: {} (model={}, stream={})",
-        upstream_url, model_name, is_streaming
+        "Forwarding Chat Completions request → Responses API upstream (model={}, stream={}, context={}, session_key={})",
+        model_name, is_streaming, state.config.context_mode, session_key
     );
+
+    // ── 发送上游请求 ──
+    let mut upstream_resp = match send_upstream_request(
+        &state, translated_body.clone(), &effective_api_key, user_agent.as_deref(),
+    ).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            error!("{}", e);
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": {"message": e, "type": "upstream_error"}
+                })),
+            ).into_response();
+        }
+    };
+
+    // ── 降级：上游拒绝 previous_response_id → 清除上下文缓存，全量模式重试一次 ──
+    if used_context
+        && (upstream_resp.status() == StatusCode::BAD_REQUEST
+            || upstream_resp.status() == StatusCode::UNPROCESSABLE_ENTITY
+            || upstream_resp.status() == StatusCode::NOT_FOUND)
+    {
+        let err_body = upstream_resp.text().await.unwrap_or_default();
+        if is_context_error(&err_body) {
+            warn!(
+                "Upstream rejected previous_response_id (session={}), falling back to full context mode: {}",
+                session_key, err_body
+            );
+            state.sessions.clear(&session_key);
+            let full_body = transform_chat_to_responses_request(&body_bytes_original)
+                .unwrap_or_else(|| body_bytes_original.clone());
+            match send_upstream_request(&state, full_body, &effective_api_key, user_agent.as_deref()).await {
+                Ok(resp) => {
+                    upstream_resp = resp;
+                }
+                Err(e) => {
+                    error!("{}", e);
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({
+                            "error": {"message": e, "type": "upstream_error"}
+                        })),
+                    ).into_response();
+                }
+            }
+        } else {
+            return upstream_error_response(StatusCode::BAD_REQUEST, &err_body);
+        }
+    }
+
+    let status = upstream_resp.status();
+
+    if !status.is_success() {
+        let error_body = upstream_resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        warn!("Upstream returned HTTP {}: {}", status, error_body);
+        return upstream_error_response(status, &error_body);
+    }
 
     if is_streaming {
         // ── 流式响应 ──
-        match req_builder.send().await {
-            Ok(upstream_resp) => {
-                let status = upstream_resp.status();
+        // 检测上游响应是否为流式
+        let is_upstream_streaming = upstream_resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.contains("text/event-stream"))
+            .unwrap_or(false);
 
-                if !status.is_success() {
-                    // 非成功状态码，读取错误体
-                    let error_body = upstream_resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                    warn!("Upstream returned HTTP {}: {}", status, error_body);
-
-                    // 尝试解析为 Responses API 错误格式
-                    if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&error_body) {
-                        // 转换为 Chat Completions 错误格式
-                        return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                            "error": {
-                                "message": err_json.get("error")
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or(&error_body),
-                                "code": err_json.get("error")
-                                    .and_then(|e| e.get("code"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("upstream_error"),
-                                "type": "upstream_error"
-                            }
-                        }))).into_response();
-                    }
-
-                    return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                        "error": {"message": format!("Upstream error: HTTP {}", status), "type": "upstream_error"}
-                    }))).into_response();
-                }
-
-                // 检测上游响应是否为流式
-                let is_upstream_streaming = upstream_resp.headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|v| v.contains("text/event-stream"))
-                    .unwrap_or(false);
-
-                if is_upstream_streaming {
-                    // 翻译 Responses API SSE 流 → Chat Completions delta 流
-                    let bridge_config = state.config.bridge_config();
-                    let chat_stream = transform_responses_stream_to_chat(
-                        upstream_resp.bytes_stream(),
-                        &model_name,
-                        bridge_config,
-                    );
-
-                    let body = axum::body::Body::from_stream(chat_stream);
-                    Response::builder()
-                        .status(200)
-                        .header("Content-Type", "text/event-stream; charset=utf-8")
-                        .header("Cache-Control", "no-cache")
-                        .header("Connection", "keep-alive")
-                        .header("X-Accel-Buffering", "no")
-                        .body(body)
-                        .unwrap_or_else(|_| {
-                            Response::new(axum::body::Body::from("data: [DONE]\n\n"))
-                        })
-                } else {
-                    // 非流式响应，翻译后直接返回
-                    let body_bytes = match upstream_resp.bytes().await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                                "error": {"message": format!("Failed to read upstream response: {}", e)}
-                            }))).into_response();
-                        }
-                    };
-
-                    let translated = transform_responses_to_chat_completions(&body_bytes)
-                        .unwrap_or(body_bytes.to_vec());
-
-                    Response::builder()
-                        .status(200)
-                        .header("Content-Type", "application/json")
-                        .body(axum::body::Body::from(translated))
-                        .unwrap_or_else(|_| {
-                            Response::new(axum::body::Body::from("{}"))
-                        })
-                }
-            }
-            Err(e) => {
-                error!("Upstream connection failed: {}", e);
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": format!("Upstream connection failed: {}", e),
-                            "type": "upstream_error"
+        if is_upstream_streaming {
+            // 流结束钩子：回写 response_id 上下文（多轮续接）
+            let sessions = state.sessions.clone();
+            let key_for_hook = session_key.clone();
+            let hooks = if use_response_id {
+                Some(StreamHooks {
+                    on_complete: Some(Arc::new(move |resp_id, _ht, _htx, _dur| {
+                        if let Some(rid) = resp_id {
+                            sessions.update(&key_for_hook, SessionContext {
+                                previous_response_id: Some(rid),
+                                processed_msg_len: messages_len,
+                            });
                         }
                     })),
-                ).into_response()
-            }
+                })
+            } else {
+                None
+            };
+
+            // 翻译 Responses API SSE 流 → Chat Completions delta 流
+            let bridge_config = state.config.bridge_config();
+            let chat_stream = transform_responses_stream_to_chat(
+                upstream_resp.bytes_stream(),
+                &model_name,
+                bridge_config,
+                hooks,
+            );
+
+            let body = axum::body::Body::from_stream(chat_stream);
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "text/event-stream; charset=utf-8")
+                .header("Cache-Control", "no-cache")
+                .header("Connection", "keep-alive")
+                .header("X-Accel-Buffering", "no")
+                .body(body)
+                .unwrap_or_else(|_| {
+                    Response::new(axum::body::Body::from("data: [DONE]\n\n"))
+                })
+        } else {
+            // 客户端请求流式，但上游返回非流式 → 读取完整响应并翻译后返回
+            let body_bytes = match upstream_resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                        "error": {"message": format!("Failed to read upstream response: {}", e)}
+                    }))).into_response();
+                }
+            };
+
+            // 非流式同样回写 response_id
+            maybe_update_session(&state, &session_key, &body_bytes, messages_len, use_response_id);
+
+            let translated = transform_responses_to_chat_completions(&body_bytes)
+                .unwrap_or(body_bytes.to_vec());
+
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(translated))
+                .unwrap_or_else(|_| {
+                    Response::new(axum::body::Body::from("{}"))
+                })
         }
     } else {
         // ── 非流式响应 ──
-        match req_builder.send().await {
-            Ok(upstream_resp) => {
-                let status = upstream_resp.status();
-                let body_bytes = match upstream_resp.bytes().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                            "error": {"message": format!("Failed to read upstream response: {}", e)}
-                        }))).into_response();
-                    }
-                };
-
-                if !status.is_success() {
-                    // 转发错误
-                    if let Ok(err_json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                        return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                            "error": {
-                                "message": err_json.get("error")
-                                    .and_then(|e| e.get("message"))
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("Upstream error"),
-                                "code": err_json.get("error")
-                                    .and_then(|e| e.get("code"))
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("upstream_error")
-                            }
-                        }))).into_response();
-                    }
-                    let error_text = String::from_utf8_lossy(&body_bytes);
-                    return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                        "error": {"message": format!("Upstream HTTP {}: {}", status, error_text)}
-                    }))).into_response();
-                }
-
-                // 翻译 Response API 响应为 Chat Completions 格式
-                let translated = match transform_responses_to_chat_completions(&body_bytes) {
-                    Some(b) => b,
-                    None => {
-                        warn!("Failed to translate Responses API response, returning raw body");
-                        body_bytes.to_vec()
-                    }
-                };
-
-                Response::builder()
-                    .status(200)
-                    .header("Content-Type", "application/json")
-                    .body(axum::body::Body::from(translated))
-                    .unwrap_or_else(|_| {
-                        Response::new(axum::body::Body::from("{}"))
-                    })
-            }
+        let body_bytes = match upstream_resp.bytes().await {
+            Ok(b) => b,
             Err(e) => {
-                error!("Upstream connection failed: {}", e);
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({
-                        "error": {
-                            "message": format!("Upstream connection failed: {}", e),
-                            "type": "upstream_error"
-                        }
-                    })),
-                ).into_response()
+                return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
+                    "error": {"message": format!("Failed to read upstream response: {}", e)}
+                }))).into_response();
             }
-        }
+        };
+
+        // 回写 response_id（多轮续接）
+        maybe_update_session(&state, &session_key, &body_bytes, messages_len, use_response_id);
+
+        // 翻译 Response API 响应为 Chat Completions 格式
+        let translated = match transform_responses_to_chat_completions(&body_bytes) {
+            Some(b) => b,
+            None => {
+                warn!("Failed to translate Responses API response, returning raw body");
+                body_bytes.to_vec()
+            }
+        };
+
+        Response::builder()
+            .status(200)
+            .header("Content-Type", "application/json")
+            .body(axum::body::Body::from(translated))
+            .unwrap_or_else(|_| {
+                Response::new(axum::body::Body::from("{}"))
+            })
     }
 }
 
@@ -481,7 +599,7 @@ async fn handle_chat_completions(
 async fn handle_responses_pass_through(
     state: AppState,
     method: Method,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
     if method != Method::POST {
@@ -508,25 +626,14 @@ async fn handle_responses_pass_through(
         }
     };
 
-    let is_streaming = original_json.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let _is_streaming = original_json.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
     let api_key = original_json.get("api_key")
         .and_then(|k| k.as_str())
         .map(|s| s.to_string());
 
-    let upstream_base = state.config.upstream_url.trim_end_matches('/').to_string();
-    let upstream_url = format!("{}/v1/responses", upstream_base);
     let effective_api_key = api_key.unwrap_or_else(|| state.config.api_key.clone());
 
-    let mut req_builder = state.http_client
-        .post(&upstream_url)
-        .header("Content-Type", "application/json")
-        .body(body_bytes);
-
-    if !effective_api_key.is_empty() {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", effective_api_key));
-    }
-
-    match req_builder.send().await {
+    match send_upstream_request(&state, body_bytes.to_vec(), &effective_api_key, None).await {
         Ok(upstream_resp) => {
             let status = upstream_resp.status();
             // 在消费 body 前捕获 content-type
@@ -563,7 +670,7 @@ async fn handle_responses_pass_through(
         }
         Err(e) => {
             (StatusCode::BAD_GATEWAY, Json(serde_json::json!({
-                "error": {"message": format!("Upstream connection failed: {}", e)}
+                "error": {"message": e, "type": "upstream_error"}
             }))).into_response()
         }
     }
@@ -592,7 +699,6 @@ async fn main() {
     if let Ok(config_path) = std::env::var("RESPONSES_RELAY_CONFIG") {
         match RelayConfig::from_toml(&config_path) {
             Ok(file_config) => {
-                // 环境变量覆盖文件配置
                 config = file_config;
                 // 环境变量再次覆盖
                 if let Ok(v) = std::env::var("RESPONSES_RELAY_PORT") {
@@ -606,6 +712,12 @@ async fn main() {
                 }
                 if let Ok(v) = std::env::var("RESPONSES_RELAY_API_KEY") {
                     config.api_key = v;
+                }
+                if let Ok(v) = std::env::var("RESPONSES_RELAY_CONTEXT_MODE") {
+                    config.context_mode = v;
+                }
+                if let Ok(v) = std::env::var("RESPONSES_RELAY_MAX_SESSION_CONTEXTS") {
+                    config.max_session_contexts = v.parse().unwrap_or(config.max_session_contexts);
                 }
                 info!("Loaded config from: {}", config_path);
             }
@@ -622,6 +734,8 @@ async fn main() {
     info!("  监听地址:    {}:{}", config.host, config.port);
     info!("  上游 URL:    {}", config.upstream_url);
     info!("  默认模型:    {}", config.default_model);
+    info!("  上下文模式:  {} (多轮续接)", config.context_mode);
+    info!("  会话缓存上限: {}", config.max_session_contexts);
     info!("  心跳间隔:    {}s", config.heartbeat_interval_secs);
     info!("  连接超时:    {}s", config.connect_timeout_secs);
     info!("  读取超时:    {}s", config.read_timeout_secs);
@@ -643,9 +757,11 @@ async fn main() {
         .build()
         .expect("Failed to build HTTP client");
 
+    let max_session_contexts = config.max_session_contexts;
     let state = AppState {
         config: Arc::new(config),
         http_client,
+        sessions: Arc::new(SessionStore::with_capacity(max_session_contexts)),
     };
 
     // 在 move 前捕获需要的信息
@@ -658,8 +774,8 @@ async fn main() {
         .route("/chat/completions", any(proxy_handler))
         .route("/v1/responses", any(proxy_handler))
         .route("/responses", any(proxy_handler))
-        .route("/v1/models", any(proxy_handler))
-        .route("/models", any(proxy_handler))
+        .route("/v1/models", any(models_handler))
+        .route("/models", any(models_handler))
         .route("/health", any(health_handler))
         .route("/", any(proxy_handler))
         .with_state(state);
