@@ -2,6 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.4] - 2026-08-11
+
+### 修复
+- **WorkBuddy 首次对话直接结束 / 对话中断**：根因是 `extract_json_from_http_text` 只识别标准的 `\r\n\r\n`（或 `\n\n`）空行分隔符。WorkBuddy 把首条聊天请求以「完整 HTTP/1.1 报文」作为 POST body 发送，且头部与内嵌 JSON 之间**仅用单个 `\r\n` 分隔**（缺少标准空行）。此时提取失败，请求被误判为「会话探测」并直接返回空 `200`，真实的首条消息被静默丢弃——表现为首次对话无输出即结束；后续同样格式的消息也可能被丢弃，表现为对话中断
+  - 修复：缺省空行分隔符时，回退到从第一个 `{` 定位内嵌 JSON 并做 JSON 校验；仅当确实无任何 JSON（纯探测）时才交给调用方按探测处理。标准 `\r\n\r\n` / `\n\n` 与单 CRLF / 单 LF 三种格式均正确提取
+  - 新增带 mock upstream 的端到端集成测试，复现并锁死该回归（首请求必须被转发、响应含上游 SSE 内容）；新增 3 个单测覆盖单 CRLF / 单 LF / 纯探测场景
+
+### 修复
+- **ChatGPT Work / 其他 Chat Completions 客户端「输出回应后再次调用工具时中断」**：根因是 `proxy.rs` 的 Chat Completions 流式分支是**纯透传**，没有任何心跳保活。当上游（特别是 Anthropic / 含 reasoning 的模型）在发出文本后转到 tool_call 之前的 reasoning 阶段停顿超过客户端 SSE 空闲超时（多数 SSE 客户端 30-60s 主动断开空闲连接），客户端会断开 socket、上游仍在写的 tool_call 全部丢失，表现为「输出回应后再次调用工具中断」
+  - 修复：新增 `SseKeepaliveStream` 适配器在 `proxy.rs` Chat Completions 透传路径上每 25 秒注入一次 SSE 注释帧 `: ping\n\n`。注释帧是 SSE 标准规定的客户端丢弃项，不会影响任何 SSE 解析器，也不会被模型当作内容消费
+  - 真正有数据的 chunk 之间不注入心跳（计时器在收到任何上游字节后完整重置），上游真结束时立即透传 EOF 而不是继续伪造心跳
+  - Responses API 路径（`codex_translator::transform_stream_to_responses`）原本就已有心跳逻辑，**不重复叠加**
+  - 4 个新单测覆盖：常量形状、数据连续流（不应有 ping）、上游结束（不应有 ping 后续）、永久静止流（必须有 ping）
+  - 新增 `bytes = "1"` 显示依赖（之前 `bytes::Bytes` 通过 reqwest 传递依赖使用，理论上不安全）
+
 ## [5.3.3] - 2026-08-11
 
 ### 修复

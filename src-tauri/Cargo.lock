@@ -93,10 +93,11 @@ dependencies = [
 
 [[package]]
 name = "antigravity_tools"
-version = "5.3.3"
+version = "5.3.4"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "chrono",
  "clap",
  "dirs 5.0.1",

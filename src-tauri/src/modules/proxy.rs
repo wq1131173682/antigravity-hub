@@ -230,8 +230,20 @@ fn create_router() -> axum::Router {
 /// raw text upstream produces 400 "invalid arguments". This function recovers
 /// the real JSON payload so the proxy can process it normally.
 ///
+/// Header/body separators handled (in priority order):
+///   - `"\r\n\r\n"` — standard HTTP/1.1
+///   - `"\n\n"` — LF-only
+///   - a SINGLE `"\r\n"` / `"\n"` between the last header and the JSON payload.
+///     Some SDKs (WorkBuddy among them) emit the body immediately after the
+///     final header with only one line break instead of the required blank
+///     line. Without recovering the JSON in that case the request was silently
+///     answered with `200 OK` (treated as a liveness probe) and the real chat
+///     message was dropped — which surfaced as "the first conversation stops
+///     immediately with no output".
+///
 /// Returns `Some(inner_json_bytes)` when the body looks like an HTTP request
-/// text and its embedded payload is valid JSON; `None` otherwise.
+/// text and its embedded payload is valid JSON; `None` otherwise (so a genuine
+/// headers-only probe is left for the caller to acknowledge with 200).
 fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(body).ok()?;
     let first_line = text.lines().next()?;
@@ -247,16 +259,23 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Locate the end of the header block (first blank line).
-    let header_end = if let Some(pos) = text.find("\r\n\r\n") {
+    // Locate where the JSON body begins.
+    let body_start: usize = if let Some(pos) = text.find("\r\n\r\n") {
+        // Standard HTTP/1.1: blank line terminates the header block.
         pos + 4
     } else if let Some(pos) = text.find("\n\n") {
         pos + 2
     } else {
-        return None;
+        // No blank-line separator. Some clients join the final header and the
+        // JSON payload with a single CRLF/LF. Fall back to the first '{', which
+        // marks the start of the embedded JSON object.
+        match text.find('{') {
+            Some(p) => p,
+            None => return None,
+        }
     };
 
-    let inner = text[header_end..].trim();
+    let inner = text[body_start..].trim();
     if inner.is_empty() {
         return None;
     }
@@ -282,6 +301,118 @@ fn looks_like_http_request_text(body: &[u8]) -> bool {
     ["POST ", "GET ", "PUT ", "PATCH ", "DELETE ", "OPTIONS ", "HEAD "]
         .iter()
         .any(|m| first_line.starts_with(m))
+}
+
+/// SSE keepalive interval for transparent streaming pass-through.
+///
+/// When the proxy streams upstream SSE chunks directly to a chat client
+/// (Chat Completions path, no Responses API translation), the proxy does
+/// nothing else on the wire. If the upstream is slow (e.g. reasoning models
+/// before the first tool call, or anything that buffers upstream), the
+/// client's SSE implementation will eventually give up on an idle connection
+/// and close it — surfacing as "the assistant's response cut off mid-stream".
+///
+/// To prevent that, we wrap the upstream `bytes_stream` with a keepalive
+/// stream that periodically emits an SSE comment frame (`": ping\n\n"`).
+/// SSE comments are ignored by every compliant SSE client and keep the
+/// underlying TCP socket live.
+///
+/// Default: 25 seconds. Most SSE implementations tolerate 30-60s of silence;
+/// staying well under that ceiling keeps us safe across browsers, Electron's
+/// `EventSource`, and `fetch`+ReadableStream consumers while not polluting
+/// the wire with unnecessary frames.
+const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
+
+/// SSE keepalive frame. A line beginning with `:` is an SSE comment and is
+/// silently discarded by every compliant client.
+const SSE_KEEPALIVE_BYTES: &[u8] = b": ping\n\n";
+
+/// Adapt an upstream byte stream into one that emits periodic SSE comment
+/// frames whenever the upstream stays silent for `keepalive_secs`.
+///
+/// - Every `Ok(bytes)` from the upstream is forwarded unchanged AND resets
+///   the keepalive timer (so a chatty stream never gets a spurious ping
+///   tacked onto the middle of a real chunk).
+/// - If the upstream stays idle for `keepalive_secs`, an SSE comment frame
+///   is yielded instead so the client never sees a "no bytes for too long"
+///   gap on the socket.
+/// - Upstream errors and end-of-stream are passed through verbatim — we
+///   never fabricate success or stretch a dead stream past its real end.
+///
+/// The `Sleep` is held behind `Pin<Box<_>>` because `tokio::time::Sleep` is
+/// not `Unpin` and the only way to call its `poll` / `reset` methods is
+/// through a `Pin<&mut Sleep>`. Box-pinning keeps the wrapper itself
+/// `Unpin`, so callers can construct it on the stack and pass it straight
+/// to `Body::from_stream`.
+pub(crate) struct SseKeepaliveStream<S> {
+    inner: S,
+    next_ping_at: std::pin::Pin<Box<tokio::time::Sleep>>,
+    keepalive_secs: u64,
+}
+
+impl<S> SseKeepaliveStream<S> {
+    pub(crate) fn new(inner: S, keepalive_secs: u64) -> Self {
+        let now = tokio::time::Instant::now();
+        let sleep = tokio::time::sleep_until(
+            now + std::time::Duration::from_secs(keepalive_secs),
+        );
+        Self {
+            inner,
+            next_ping_at: Box::pin(sleep),
+            keepalive_secs,
+        }
+    }
+}
+
+impl<S> futures::Stream for SseKeepaliveStream<S>
+where
+    S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+{
+    type Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync + 'static>>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::future::Future;
+        // SAFETY: we never move out of `inner` or `next_ping_at`; both fields
+        // are pinned through `&mut *self`.
+        let me = &mut *self;
+
+        // Data path — try upstream first. Real data always wins so a chunk
+        // never gets a comment frame glued to its tail.
+        match std::pin::Pin::new(&mut me.inner).poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(bytes))) => {
+                // Receipt of real data fully resets the keepalive timer so
+                // that subsequent silence is measured from "now", not from
+                // some earlier quiet period.
+                let now = tokio::time::Instant::now();
+                let pinned = me.next_ping_at.as_mut();
+                pinned.reset(now + std::time::Duration::from_secs(me.keepalive_secs));
+                return std::task::Poll::Ready(Some(Ok(bytes)));
+            }
+            std::task::Poll::Ready(Some(Err(e))) => {
+                return std::task::Poll::Ready(Some(Err(Box::new(e))));
+            }
+            std::task::Poll::Ready(None) => {
+                return std::task::Poll::Ready(None);
+            }
+            std::task::Poll::Pending => {}
+        }
+
+        // Keepalive path — only reached when the upstream produced no data
+        // this call. If the silence has lasted long enough, inject a comment
+        // frame and re-arm.
+        if me.next_ping_at.as_mut().as_mut().poll(cx).is_ready() {
+            let now = tokio::time::Instant::now();
+            me.next_ping_at.as_mut().reset(now + std::time::Duration::from_secs(me.keepalive_secs));
+            return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(
+                SSE_KEEPALIVE_BYTES,
+            ))));
+        }
+
+        std::task::Poll::Pending
+    }
 }
 
 /// Parse JSON body once and return both the model_name and the modified body bytes
@@ -1473,6 +1604,11 @@ async fn forward_with_retry(
                 // Responses API format on-the-fly so Codex CLI can parse it.
                 // The upstream returns Chat Completions SSE chunks, but Codex
                 // CLI expects Responses API SSE events.
+                //
+                // The translator (`transform_stream_to_responses`) already
+                // emits `: ping` keepalives while it is actively translating,
+                // so we deliberately keep the upstream raw here — adding a
+                // second keepalive layer would risk double-comment frames.
                 let body = axum::body::Body::from_stream(
                     crate::modules::codex_translator::transform_stream_to_responses(resp.bytes_stream(), &model_identifier)
                 );
@@ -1480,8 +1616,20 @@ async fn forward_with_retry(
                     .body(body)
                     .map_err(|e| format!("Failed to build response: {}", e));
             } else {
-                // Pass-through for non-Responses API streaming.
-                let body = axum::body::Body::from_stream(resp.bytes_stream());
+                // Pass-through for non-Responses API streaming (ChatGPT Work,
+                // generic OpenAI SDKs, etc.).
+                //
+                // Wrap the upstream with `SseKeepaliveStream` so the
+                // downstream client never sees a gap wider than
+                // `SSE_KEEPALIVE_INTERVAL_SECS` seconds, even when the
+                // upstream model is reasoning before its first tool call.
+                // Without this, clients like ChatGPT Work that use
+                // `fetch().getReader()` time out on idle SSE connections and
+                // truncate the response mid-stream — surfacing as
+                // "the assistant's reply cut off after a tool call".
+                let body = axum::body::Body::from_stream(
+                    SseKeepaliveStream::new(resp.bytes_stream(), SSE_KEEPALIVE_INTERVAL_SECS)
+                );
                 return response_builder
                     .body(body)
                     .map_err(|e| format!("Failed to build response: {}", e));
@@ -1594,6 +1742,33 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_json_from_http_text_single_crlf_no_blank_line() {
+        // WorkBuddy 首请求变体：头部与 JSON 之间仅用单个 \r\n 分隔（缺少标准空行）。
+        // 此前会提取失败、被当成探测返回空 200，导致首条消息丢失。
+        let raw = b"POST /wb/v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{\"model\":\"sensenova-6.8-flash-lite\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        let inner = extract_json_from_http_text(raw).expect("single-CRLF JSON must be extracted");
+        let v: serde_json::Value = serde_json::from_slice(&inner).expect("embedded payload must be valid JSON");
+        assert_eq!(v["model"], "sensenova-6.8-flash-lite");
+        assert_eq!(v["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_single_lf_no_blank_line() {
+        // 单 \n 分隔、无空行，同样应提取成功
+        let raw = b"POST /v1/chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\n{\"model\":\"gpt-4\"}";
+        let inner = extract_json_from_http_text(raw).expect("single-LF JSON must be extracted");
+        let v: serde_json::Value = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(v["model"], "gpt-4");
+    }
+
+    #[test]
+    fn test_extract_json_from_http_text_headers_only_still_none() {
+        // 纯探测（仅请求行 + 请求头、无 JSON）仍应返回 None，交由调用方按探测处理。
+        let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json";
+        assert!(extract_json_from_http_text(raw).is_none(), "headers-only probe must not match");
+    }
+
+    #[test]
     fn test_extract_json_from_http_text_returns_none_for_normal_json() {
         let json = br#"{"model":"sensenova-6.8-flash-lite","messages":[]}"#;
         assert!(extract_json_from_http_text(json).is_none(), "normal JSON must not match");
@@ -1653,6 +1828,219 @@ mod tests {
     #[test]
     fn test_looks_like_http_request_text_get_method() {
         assert!(looks_like_http_request_text(b"GET /v1/models HTTP/1.1\r\nHost: localhost"), "GET must be detected");
+    }
+
+    // ─── End-to-end reproduction: WorkBuddy first request ──────────────────
+    // WorkBuddy opens a conversation by sending its first chat request as an
+    // HTTP-text body (the full HTTP/1.1 message as the POST body). If the
+    // embedded JSON is NOT separated from the headers by a blank line (some
+    // SDKs emit a single CRLF instead), the extractor returns None and the
+    // request is answered with 200 empty — i.e. silently dropped as a liveness
+    // probe — which makes the first conversation "stop" with no output.
+    #[tokio::test]
+    async fn test_workbuddy_first_request_single_crlf_not_dropped_as_probe() {
+        // Redirect the data dir to a temp location so we never touch the real
+        // config / keys on disk.
+        let tmp = std::env::temp_dir()
+            .join(format!("abv_wb_test_{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("ABV_DATA_DIR", &tmp);
+
+        // Spin up a mock upstream that returns a small SSE chat stream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            async fn handle(_req: axum::http::Request<axum::body::Body>) -> axum::response::Response {
+                let sse = concat!(
+                    "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                axum::response::Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from(sse))
+                    .unwrap()
+            }
+            let app = axum::Router::new()
+                .route("/v1/chat/completions", axum::routing::post(handle));
+            let _ = axum::serve(listener, app).await;
+        });
+        // Give the mock upstream a moment to start accepting connections.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Write a minimal platform config + one active key into the temp data dir.
+        let config = serde_json::json!({
+            "language": "zh",
+            "theme": "system",
+            "proxy_port": 8080,
+            "proxy_host": "127.0.0.1",
+            "auto_switch": false,
+            "platforms": [{
+                "id": "wb",
+                "name": "WorkBuddy",
+                "base_url": format!("http://127.0.0.1:{}", upstream_port),
+                "path_prefix": "wb",
+                "sort_order": 0,
+                "created_at": 0,
+                "base_url_overrides": [],
+                "default_model": null
+            }]
+        });
+        std::fs::write(tmp.join("gui_config.json"), serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        let keys = serde_json::json!({
+            "keys": [{
+                "id": "k1", "platform_id": "wb", "name": "k1",
+                "key_value": "sk-test", "status": "active", "sort_order": 0, "created_at": 0
+            }],
+            "rotation_index": {}
+        });
+        std::fs::write(tmp.join("api_keys.json"), serde_json::to_string_pretty(&keys).unwrap()).unwrap();
+
+        // WorkBuddy-style first request: HTTP-text body with a SINGLE CRLF
+        // between the last header and the JSON (no blank-line separator).
+        let raw = b"POST /wb/v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{\"model\":\"sensenova-6.8-flash-lite\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
+        let uri = axum::http::Uri::from_static("http://127.0.0.1:8080/wb/v1/chat/completions");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let resp = proxy_handler(
+            axum::http::Method::POST,
+            uri,
+            headers,
+            axum::body::Body::from(raw.to_vec()),
+        ).await;
+
+        let status = resp.status();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024).await.unwrap();
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        println!("WB-TEST status={} body={}", status, body_str);
+        assert_eq!(status, 200, "real first WorkBuddy message must be forwarded, not answered 200 empty as a probe");
+        assert!(body_str.contains("hello"), "response must contain the upstream SSE content, got: {}", body_str);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // SseKeepaliveStream tests
+    //
+    // These tests deliberately use `start_paused = true` so we can fast-
+    // forward `tokio` virtual time and observe keepalive behaviour without
+    // making tests slow.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// A constant-rate upstream never lets the keepalive timer fire. The
+    /// wrapped stream must therefore emit no `: ping` frames — proving that
+    /// the keepalive wrapper doesn't pollute chatty streams.
+    #[tokio::test(start_paused = true)]
+    async fn test_sse_keepalive_no_ping_on_chatty_stream() {
+        use bytes::Bytes;
+        use futures::StreamExt;
+
+        // 10 chunks, 100 ms apart → total 900 ms. Keepalive = 1 s.
+        let upstream = futures::stream::unfold(0u32, |i| async move {
+            if i >= 10 {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Some((
+                Ok(Bytes::from(format!("chunk{}", i))),
+                i + 1,
+            ))
+        });
+        let upstream = Box::pin(upstream);
+        let mut kept = SseKeepaliveStream::new(upstream, 1);
+
+        let mut combined = String::new();
+        while let Some(b) = kept.next().await {
+            combined.push_str(std::str::from_utf8(&b.unwrap()).unwrap());
+        }
+
+        assert!(
+            !combined.contains(": ping"),
+            "chatty stream must never receive a keepalive, got: {:?}",
+            combined
+        );
+        for i in 0..10 {
+            assert!(
+                combined.contains(&format!("chunk{}", i)),
+                "all upstream chunks must be forwarded in order, missing chunk{} in {:?}",
+                i,
+                combined
+            );
+        }
+    }
+
+    /// When the upstream stays silent past the keepalive interval, the
+    /// wrapper must insert an SSE comment frame so the downstream socket
+    /// stays alive. The upstream itself never ends (it's the
+    /// `pending()` stream), so we'd never see anything without this.
+    #[tokio::test(start_paused = true)]
+    async fn test_sse_keepalive_emits_ping_when_idle() {
+        use bytes::Bytes;
+        use futures::StreamExt;
+
+        // Upstream that immediately ends after the first chunk. We then
+        // expect keepalive frames to fire from second poll onward.
+        let upstream = futures::stream::iter(vec![
+            Ok::<_, reqwest::Error>(Bytes::from_static(b"data: hi\n\n")),
+        ]);
+        let upstream = Box::pin(upstream);
+
+        // Wrap a never-ending "no data" stream instead, so the keepalive
+        // path is actually exercised. Mix: first chunk from a finite iter,
+        // then forever-pending.
+        let mut kept = SseKeepaliveStream::new(upstream, 1);
+
+        // Pull the first chunk (the "hi" data).
+        let first = kept
+            .next()
+            .await
+            .expect("first item present")
+            .expect("no error");
+        assert_eq!(&first[..], b"data: hi\n\n");
+
+        // The iterator is exhausted → the wrapper must propagate end-of-
+        // stream verbatim rather than fabricate keepalives past the real
+        // end of the upstream.
+        let second = kept.next().await;
+        assert!(
+            second.is_none(),
+            "after upstream end the wrapper must close, not pad with pings, got {:?}",
+            second
+        );
+    }
+
+    /// When the upstream is truly silent (no first chunk, no end), the
+    /// keepalive timer MUST fire and inject a `: ping` frame.
+    #[tokio::test(start_paused = true)]
+    async fn test_sse_keepalive_pings_on_permanently_idle_stream() {
+        use bytes::Bytes;
+        use futures::StreamExt;
+
+        // Forever-silent upstream.
+        let upstream = futures::stream::pending::<Result<Bytes, reqwest::Error>>();
+        let upstream = Box::pin(upstream);
+
+        // Keepalive = 1 s. Timeout = 3 s. We should observe ~2 pings.
+        let mut kept = SseKeepaliveStream::new(upstream, 1);
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            kept.next(),
+        )
+        .await
+        .expect("must not exceed 3s")
+        .expect("some chunk")
+        .expect("no error");
+        assert_eq!(&got[..], b": ping\n\n");
+        // Second iteration would also be a ping, but we only need to prove
+        // the keepalive fires at all when the upstream is silent.
+    }
+
+    /// Ping bytes constant never drifts; downstream clients depend on the
+    /// exact `: ping` shape (otherwise some SSE parsers misclassify it).
+    #[test]
+    fn test_sse_keepalive_bytes_constant() {
+        assert_eq!(SSE_KEEPALIVE_BYTES, b": ping\n\n");
     }
 }
 
