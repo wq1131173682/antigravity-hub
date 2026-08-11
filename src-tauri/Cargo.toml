@@ -5,6 +5,7 @@ description = "Multi-platform API Account Manager - Simplified Edition"
 authors = ["you"]
 license = "CC-BY-NC-SA-4.0"
 edition = "2021"
+default-run = "antigravity_tools"
 
 [lib]
 name = "antigravity_tools_lib"
@@ -44,6 +45,10 @@ clap = { version = "4", features = ["derive", "env"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "antigravity_tools"
+path = "src/main.rs"
 
 [[bin]]
 name = "responses_relay"
