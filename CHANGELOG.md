@@ -2,6 +2,15 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.2] - 2026-08-11
+
+### 修复
+- **多轮工具调用会话提前终止（主代理 Responses 路径）**：`transform_stream_to_responses` 收到上游 `finish_reason` 或 `data: [DONE]` 时立即结束流并下发 `response.completed`——当上游在输出文本段后（`finish_reason: stop` / `[DONE]`）继续推送工具调用时，后续 `tool_calls` 全部丢失，客户端提前结束会话、无法发起下一轮工具调用
+  - 修复：`finish_reason` / `[DONE]` 仅记录状态（`saw_finish_reason` / `seen_done`），**只有上游流 EOF / 超时 / 硬错误才收尾**（与 `responses_bridge` 的终结语义对齐）
+  - 新增 `STREAM_POST_TERMINATION_WINDOW_SECS=5` 尾声窗口：`[DONE]`/`finish_reason` 后 5 秒内无新数据即收尾，多段输出上游仍可继续推流，单段上游不挂起
+  - 纯协议级通用实现，不区分平台与下游工具
+- 新增 3 个流式回归测试（`finish_reason` 后继续 tool_calls 不丢失、`[DONE]` 后内容继续、尾声窗口自动收尾）
+
 ## [5.3.1] - 2026-08-11
 
 ### 修复

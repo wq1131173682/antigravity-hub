@@ -1149,6 +1149,14 @@ const STREAM_FIRST_CHUNK_TIMEOUT_SECS: u64 = 120;
 /// total timeout still caps the overall stream length as a backstop.
 const STREAM_CHUNK_IDLE_TIMEOUT_SECS: u64 = 300;
 
+/// Post-termination window (seconds): after the upstream has sent
+/// `finish_reason` and/or `data: [DONE]`, an upstream that intends to stop
+/// closes the connection quickly. We keep reading for this short window so
+/// multi-segment upstreams (text → finish → more tool_calls) can still
+/// deliver the remainder, while single-shot upstreams are finalized promptly
+/// instead of waiting for the full idle timeout.
+const STREAM_POST_TERMINATION_WINDOW_SECS: u64 = 5;
+
 /// Translate a Chat Completions streaming SSE response to Responses API SSE format.
 ///
 /// Reads SSE chunks from the upstream stream, translates each chunk on-the-fly,
@@ -1209,6 +1217,8 @@ pub fn transform_stream_to_responses(
             tool_call_args: std::collections::HashMap::new(),
             tool_call_output_index: 1,
             now,
+            saw_finish_reason: false,
+            seen_done: false,
         };
 
         // ── Main stream processing loop with timeout ──
@@ -1225,7 +1235,15 @@ pub fn transform_stream_to_responses(
             // "choices" chunk within the expected window, force completion.
             // The per-chunk idle timeout must be generous — reasoning models
             // can pause for a long time between chunks.
-            let timeout_duration = if st.has_sent_created {
+            //
+            // After the upstream has sent `finish_reason` / `[DONE]`, use a
+            // SHORT post-termination window: upstreams that intend to stop
+            // close the connection quickly (finalize promptly instead of
+            // waiting for the full idle timeout), while multi-segment
+            // upstreams that continue streaming keep the loop alive.
+            let timeout_duration = if st.seen_done || st.saw_finish_reason {
+                std::time::Duration::from_secs(STREAM_POST_TERMINATION_WINDOW_SECS)
+            } else if st.has_sent_created {
                 std::time::Duration::from_secs(STREAM_CHUNK_IDLE_TIMEOUT_SECS)
             } else {
                 std::time::Duration::from_secs(STREAM_FIRST_CHUNK_TIMEOUT_SECS)
@@ -1245,9 +1263,13 @@ pub fn transform_stream_to_responses(
                     break;
                 }
                 Ok(None) => {
-                    // Stream ended naturally
+                    // Stream ended naturally — this is the authoritative
+                    // signal that the response is complete. Finalize here.
                     if st.has_sent_created && !st.is_completed {
-                        info!("transform_stream: upstream stream ended naturally (after {:?}), flushing remaining events", started.elapsed());
+                        info!(
+                            "transform_stream: upstream stream ended naturally (after {:?}, finish_reason={}, done={}), flushing remaining events",
+                            started.elapsed(), st.saw_finish_reason, st.seen_done
+                        );
                         st.flush_done_events(&tx).await;
                         st.send_completed(&tx).await;
                     } else if !st.is_completed {
@@ -1312,25 +1334,13 @@ pub fn transform_stream_to_responses(
                 };
 
                 if data == "[DONE]" {
-                    // A complete payload may be followed by [DONE]; drop any
-                    // leftover unparsed fragment.
+                    // [DONE] is NOT treated as the end of the response.
+                    // Some upstreams emit [DONE] between segments and keep
+                    // streaming afterwards (text → [DONE] → tool_calls → …).
+                    // Only the upstream connection closing (EOF) or a timeout
+                    // finalizes the response — see the EOF / timeout branches.
                     pending_sse_fragments.clear();
-                    // Guard against duplicate terminal events: some relays emit
-                    // multiple [DONE] lines, or an error may already have been
-                    // emitted for this stream.
-                    if st.is_completed {
-                        continue;
-                    }
-                    if st.has_sent_created {
-                        st.flush_done_events(&tx).await;
-                        st.send_completed(&tx).await;
-                    } else {
-                        // [DONE] arrived with no valid chunk before it — the
-                        // upstream sent an empty stream. Surface an error rather
-                        // than a silent empty completion.
-                        warn!("transform_stream: [DONE] received before any valid chunk (empty upstream stream)");
-                        st.send_error_response(&tx, "Upstream returned no streaming data ([DONE] with empty body).").await;
-                    }
+                    st.seen_done = true;
                     continue;
                 }
 
@@ -1658,10 +1668,16 @@ pub fn transform_stream_to_responses(
                     }
 
                     // ── Finish reason ──
+                    // NOTE: finish_reason does NOT terminate the stream.
+                    // Some upstreams emit `finish_reason` mid-stream (e.g.
+                    // after a text segment) and then continue pushing
+                    // tool_calls / more text. Finalizing here would drop the
+                    // remainder and make the client end the turn early.
+                    // Only the upstream EOF (or a timeout / hard error)
+                    // finalizes the response — see the EOF branch below.
                     if let Some(reason) = finish_reason {
-                        if reason == "stop" || reason == "length" || reason == "tool_calls" || reason == "content_filter" {
-                            st.flush_done_events(&tx).await;
-                            st.send_completed(&tx).await;
+                        if !reason.is_empty() {
+                            st.saw_finish_reason = true;
                         }
                     }
                 }
@@ -1716,6 +1732,13 @@ pub struct StreamState {
     tool_call_args: std::collections::HashMap<u32, String>,
     tool_call_output_index: u32,
     now: i64,
+    /// Whether the upstream has emitted a `finish_reason` on any chunk.
+    /// Informational only — it does NOT terminate the stream (see the
+    /// finish_reason handling in transform_stream_to_responses).
+    saw_finish_reason: bool,
+    /// Whether the upstream has emitted `data: [DONE]`. Informational only —
+    /// the stream continues until the upstream connection actually closes.
+    seen_done: bool,
 }
 
 impl StreamState {
@@ -2795,4 +2818,103 @@ mod tests {
         assert_eq!(remaining.unwrap(), "answer");
     }
 
+    // ── 流式终结逻辑回归测试（对齐 responses_bridge：EOF 才终结）──
+    // 修复：finish_reason / [DONE] 不再立即终结流。某些上游在输出文本段
+    // 后（finish_reason=stop / [DONE]）继续推送 tool_calls，旧逻辑提前
+    // send_completed 导致客户端收不到工具调用、会话提前结束。
+
+    async fn collect_translator_stream(
+        stream: impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
+    ) -> String {
+        futures::pin_mut!(stream);
+        let mut out = String::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(bytes) => out.push_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => out.push_str("ERROR\n"),
+            }
+        }
+        out
+    }
+
+    fn mock_translator_stream(
+        events: Vec<&str>,
+    ) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static {
+        let chunks: Vec<Result<axum::body::Bytes, reqwest::Error>> = events
+            .into_iter()
+            .map(|s| Ok(axum::body::Bytes::from(s.to_string())))
+            .collect();
+        futures::stream::iter(chunks)
+    }
+
+    #[tokio::test]
+    async fn test_stream_finish_reason_does_not_terminate() {
+        // 核心回归：上游先输出文本并带 finish_reason=stop，随后继续推送 tool_calls。
+        // 旧逻辑：收到 finish_reason 立即 send_completed → 后续 tool_calls 丢失。
+        // 新逻辑：EOF 才终结，tool_calls 完整送达，completed 只在流末尾出现一次。
+        let events = vec![
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"我先查一下。\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ];
+        let upstream = mock_translator_stream(events);
+        let out = collect_translator_stream(transform_stream_to_responses(upstream, "gpt-4")).await;
+
+        // 文本与工具调用完整送达
+        assert!(out.contains("我先查一下。"), "text must be delivered");
+        assert!(out.contains("call_1"), "tool call id must be delivered");
+        assert!(out.contains("\"name\":\"search\""), "tool name must be delivered");
+        assert!(out.contains("weather"), "tool args must be delivered");
+
+        // response.completed 只出现一次（EOF 收尾），且 output 含 function_call
+        assert_eq!(out.matches("\"type\":\"response.completed\"").count(), 1, "completed exactly once at EOF");
+        let completed_idx = out.find("\"type\":\"response.completed\"").expect("completed present");
+        let tail = &out[completed_idx..];
+        assert!(tail.contains("\"type\":\"function_call\""), "completed output must include function_call");
+    }
+
+    #[tokio::test]
+    async fn test_stream_done_does_not_terminate() {
+        // [DONE] 之后仍有内容（多段输出上游）→ 正常转发，不中断
+        let events = vec![
+            "data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"第一段\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+            "data: {\"id\":\"chatcmpl-2\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"第二段\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n",
+        ];
+        let upstream = mock_translator_stream(events);
+        let out = collect_translator_stream(transform_stream_to_responses(upstream, "gpt-4")).await;
+
+        assert!(out.contains("第一段"), "first segment must be delivered");
+        assert!(out.contains("第二段"), "second segment after [DONE] must be delivered");
+        assert_eq!(out.matches("\"type\":\"response.completed\"").count(), 1, "one completed at EOF");
+    }
+
+    #[tokio::test]
+    async fn test_stream_post_termination_window_finalizes() {
+        // [DONE] 后上游保持连接不关闭 → 5s 尾声窗口后自动收尾（不会挂到 300s idle）
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(16);
+        tx.send(Ok(axum::body::Bytes::from(
+            "data: {\"id\":\"chatcmpl-3\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"
+        ))).await.unwrap();
+        tx.send(Ok(axum::body::Bytes::from(
+            "data: {\"id\":\"chatcmpl-3\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+        ))).await.unwrap();
+        tx.send(Ok(axum::body::Bytes::from("data: [DONE]\n\n"))).await.unwrap();
+        // 保持 tx 打开（不 drop），模拟上游 [DONE] 后不关闭连接
+
+        let upstream = futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        });
+
+        let started = std::time::Instant::now();
+        let out = collect_translator_stream(transform_stream_to_responses(upstream, "gpt-4")).await;
+        let elapsed = started.elapsed();
+
+        assert!(elapsed.as_secs() >= 4, "should wait for the post-termination window (elapsed={}s)", elapsed.as_secs());
+        assert!(out.contains("\"type\":\"response.completed\""), "must finalize after the window");
+    }
 }
