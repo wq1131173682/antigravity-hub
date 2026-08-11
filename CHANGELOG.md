@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.3] - 2026-08-11
+
+### 修复
+- **WorkBuddy 会话探测请求不再被拒绝**：WorkBuddy 建连探测请求的 body 可能只有 HTTP 请求行 + 请求头（无 `\r\n\r\n` 分隔符、无内嵌 JSON）。此前 `extract_json_from_http_text` 提取失败后直接返回 400，导致会话建立失败。现新增 `looks_like_http_request_text` 识别此类请求，返回 200 确认而非 400，让后续真实对话请求正常进入代理
+- 新增 6 个单元测试覆盖探测请求识别与负例场景
+
 ## [5.3.2] - 2026-08-11
 
 ### 修复

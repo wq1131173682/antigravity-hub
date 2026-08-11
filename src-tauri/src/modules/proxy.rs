@@ -266,6 +266,24 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
     Some(inner.as_bytes().to_vec())
 }
 
+/// Detect whether the body is an entire HTTP/1.1 request message text
+/// (request line + headers), even if it carries no message payload.
+///
+/// WorkBuddy's session-opening probe sends only the request line + headers
+/// as the POST body (no `\r\n\r\n` separator, no JSON payload). We must not
+/// hard-reject that — it is a liveness/session probe, not a real chat call.
+fn looks_like_http_request_text(body: &[u8]) -> bool {
+    let Some(text) = std::str::from_utf8(body).ok() else {
+        return false;
+    };
+    let Some(first_line) = text.lines().next() else {
+        return false;
+    };
+    ["POST ", "GET ", "PUT ", "PATCH ", "DELETE ", "OPTIONS ", "HEAD "]
+        .iter()
+        .any(|m| first_line.starts_with(m))
+}
+
 /// Parse JSON body once and return both the model_name and the modified body bytes
 /// with max_tokens injected if needed. Returns (model_name_opt, modified_body_bytes).
 fn parse_and_prepare_body(
@@ -995,6 +1013,14 @@ async fn proxy_handler(
             inner.len()
         );
         inner.into()
+    } else if looks_like_http_request_text(&body_bytes) {
+        // HTTP request-line text but no recoverable embedded JSON payload.
+        // This is typically WorkBuddy's session-opening probe (request line +
+        // headers only). Acknowledging with 200 lets the client proceed to the
+        // real chat request instead of failing the connection outright.
+        let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
+        info!("HTTP-text body without embedded JSON (session probe), acknowledging: {}", preview);
+        return error_response(200, String::new());
     } else {
         let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
         warn!("Rejecting request with non-JSON, non-HTTP-text body: {}", preview);
@@ -1590,6 +1616,43 @@ mod tests {
     fn test_extract_json_from_http_text_returns_none_without_header_sep() {
         let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json";
         assert!(extract_json_from_http_text(raw).is_none(), "no blank line separator");
+        // But looks_like_http_request_text still recognizes it as HTTP text
+        assert!(looks_like_http_request_text(raw), "must still be detected as HTTP request text");
+    }
+
+    // ─── looks_like_http_request_text ─────────────────────────────────────
+
+    #[test]
+    fn test_looks_like_http_request_text_full() {
+        let raw = b"POST http://192.168.9.193:5343/sensenova/v1/chat/completions HTTP/1.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nx-stainless-lang: js\r\n\r\n{\"model\":\"test\"}";
+        assert!(looks_like_http_request_text(raw), "full HTTP request with JSON body");
+    }
+
+    #[test]
+    fn test_looks_like_http_request_text_headers_only() {
+        // WorkBuddy session probe: headers only, no blank line, no body
+        let raw = b"POST http://192.168.9.193:5343/sensenova/v1/chat/completions HTTP/1.1\r\nAccept: application/json\r\nContent-Type: application/json";
+        assert!(looks_like_http_request_text(raw), "headers-only probe must be detected");
+    }
+
+    #[test]
+    fn test_looks_like_http_request_text_plain_text_returns_false() {
+        assert!(!looks_like_http_request_text(b"hello world"));
+    }
+
+    #[test]
+    fn test_looks_like_http_request_text_valid_json_returns_false() {
+        assert!(!looks_like_http_request_text(br#"{"model":"test"}"#), "pure JSON must not match");
+    }
+
+    #[test]
+    fn test_looks_like_http_request_text_empty_returns_false() {
+        assert!(!looks_like_http_request_text(b""), "empty body must not match");
+    }
+
+    #[test]
+    fn test_looks_like_http_request_text_get_method() {
+        assert!(looks_like_http_request_text(b"GET /v1/models HTTP/1.1\r\nHost: localhost"), "GET must be detected");
     }
 }
 
