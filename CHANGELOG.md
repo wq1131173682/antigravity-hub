@@ -2,6 +2,18 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.2.23] - 2026-08-11
+
+### 新增
+- **Responses API 中转转发服务**（`responses_relay` 独立二进制）：将上游原生 Responses API 请求/流式响应，双向转换为标准 OpenAI `/v1/chat/completions` 格式，供仅支持 Chat 协议的客户端使用
+  - 请求方向：Chat Completions → Responses API（`messages`→`input`/`instructions`、`tool_calls`→`function_call`、`max_tokens`→`max_output_tokens`、`tools`/`tool_choice`/`response_format` 格式转换）
+  - 流式响应方向：Responses API SSE → Chat Completions delta（边接收边转发，无大包缓存）
+  - 多轮 Function Calling：维护 `tool_call_id`/`index` 上下文，分段参数拼接防非法 JSON 分片，多工具交错 index 不串号
+  - 连接稳定性：SSE 空闲心跳保活（`: keepalive` 注释分片）、四层超时防线（连接/读取/会话最大时长/分片空闲）、上游异常断连时优雅推送 `finish_reason` + `[DONE]`
+  - 部署：`config/responses_relay.example.toml` 配置模板 + `README_RESPONSES_RELAY.md` 部署说明，全部超时/心跳参数可调
+  - 测试：17 个单元测试，重点覆盖连续多轮工具调用 Agent 场景
+- 新增 `clap` 依赖及 `responses_relay` 二进制入口
+
 ## [5.2.11] - 2026-08-05
 
 ### 修复
