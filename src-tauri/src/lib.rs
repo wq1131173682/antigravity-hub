@@ -4,6 +4,8 @@ mod commands;
 mod utils;
 pub mod error;
 pub mod constants;
+/// 流式终止诊断模块（区分 A 类截断 / B 类主动结束，定位故障层）。
+pub use modules::diagnostics;
 
 use modules::logger;
 use tracing::info;
