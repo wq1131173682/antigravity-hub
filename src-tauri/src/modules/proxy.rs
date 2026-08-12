@@ -1,4 +1,5 @@
 ﻿use std::sync::{Mutex, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 use serde::Serialize;
 use reqwest::Client;
@@ -344,6 +345,12 @@ const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 /// SSE keepalive frame. A line beginning with `:` is an SSE comment and is
 /// silently discarded by every compliant client.
 const SSE_KEEPALIVE_BYTES: &[u8] = b": ping\n\n";
+
+/// Monotonic request counter so proxy logs can be correlated: how many
+/// requests actually reached the proxy vs. how many the client believes it
+/// sent. Each incoming HTTP request through `proxy_handler` →
+/// `forward_with_retry` gets one sequential id.
+static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Adapt an upstream byte stream into one that emits periodic SSE comment
 /// frames whenever the upstream stays silent for `keepalive_secs`.
@@ -1404,6 +1411,8 @@ async fn forward_with_retry(
     model_name: Option<String>,
     is_responses_api: bool,
 ) -> Result<axum::response::Response, String> {
+    // Sequential id for this incoming request (one per proxy_handler call).
+    let req_id = REQ_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
     let max_retries = if auto_switch { 5 } else { 1 };
     let mut last_error = String::new();
 
@@ -1490,7 +1499,7 @@ async fn forward_with_retry(
         // Debug: log the upstream request for troubleshooting
         if let Ok(body_preview) = std::str::from_utf8(&body_bytes) {
             let preview: String = body_preview.chars().take(500).collect();
-            info!("Forwarding to upstream: {} | body: {}", target_url, preview);
+            info!("[req {}] Forwarding to upstream: {} | body: {}", req_id, target_url, preview);
         }
 
         // Send the request
@@ -1507,6 +1516,7 @@ async fn forward_with_retry(
         };
 
         let status = resp.status();
+        info!("[req {}] upstream responded status={} (key[{}]={})", req_id, status, key_idx, key_id);
 
         // 429: rate limited — wait with exponential backoff, then retry SAME key
         // Do NOT switch keys for 429; the key is still valid, just temporarily throttled

@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 
 // ── Responses API ↔ Chat Completions API translation ──
 // Codex CLI uses the OpenAI Responses API (/v1/responses), but most
@@ -1191,7 +1191,11 @@ pub fn transform_stream_to_responses(
     let model_owned = model.to_string();
 
     tokio::spawn(async move {
-        info!("transform_stream_to_responses: stream processing started");
+        // Short per-stream tag so every log line for this upstream stream can
+        // be correlated (a single Codex turn may involve several streams).
+        let stream_tag = format!("S{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]);
+        info!("[codex-stream {}] START model={} timeouts: first_chunk={}s chunk_idle={}s post_termination={}s",
+              stream_tag, model_owned, STREAM_FIRST_CHUNK_TIMEOUT_SECS, STREAM_CHUNK_IDLE_TIMEOUT_SECS, STREAM_POST_TERMINATION_WINDOW_SECS);
         // Wall-clock timer for termination diagnostics: every exit path below
         // logs how long the stream ran and why it ended, so a "conversation got
         // interrupted" report can be traced to a specific cause (upstream error,
@@ -1265,6 +1269,9 @@ pub fn transform_stream_to_responses(
                 std::time::Duration::from_secs(STREAM_FIRST_CHUNK_TIMEOUT_SECS)
             };
 
+            debug!("[codex-stream {}] awaiting next chunk with timeout={}s (seen_done={}, saw_finish_reason={}, tool_calls_seen={})",
+                   stream_tag, timeout_duration.as_secs(), st.seen_done, st.saw_finish_reason, st.tool_call_ids.len());
+
             let chunk_result = tokio::time::timeout(timeout_duration, upstream_stream.next()).await;
 
             let chunk = match chunk_result {
@@ -1283,8 +1290,14 @@ pub fn transform_stream_to_responses(
                     // signal that the response is complete. Finalize here.
                     if st.has_sent_created && !st.is_completed {
                         info!(
-                            "transform_stream: upstream stream ended naturally (after {:?}, finish_reason={}, done={}), flushing remaining events",
-                            started.elapsed(), st.saw_finish_reason, st.seen_done
+                            "[codex-stream {}] EOF (upstream closed) after {:?}; saw_finish_reason={}, seen_done={}, tool_call_ids={:?} => {}",
+                            stream_tag, started.elapsed(), st.saw_finish_reason, st.seen_done,
+                            st.tool_call_ids.keys().collect::<Vec<_>>(),
+                            if st.tool_call_ids.is_empty() && !st.saw_finish_reason {
+                                "SUSPECT-A: text with NO finish_reason and NO tool_call (possible upstream truncation)"
+                            } else {
+                                "normal/expected end"
+                            }
                         );
                         st.flush_done_events(&tx).await;
                         st.send_completed(&tx).await;
@@ -1315,7 +1328,8 @@ pub fn transform_stream_to_responses(
                             "Upstream did not return a valid streaming response within {} seconds. The provider may use an unsupported SSE format.", STREAM_FIRST_CHUNK_TIMEOUT_SECS
                         )).await;
                     } else {
-                        warn!("transform_stream: timeout waiting for next chunk ({}s, stream ran {:?}), forcing completion", STREAM_CHUNK_IDLE_TIMEOUT_SECS, started.elapsed());
+                        warn!("[codex-stream {}] IDLE TIMEOUT after {:?} (chunk_idle={}s); saw_finish_reason={}, seen_done={}, tool_call_ids={:?}. Model emitted text but stream went silent with NO tool_call and NO finish_reason => SUSPECT-A (upstream truncation) OR model chose to stop (B/C). Forcing completion.",
+                              stream_tag, started.elapsed(), STREAM_CHUNK_IDLE_TIMEOUT_SECS, st.saw_finish_reason, st.seen_done, st.tool_call_ids.keys().collect::<Vec<_>>());
                         st.flush_done_events(&tx).await;
                         st.send_completed(&tx).await;
                     }
@@ -1357,6 +1371,7 @@ pub fn transform_stream_to_responses(
                     // finalizes the response — see the EOF / timeout branches.
                     pending_sse_fragments.clear();
                     st.seen_done = true;
+                    info!("[codex-stream {}] saw [DONE]; entering post-termination window ({}s; stays open if a tool_call arrives)", stream_tag, STREAM_POST_TERMINATION_WINDOW_SECS);
                     continue;
                 }
 
@@ -1657,6 +1672,7 @@ pub fn transform_stream_to_responses(
 
                             if !st.tool_call_ids.contains_key(&tc_index) && !tc_id.is_empty() {
                                 st.tool_call_ids.insert(tc_index, tc_id.clone());
+                                info!("[codex-stream {}] FIRST tool_call delta received (id={}, name={}); stream no longer eligible for short post-termination window", stream_tag, tc_id, tc_name);
                                 st.tool_call_names.insert(tc_index, tc_name.clone());
                                 st.tool_call_args.insert(tc_index, String::new());
                                 sse_send(&tx, &serde_json::json!({
@@ -1694,6 +1710,7 @@ pub fn transform_stream_to_responses(
                     if let Some(reason) = finish_reason {
                         if !reason.is_empty() {
                             st.saw_finish_reason = true;
+                            info!("[codex-stream {}] saw finish_reason={:?}; entering post-termination window ({}s; stays open if a tool_call arrives)", stream_tag, reason, STREAM_POST_TERMINATION_WINDOW_SECS);
                         }
                     }
                 }
@@ -1703,7 +1720,7 @@ pub fn transform_stream_to_responses(
         // ── Final safety net: ensure stream completion ──
         if !st.is_completed {
             if st.has_sent_created {
-                info!("transform_stream: final safety net — forcing stream completion (after {:?})", started.elapsed());
+                info!("[codex-stream {}] final safety net — forcing stream completion after {:?}", stream_tag, started.elapsed());
                 st.flush_done_events(&tx).await;
                 st.send_completed(&tx).await;
             } else {
