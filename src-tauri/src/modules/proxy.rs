@@ -46,7 +46,25 @@ static PROXY_CLIENT: Lazy<RwLock<Client>> = Lazy::new(|| {
 /// When `proxy_url` is None or empty, direct connection is used.
 fn build_http_client(proxy_url: Option<&str>) -> Client {
     let mut builder = Client::builder()
-        .timeout(std::time::Duration::from_secs(3600));
+        // Overall backstop for streaming responses (kept generous so long
+        // generations are not cut off). Per-connection stalls are handled by
+        // connect_timeout / tcp_keepalive below.
+        .timeout(std::time::Duration::from_secs(3600))
+        // Bound connection establishment so a dead/black-holed upstream fails
+        // fast instead of hanging the whole request (which surfaced as
+        // "second conversation gets no response, needs several retries" — the
+        // client reused a stale pooled socket and blocked until the client's
+        // own timeout).
+        .connect_timeout(std::time::Duration::from_secs(20))
+        // Detect dead upstream sockets that silently dropped the connection.
+        .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+        // Do NOT reuse idle pooled connections. Many upstream gateways close
+        // keep-alive connections after a short idle window; a pooled socket
+        // that the server already closed causes the next request to hang until
+        // TCP timeout / RST. A fresh connection per request is a negligible
+        // cost next to a multi-second LLM generation and eliminates the entire
+        // stale-connection class of hangs.
+        .pool_max_idle_per_host(0);
     if let Some(url) = proxy_url {
         if !url.is_empty() {
             match reqwest::Proxy::all(url) {

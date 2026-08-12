@@ -1151,11 +1151,19 @@ const STREAM_CHUNK_IDLE_TIMEOUT_SECS: u64 = 300;
 
 /// Post-termination window (seconds): after the upstream has sent
 /// `finish_reason` and/or `data: [DONE]`, an upstream that intends to stop
-/// closes the connection quickly. We keep reading for this short window so
+/// closes the connection quickly. We keep reading for this window so
 /// multi-segment upstreams (text → finish → more tool_calls) can still
-/// deliver the remainder, while single-shot upstreams are finalized promptly
-/// instead of waiting for the full idle timeout.
-const STREAM_POST_TERMINATION_WINDOW_SECS: u64 = 5;
+/// deliver the remainder — some models emit their text, end the segment, and
+/// THEN pause before streaming the tool call, so a too-short window would
+/// force-complete the stream and drop the pending tool call (Codex then ends
+/// the turn with no function_call and never dispatches the tool).
+///
+/// This must be long enough to cover the model's "decide to call a tool" pause
+/// (reasoning models can take tens of seconds there). It is only a grace period
+/// for upstreams that send `[DONE]` yet keep the connection open without EOF;
+/// for normal upstreams that close the connection right after `[DONE]`, the
+/// stream finalizes on the EOF immediately and this window is never reached.
+const STREAM_POST_TERMINATION_WINDOW_SECS: u64 = 30;
 
 /// Translate a Chat Completions streaming SSE response to Responses API SSE format.
 ///
@@ -1242,7 +1250,15 @@ pub fn transform_stream_to_responses(
             // waiting for the full idle timeout), while multi-segment
             // upstreams that continue streaming keep the loop alive.
             let timeout_duration = if st.seen_done || st.saw_finish_reason {
-                std::time::Duration::from_secs(STREAM_POST_TERMINATION_WINDOW_SECS)
+                if !st.tool_call_ids.is_empty() {
+                    // We are already in the middle of streaming one or more tool
+                    // calls. Never finalize on the short post-termination window —
+                    // wait for the real upstream EOF so argument deltas already in
+                    // flight are not dropped mid-tool-call.
+                    std::time::Duration::from_secs(STREAM_CHUNK_IDLE_TIMEOUT_SECS)
+                } else {
+                    std::time::Duration::from_secs(STREAM_POST_TERMINATION_WINDOW_SECS)
+                }
             } else if st.has_sent_created {
                 std::time::Duration::from_secs(STREAM_CHUNK_IDLE_TIMEOUT_SECS)
             } else {
@@ -2916,5 +2932,83 @@ mod tests {
 
         assert!(elapsed.as_secs() >= 4, "should wait for the post-termination window (elapsed={}s)", elapsed.as_secs());
         assert!(out.contains("\"type\":\"response.completed\""), "must finalize after the window");
+    }
+
+    #[tokio::test]
+    async fn test_transform_keeps_tool_calls_across_post_done_gap() {
+        // Regression for "Codex: output text, then the turn ends before the
+        // tool is ever invoked". Some upstreams emit text + finish_reason +
+        // [DONE] and THEN PAUSE before streaming the tool_calls segment
+        // (the model "decides" to call a tool after finishing its text).
+        // If the post-termination idle window is too short, the translator
+        // force-completes the stream during that pause and drops the pending
+        // tool call — so Codex receives a completed response with no
+        // function_call and never dispatches the tool.
+        use std::time::Duration;
+        let upstream = futures::stream::unfold(0u32, |state| async move {
+            match state {
+                0 => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Some((Ok(axum::body::Bytes::from(
+                        "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Let me check that for you.\"},\"finish_reason\":null}]}\n\n"
+                    )), 1))
+                }
+                1 => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Some((Ok(axum::body::Bytes::from(
+                        "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                    )), 2))
+                }
+                2 => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Some((Ok(axum::body::Bytes::from("data: [DONE]\n\n")), 3))
+                }
+                3 => {
+                    // Simulate the model pausing before emitting the tool call.
+                    tokio::time::sleep(Duration::from_secs(6)).await;
+                    Some((Ok(axum::body::Bytes::from(
+                        "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n"
+                    )), 4))
+                }
+                4 => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Some((Ok(axum::body::Bytes::from(
+                        "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"weather\\\"}\"}}]},\"finish_reason\":null}]}\n\n"
+                    )), 5))
+                }
+                5 => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    Some((Ok(axum::body::Bytes::from(
+                        "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                    )), 6))
+                }
+                6 => {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    // Final [DONE] — end the upstream stream (EOF) so the
+                    // translator finalizes promptly with the tool call in place.
+                    Some((Ok(axum::body::Bytes::from("data: [DONE]\n\n")), 7))
+                }
+                _ => None,
+            }
+        });
+
+        let out = collect_translator_stream(transform_stream_to_responses(upstream, "gpt-4")).await;
+
+        assert!(
+            out.contains("\"name\":\"search\""),
+            "function_call must be forwarded even after a post-[DONE] pause; got: {}",
+            out
+        );
+        assert!(
+            out.contains("function_call_arguments.done"),
+            "tool arguments must be completed; got: {}",
+            out
+        );
+        assert_eq!(
+            out.matches("\"type\":\"response.completed\"").count(),
+            1,
+            "exactly one completed event; got: {}",
+            out
+        );
     }
 }

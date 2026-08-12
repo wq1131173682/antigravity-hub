@@ -2,6 +2,17 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.5] - 2026-08-12
+
+### 修复
+- **Codex 调用代理 LLM「输出文本后、准备调用工具直接停止」**：根因是 `codex_translator::transform_stream_to_responses` 的流终结逻辑中 `STREAM_POST_TERMINATION_WINDOW_SECS` 只有 **5 秒**。`[DONE]` / `finish_reason` 出现后只等 5 秒就强制收尾（force-complete）。当上游在文本段之后、tool_call 段之前出现 >5 秒停顿（reasoning 模型「决定调工具」时很常见；代码注释也明确记录过某些上游会 `text → [DONE] → tool_calls` 多段续推），工具调用分片在停顿期间被截断丢弃，`response.completed` 里没有 `function_call`，Codex 因此停在工具前、从不下发工具
+  - 修复：把 `STREAM_POST_TERMINATION_WINDOW_SECS` 从 5 秒提到 **30 秒**（覆盖 reasoning 模型决定调工具的停顿；对 `[DONE]` 后正常关闭连接的上游，流会在 EOF 处立即收尾，不会真的等满 30 秒）；并新增规则——**一旦已经开始流式接收 tool_call，永不走短窗口**，始终用完整块空闲超时（300 秒）等待真实 EOF，避免 tool_call 参数分片在途中被丢弃
+  - 新增回归测试 `test_transform_keeps_tool_calls_across_post_done_gap`：mock 上游在 `[DONE]` 后停顿 6 秒再推 tool_calls，修复前该测试失败（function_call 被丢）、修复后通过（function_call 完整送达）
+
+### 修复
+- **WorkBuddy「第一次对话正常、第二次对话无回应、需多试几次才成功」**：这是间歇性的连接层问题，根因是上游代理客户端 `PROXY_CLIENT` 默认启用 HTTP 连接池并复用空闲连接。多数上游网关在空闲一小段时间后会单方面关闭 keep-alive 连接，被复用到的陈旧 socket 会卡住直到 TCP 超时或 RST，表现为「第二次请求无响应」；重试几次后连接池轮换到新鲜连接才成功
+  - 修复：`build_http_client` 增加 `connect_timeout(20s)`（建连失败快速报错而非挂死）、`tcp_keepalive(60s)`（探测已死的静默连接）、`pool_max_idle_per_host(0)`（禁用空闲连接复用，每次请求新建连接）。对一次耗时数秒的 LLM 生成来说，新建连接的开销可忽略，但彻底消除了「陈旧池化连接卡死」这一类问题
+
 ## [5.3.4] - 2026-08-11
 
 ### 修复
