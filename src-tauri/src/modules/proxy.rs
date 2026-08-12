@@ -1609,7 +1609,13 @@ async fn forward_with_retry(
         // Errors from the upstream surface as SSE error frames inside the
         // 200 stream (standard SSE proxy behaviour). We skip the retry loop
         // for early-flush because we've already committed the response.
+        // Only enabled for the sensenova pass-through path (WorkBuddy),
+        // which is known to exhibit multi-second "time to first byte"
+        // delays that cause the client SSE reader to abandon the first
+        // send. All other platforms (agnes-cn, etc.) keep the normal path
+        // with upstream-header forwarding and key retries intact.
         let wants_early_flush = !is_responses_api
+            && platform_prefix == "sensenova"
             && (target_url.path().contains("/chat/completions")
                 || target_url.path().contains("/v1/messages")
                 || target_url.path().contains("/completions"));
