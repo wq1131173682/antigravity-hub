@@ -346,6 +346,46 @@ const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 /// silently discarded by every compliant client.
 const SSE_KEEPALIVE_BYTES: &[u8] = b": ping\n\n";
 
+/// Thin adapter that lets a `tokio::sync::mpsc::Receiver` be consumed by
+/// `futures::Stream`-based code (axum's `Body::from_stream`, our
+/// `SseKeepaliveStream`, etc.). The `tokio_stream` crate would normally
+/// provide this via `ReceiverStream`, but we avoid pulling in another
+/// dependency by implementing the forward directly.
+pub(crate) struct TokioReceiverStream(
+    pub(crate) tokio::sync::mpsc::Receiver<
+        Result<bytes::Bytes, EarlyFlushError>,
+    >,
+);
+
+impl futures::Stream for TokioReceiverStream {
+    type Item = Result<bytes::Bytes, EarlyFlushError>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Tokio's mpsc::Receiver is Unpin, so we can safely take &mut self.
+        self.0.poll_recv(cx)
+    }
+}
+
+/// Concrete error type used by the early-flush streaming pass-through.
+/// Needed because `Box<dyn std::error::Error + Send + Sync>` itself does
+/// NOT implement `std::error::Error` (the well-known `Box<dyn Error>`
+/// doesn't satisfy `Error` trait bound), so it cannot be the `E` type
+/// parameter of `SseKeepaliveStream` (whose Stream impl requires
+/// `E: std::error::Error + Send + Sync + 'static` to box it into
+/// `Box<dyn Error + Send + Sync>`).
+#[derive(Debug)]
+pub(crate) struct EarlyFlushError(pub(crate) String);
+
+impl std::fmt::Display for EarlyFlushError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EarlyFlushError {}
+
 /// Monotonic request counter so proxy logs can be correlated: how many
 /// requests actually reached the proxy vs. how many the client believes it
 /// sent. Each incoming HTTP request through `proxy_handler` →
@@ -369,7 +409,7 @@ static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
 /// through a `Pin<&mut Sleep>`. Box-pinning keeps the wrapper itself
 /// `Unpin`, so callers can construct it on the stack and pass it straight
 /// to `Body::from_stream`.
-pub(crate) struct SseKeepaliveStream<S> {
+pub(crate) struct SseKeepaliveStream<S, E> {
     inner: S,
     next_ping_at: std::pin::Pin<Box<tokio::time::Sleep>>,
     keepalive_secs: u64,
@@ -381,9 +421,12 @@ pub(crate) struct SseKeepaliveStream<S> {
     chunks_relayed: u64,
     /// Keepalive comment frames injected.
     pings_sent: u64,
+    /// E is only used in the Stream impl bound; the field keeps the struct
+    /// generic over the upstream error type without affecting layout.
+    _phantom: std::marker::PhantomData<E>,
 }
 
-impl<S> SseKeepaliveStream<S> {
+impl<S, E> SseKeepaliveStream<S, E> {
     pub(crate) fn new(inner: S, keepalive_secs: u64, tag: impl Into<String>) -> Self {
         let now = tokio::time::Instant::now();
         let sleep = tokio::time::sleep_until(
@@ -397,13 +440,24 @@ impl<S> SseKeepaliveStream<S> {
             bytes_relayed: 0,
             chunks_relayed: 0,
             pings_sent: 0,
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<S> futures::Stream for SseKeepaliveStream<S>
+// Explicit Unpin impl: every field is Unpin when S is Unpin
+// (`Pin<Box<...>>`, primitives, String, PhantomData are all unconditionally
+// Unpin), so the struct is Unpin. Pinning is only needed for the upstream
+// future inside `next_ping_at`, which is already Box-pinned. Without this
+// explicit marker the generic <S, E> form can fail to expose Unpin to the
+// Stream::poll_next signature (`Pin<&mut Self>` needs Self: Unpin to take
+// `&mut *self`).
+impl<S, E> Unpin for SseKeepaliveStream<S, E> where S: Unpin {}
+
+impl<S, E> futures::Stream for SseKeepaliveStream<S, E>
 where
-    S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+    S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
+    E: std::error::Error + Send + Sync + 'static,
 {
     type Item = Result<bytes::Bytes, Box<dyn std::error::Error + Send + Sync + 'static>>;
 
@@ -1540,7 +1594,100 @@ async fn forward_with_retry(
             info!("[req {}] Forwarding to upstream: {} | body: {}", req_id, target_url, preview);
         }
 
-        // Send the request
+        // ── Early-flush streaming pass-through ──
+        // When the client requests a streaming completion for a pass-through
+        // (non-Responses-API) endpoint, we respond 200 + SSE headers + an
+        // immediate keepalive comment RIGHT AWAY, then bridge the upstream
+        // bytes in via a spawned task and an mpsc channel.
+        //
+        // Without this, clients wait 2–10 seconds in silence while the
+        // upstream model thinks — and some SSE clients (e.g. WorkBuddy's
+        // fetch + ReadableStream reader) give up or stall the FIRST send
+        // during that dead window, surfacing as "the first reply never
+        // appears until the second message is sent".
+        //
+        // Errors from the upstream surface as SSE error frames inside the
+        // 200 stream (standard SSE proxy behaviour). We skip the retry loop
+        // for early-flush because we've already committed the response.
+        let wants_early_flush = !is_responses_api
+            && (target_url.path().contains("/chat/completions")
+                || target_url.path().contains("/v1/messages")
+                || target_url.path().contains("/completions"));
+
+        if wants_early_flush {
+            let client_for_task = client.clone();
+            let upstream_req = match req_builder.build() {
+                Ok(r) => r,
+                Err(e) => return Err(format!("Failed to build upstream request for streaming: {}", e)),
+            };
+            let tag = format!("[req {}]", req_id);
+            let tag_for_spawn = tag.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, EarlyFlushError>>(32);
+            tokio::spawn(async move {
+                // Immediate SSE comment → client sees a byte straight away
+                // so the connection never looks idle.
+                if tx
+                    .send(Ok(bytes::Bytes::from_static(b": connected\n\n")))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                match client_for_task.execute(upstream_req).await {
+                    Ok(res) => {
+                        info!(
+                            "{} upstream stream started: status={}",
+                            tag_for_spawn,
+                            res.status()
+                        );
+                        let mut body = res.bytes_stream();
+                        while let Some(chunk) =
+                            futures::StreamExt::next(&mut body).await
+                        {
+                            match chunk {
+                                Ok(b) => {
+                                    if tx.send(Ok(b)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(Err(EarlyFlushError(format!(
+                                            "upstream body error: {}",
+                                            e
+                                        ))))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        // tx dropped here → rx receives Ready(None)
+                    }
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(EarlyFlushError(format!(
+                                "upstream send error: {}",
+                                e
+                            ))))
+                            .await;
+                    }
+                }
+            });
+            let body = axum::body::Body::from_stream(
+                SseKeepaliveStream::new(TokioReceiverStream(rx), SSE_KEEPALIVE_INTERVAL_SECS, tag),
+            );
+            let response = axum::response::Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache, no-transform")
+                .header("x-accel-buffering", "no")
+                .header("connection", "keep-alive")
+                .body(body)
+                .map_err(|e| format!("Failed to build streaming response: {}", e))?;
+            return Ok(response);
+        }
+
+        // Send the request (non-streaming, or streaming with retry loop)
         let resp = match req_builder.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -1664,6 +1811,12 @@ async fn forward_with_retry(
         }
 
         if is_streaming {
+            // Prevent downstream HTTP stacks or reverse proxies from holding
+            // SSE frames in their output buffers (surfaces as "reply only
+            // rendered after a subsequent request flushes the buffer").
+            response_builder = response_builder.header("cache-control", "no-cache, no-transform");
+            response_builder = response_builder.header("x-accel-buffering", "no");
+
             crate::modules::token_stats::record_streaming_for_platform(Some(&platform_id));
             if is_responses_api {
                 // Translate SSE stream from Chat Completions format to
@@ -2013,7 +2166,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             Some((
-                Ok(Bytes::from(format!("chunk{}", i))),
+                Ok::<bytes::Bytes, reqwest::Error>(Bytes::from(format!("chunk{}", i))),
                 i + 1,
             ))
         });
