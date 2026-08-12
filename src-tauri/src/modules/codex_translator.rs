@@ -1386,7 +1386,15 @@ pub fn transform_stream_to_responses(
                 let json = match parse_sse_line(&mut pending_sse_fragments, data) {
                     Some(j) => j,
                     None => {
-                        warn!("transform_stream: skipping non-JSON SSE data: {:.80}", data);
+                        // Show the FULL skipped payload (capped) plus a hint on
+                        // whether it looks like a real content/tool-call chunk,
+                        // so a "conversation interrupted" report can be traced
+                        // to dropped upstream data vs. a benign non-JSON line.
+                        let preview: String = data.chars().take(400).collect();
+                        let looks_like_chunk = data.contains("chat.completion.chunk")
+                            || data.contains("\"choices\"")
+                            || data.contains("tool_calls");
+                        warn!("[codex-stream {}] skipping non-JSON SSE data (len={}, looks_like_chunk={}): {}", stream_tag, data.len(), looks_like_chunk, preview);
                         continue;
                     }
                 };
