@@ -373,10 +373,18 @@ pub(crate) struct SseKeepaliveStream<S> {
     inner: S,
     next_ping_at: std::pin::Pin<Box<tokio::time::Sleep>>,
     keepalive_secs: u64,
+    /// Request tag echoed in the end-of-stream summary log.
+    tag: String,
+    /// Payload bytes relayed downstream (keepalive comments excluded).
+    bytes_relayed: u64,
+    /// Upstream chunks relayed downstream.
+    chunks_relayed: u64,
+    /// Keepalive comment frames injected.
+    pings_sent: u64,
 }
 
 impl<S> SseKeepaliveStream<S> {
-    pub(crate) fn new(inner: S, keepalive_secs: u64) -> Self {
+    pub(crate) fn new(inner: S, keepalive_secs: u64, tag: impl Into<String>) -> Self {
         let now = tokio::time::Instant::now();
         let sleep = tokio::time::sleep_until(
             now + std::time::Duration::from_secs(keepalive_secs),
@@ -385,6 +393,10 @@ impl<S> SseKeepaliveStream<S> {
             inner,
             next_ping_at: Box::pin(sleep),
             keepalive_secs,
+            tag: tag.into(),
+            bytes_relayed: 0,
+            chunks_relayed: 0,
+            pings_sent: 0,
         }
     }
 }
@@ -414,12 +426,37 @@ where
                 let now = tokio::time::Instant::now();
                 let pinned = me.next_ping_at.as_mut();
                 pinned.reset(now + std::time::Duration::from_secs(me.keepalive_secs));
+                me.bytes_relayed += bytes.len() as u64;
+                me.chunks_relayed += 1;
                 return std::task::Poll::Ready(Some(Ok(bytes)));
             }
             std::task::Poll::Ready(Some(Err(e))) => {
+                warn!(
+                    "{} pass-through stream error after {} bytes / {} chunks: {}",
+                    me.tag, me.bytes_relayed, me.chunks_relayed, e
+                );
                 return std::task::Poll::Ready(Some(Err(Box::new(e))));
             }
             std::task::Poll::Ready(None) => {
+                // End-of-stream summary. This is the only visibility into the
+                // pass-through path (the bytes are relayed verbatim, never
+                // parsed), so it is what distinguishes "the upstream sent no
+                // content" from "the client did not render what we relayed"
+                // when a reply appears to be missing.
+                if !me.tag.is_empty() {
+                    info!(
+                        "{} pass-through stream finished: relayed {} bytes in {} chunks, {} keepalive pings{}",
+                        me.tag,
+                        me.bytes_relayed,
+                        me.chunks_relayed,
+                        me.pings_sent,
+                        if me.bytes_relayed == 0 {
+                            " => EMPTY upstream body (client will show no reply)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
                 return std::task::Poll::Ready(None);
             }
             std::task::Poll::Pending => {}
@@ -431,6 +468,7 @@ where
         if me.next_ping_at.as_mut().as_mut().poll(cx).is_ready() {
             let now = tokio::time::Instant::now();
             me.next_ping_at.as_mut().reset(now + std::time::Duration::from_secs(me.keepalive_secs));
+            me.pings_sent += 1;
             return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(
                 SSE_KEEPALIVE_BYTES,
             ))));
@@ -1656,7 +1694,11 @@ async fn forward_with_retry(
                 // truncate the response mid-stream — surfacing as
                 // "the assistant's reply cut off after a tool call".
                 let body = axum::body::Body::from_stream(
-                    SseKeepaliveStream::new(resp.bytes_stream(), SSE_KEEPALIVE_INTERVAL_SECS)
+                    SseKeepaliveStream::new(
+                        resp.bytes_stream(),
+                        SSE_KEEPALIVE_INTERVAL_SECS,
+                        format!("[req {}]", req_id),
+                    )
                 );
                 return response_builder
                     .body(body)
@@ -1976,7 +2018,7 @@ mod tests {
             ))
         });
         let upstream = Box::pin(upstream);
-        let mut kept = SseKeepaliveStream::new(upstream, 1);
+        let mut kept = SseKeepaliveStream::new(upstream, 1, "[test]");
 
         let mut combined = String::new();
         while let Some(b) = kept.next().await {
@@ -2017,7 +2059,7 @@ mod tests {
         // Wrap a never-ending "no data" stream instead, so the keepalive
         // path is actually exercised. Mix: first chunk from a finite iter,
         // then forever-pending.
-        let mut kept = SseKeepaliveStream::new(upstream, 1);
+        let mut kept = SseKeepaliveStream::new(upstream, 1, "[test]");
 
         // Pull the first chunk (the "hi" data).
         let first = kept
@@ -2050,7 +2092,7 @@ mod tests {
         let upstream = Box::pin(upstream);
 
         // Keepalive = 1 s. Timeout = 3 s. We should observe ~2 pings.
-        let mut kept = SseKeepaliveStream::new(upstream, 1);
+        let mut kept = SseKeepaliveStream::new(upstream, 1, "[test]");
         let got = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             kept.next(),

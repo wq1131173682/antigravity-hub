@@ -1091,6 +1091,16 @@ pub fn transform_responses_stream_to_chat(
         // 用于 SSE 分片重组的缓冲区
         let mut pending_sse_fragments: Vec<String> = Vec::new();
 
+        // 跨上游 chunk 的「行」字节缓冲区。TCP 可能在任意字节位置切分，
+        // 包括 JSON 中间、`data:` 前缀中间、以及多字节 UTF-8 字符中间。
+        // 若按 chunk 独立解码分行，会导致：
+        //   * 半行被当作完整行解析失败后丢弃；
+        //   * `data:` 被切成 `data` + `: {...}`，后半段以 ':' 开头
+        //     会被误判为心跳注释行而直接丢弃（内容永久丢失）；
+        //   * from_utf8_lossy 把被截断的多字节字符替换为 U+FFFD，不可恢复。
+        // 只把「以换行结尾的完整行」交给解析器可从根源消除以上三种损坏。
+        let mut line_buf: Vec<u8> = Vec::new();
+
         // 心跳间隔（至少 1s，避免 0 值死循环）
         let heartbeat_interval = std::time::Duration::from_secs(config.heartbeat_interval_secs.max(1));
         // last_activity：任何上游字节到达都更新（心跳计时）
@@ -1140,8 +1150,31 @@ pub fn transform_responses_stream_to_chat(
             match chunk_result {
                 Ok(Some(Ok(chunk))) => {
                     last_activity = Instant::now();
-                    let chunk_str = String::from_utf8_lossy(&chunk);
-                    let lines: Vec<&str> = chunk_str.split('\n').collect();
+
+                    // 追加原始字节，只处理到最后一个换行为止；其后的不完整行
+                    // 留在缓冲区，等下一个 chunk 补全。
+                    line_buf.extend_from_slice(&chunk);
+                    let split_at = match line_buf.iter().rposition(|&b| b == b'\n') {
+                        Some(pos) => pos + 1,
+                        None => {
+                            // 尚无完整行 —— 继续等待更多字节。
+                            if line_buf.len() > SSE_LINE_BUFFER_LIMIT {
+                                warn!(
+                                    "responses_bridge: SSE 行缓冲超过 {} 字节仍无换行，丢弃",
+                                    SSE_LINE_BUFFER_LIMIT
+                                );
+                                line_buf.clear();
+                            }
+                            continue;
+                        }
+                    };
+                    let complete_bytes: Vec<u8> = line_buf.drain(..split_at).collect();
+
+                    // 此处切片以换行结尾，不会有多字节字符跨越边界，可安全解码。
+                    let chunk_str = String::from_utf8_lossy(&complete_bytes);
+                    // 用 split_terminator 避免行尾换行产生「幽灵空行」——
+                    // 那会被当作 SSE 事件边界，把仍在累积的多行 fragment 丢掉。
+                    let lines: Vec<&str> = chunk_str.split_terminator('\n').collect();
 
                     for line in &lines {
                         let line = line.trim();
@@ -1281,6 +1314,18 @@ pub fn transform_responses_stream_to_chat(
                     break;
                 }
                 Ok(None) => {
+                    // 规范的 SSE 流以空行结束，此处行缓冲应为空。若仍有残留，
+                    // 说明上游在一行中间切断了连接 —— 记录下来而非静默丢弃。
+                    if !line_buf.is_empty() {
+                        let leftover = String::from_utf8_lossy(&line_buf);
+                        let preview: String = leftover.chars().take(400).collect();
+                        warn!(
+                            "responses_bridge: EOF 时行缓冲仍有 {} 字节未以换行结尾（上游在行中间断开）: {}",
+                            line_buf.len(),
+                            preview
+                        );
+                        line_buf.clear();
+                    }
                     // 上游连接关闭 → 这才是「会话结束」的权威信号
                     end_reason = if seen_done { "upstream_eof" } else { "upstream_eof_no_done" };
                     break;
@@ -1567,6 +1612,10 @@ fn extract_text_from_responses_content(content: &serde_json::Value, parts: &mut 
 
 /// 最大累积的未解析 SSE 片段大小（字节）
 const SSE_FRAGMENT_BUFFER_LIMIT: usize = 1024 * 1024;
+
+/// 跨 chunk 保存「未以换行结尾的行尾字节」的缓冲上限。单条 SSE 行通常仅几 KB，
+/// 该上限只用于防御「上游完全不发换行」的异常情况。
+const SSE_LINE_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
 
 /// 解析一行 SSE 数据为 JSON 文档。
 /// 处理分片重组：当一行数据不完整时，累积到缓冲区等待后续行补全。
@@ -2479,5 +2528,64 @@ mod tests {
         // function_call
         assert_eq!(input[2]["type"], "function_call");
         assert_eq!(input[2]["name"], "get_weather");
+    }
+
+    /// 把整段 SSE 文本按固定字节长度切片投喂，模拟真实 TCP 任意位置分包。
+    fn mock_upstream_split_by_bytes(
+        transcript: &str,
+        chunk_size: usize,
+    ) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static
+    {
+        let chunks: Vec<Result<axum::body::Bytes, reqwest::Error>> = transcript
+            .as_bytes()
+            .chunks(chunk_size)
+            .map(|c| Ok(axum::body::Bytes::copy_from_slice(c)))
+            .collect();
+        futures::stream::iter(chunks)
+    }
+
+    #[tokio::test]
+    async fn test_stream_survives_arbitrary_byte_chunking() {
+        // 回归：TCP 在任意字节位置分包时，按 chunk 独立解码分行会导致
+        //   * 半行被当完整行解析失败后丢弃；
+        //   * `data:` 被切成 `data` + `: {...}`，后半段以 ':' 开头被误判为
+        //     心跳注释行而丢弃 —— 内容永久丢失；
+        //   * 多字节 UTF-8 被截断成 U+FFFD。
+        // 结果是客户端收到空回复（表现为「对话中断 / 没有回复」）。
+        let transcript = [
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_split\",\"model\":\"gpt-4\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"页面能访问，状态码 200。\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"让我看看内容。\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_split\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"页面能访问，状态码 200。让我看看内容。\"}]}]}}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .concat();
+
+        for chunk_size in [1usize, 2, 3, 5, 7, 13, 64, 137] {
+            let upstream = mock_upstream_split_by_bytes(&transcript, chunk_size);
+            let stream =
+                transform_responses_stream_to_chat(upstream, "gpt-4", BridgeConfig::default(), None);
+            let output: String = collect_stream(stream).await.concat();
+
+            assert!(
+                output.contains("状态码 200"),
+                "{} 字节分包下多字节文本不得损坏；实际: {}",
+                chunk_size,
+                output
+            );
+            assert!(
+                output.contains("让我看看内容"),
+                "{} 字节分包下后续 delta 不得丢失；实际: {}",
+                chunk_size,
+                output
+            );
+            assert!(
+                !output.contains('\u{FFFD}'),
+                "{} 字节分包下不得出现 U+FFFD 替换字符；实际: {}",
+                chunk_size,
+                output
+            );
+        }
     }
 }

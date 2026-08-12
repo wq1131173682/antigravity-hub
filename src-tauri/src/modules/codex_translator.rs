@@ -1242,6 +1242,19 @@ pub fn transform_stream_to_responses(
         // be completed by the first line of the next chunk.
         let mut pending_sse_fragments: Vec<String> = Vec::new();
 
+        // Raw byte buffer for reassembling SSE *lines* across upstream chunk
+        // boundaries. TCP can split a chunk at ANY byte offset — mid-JSON,
+        // mid-`data:` prefix, or mid-UTF-8-sequence. Decoding and splitting each
+        // chunk independently therefore corrupts data in several ways:
+        //   * half a line is parsed as if it were complete, then dropped;
+        //   * a severed `data:` prefix (`data` + `: {...}`) can never be
+        //     reassembled, and poisons the fragment buffer for later lines;
+        //   * `from_utf8_lossy` turns a split multi-byte char into U+FFFD,
+        //     which is unrecoverable (breaks non-ASCII output).
+        // Buffering raw bytes and only ever handing *newline-terminated* lines
+        // to the parser eliminates all three at the source.
+        let mut line_buf: Vec<u8> = Vec::new();
+
         loop {
             // Apply an idle timeout: if the stream hasn't produced a valid
             // "choices" chunk within the expected window, force completion.
@@ -1286,6 +1299,19 @@ pub fn transform_stream_to_responses(
                     break;
                 }
                 Ok(None) => {
+                    // A well-formed SSE stream ends on a blank line, so the line
+                    // buffer should be empty here. Anything left means the upstream
+                    // cut the connection mid-line — surface it instead of dropping
+                    // it silently.
+                    if !line_buf.is_empty() {
+                        let leftover = String::from_utf8_lossy(&line_buf);
+                        let preview: String = leftover.chars().take(400).collect();
+                        warn!(
+                            "[codex-stream {}] EOF with {} unterminated bytes in line buffer (upstream cut mid-line): {}",
+                            stream_tag, line_buf.len(), preview
+                        );
+                        line_buf.clear();
+                    }
                     // Stream ended naturally — this is the authoritative
                     // signal that the response is complete. Finalize here.
                     if st.has_sent_created && !st.is_completed {
@@ -1337,8 +1363,35 @@ pub fn transform_stream_to_responses(
                 }
             };
 
-            let chunk_str = String::from_utf8_lossy(&chunk);
-            let lines: Vec<&str> = chunk_str.split('\n').collect();
+            // Append raw bytes, then process only the portion up to the LAST
+            // newline. Whatever follows it is an incomplete line, which stays in
+            // the buffer until the next chunk completes it. This is what keeps a
+            // TCP split from severing a JSON payload, a `data:` prefix, or a
+            // multi-byte UTF-8 character.
+            line_buf.extend_from_slice(&chunk);
+            let split_at = match line_buf.iter().rposition(|&b| b == b'\n') {
+                Some(pos) => pos + 1,
+                None => {
+                    // No complete line yet — wait for more bytes.
+                    if line_buf.len() > SSE_LINE_BUFFER_LIMIT {
+                        warn!(
+                            "[codex-stream {}] SSE line buffer exceeded {} bytes with no newline, discarding",
+                            stream_tag, SSE_LINE_BUFFER_LIMIT
+                        );
+                        line_buf.clear();
+                    }
+                    continue;
+                }
+            };
+            let complete_bytes: Vec<u8> = line_buf.drain(..split_at).collect();
+
+            // Safe to decode now: the slice ends on a newline, so no multi-byte
+            // character can be straddling the boundary.
+            let chunk_str = String::from_utf8_lossy(&complete_bytes);
+            // `split_terminator` so the trailing newline does not yield a phantom
+            // empty line — that would be treated as an SSE event boundary and
+            // would discard a still-accumulating multi-line fragment.
+            let lines: Vec<&str> = chunk_str.split_terminator('\n').collect();
 
             for line in &lines {
                 let line = line.trim();
@@ -2000,6 +2053,12 @@ fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> 
 /// Prevents unbounded memory growth when an upstream emits garbage that never
 /// forms valid JSON.
 const SSE_FRAGMENT_BUFFER_LIMIT: usize = 1024 * 1024;
+
+/// Maximum size of the raw byte buffer holding an incomplete trailing SSE line
+/// across upstream chunk boundaries. A single SSE line (one `chat.completion.chunk`)
+/// is normally a few KB; this cap only guards against an upstream that never
+/// emits a newline at all.
+const SSE_LINE_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
 
 /// Parse one SSE line into a JSON document, transparently reassembling
 /// multi-line fragments left by relays that wrap a single payload across
@@ -3033,6 +3092,106 @@ mod tests {
             out.matches("\"type\":\"response.completed\"").count(),
             1,
             "exactly one completed event; got: {}",
+            out
+        );
+    }
+
+    /// Build the canonical SSE transcript used by the chunk-splitting tests:
+    /// non-ASCII text, a shell command whose arguments contain meaningful
+    /// spaces, then finish_reason + [DONE].
+    fn sse_transcript_with_tool_call() -> String {
+        [
+            "data: {\"id\":\"chatcmpl-split\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"页面能访问，状态码 200。让我看看内容。\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-split\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_split_1\",\"type\":\"function\",\"function\":{\"name\":\"shell_command\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-split\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"Get-ChildItem -Force\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-split\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ]
+        .concat()
+    }
+
+    /// Assert that a transcript delivered in `chunk_size`-byte pieces still
+    /// yields the full text and an intact tool call.
+    async fn assert_transcript_survives_split(chunk_size: usize) {
+        let transcript = sse_transcript_with_tool_call();
+        let bytes = transcript.into_bytes();
+        let chunks: Vec<axum::body::Bytes> = bytes
+            .chunks(chunk_size)
+            .map(|c| axum::body::Bytes::copy_from_slice(c))
+            .collect();
+        let upstream = futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(Ok)
+                .collect::<Vec<Result<axum::body::Bytes, reqwest::Error>>>(),
+        );
+
+        let out = collect_translator_stream(transform_stream_to_responses(upstream, "gpt-4")).await;
+
+        assert!(
+            out.contains("\"name\":\"shell_command\""),
+            "tool call must survive {}-byte chunking; got: {}",
+            chunk_size,
+            out
+        );
+        // The space inside `Get-ChildItem -Force` is the canary: trimming a
+        // fragment's edges would silently weld the words together and produce a
+        // valid-but-wrong command.
+        assert!(
+            out.contains("Get-ChildItem -Force"),
+            "tool arguments must keep interior spaces at {}-byte chunking; got: {}",
+            chunk_size,
+            out
+        );
+        assert!(
+            out.contains("状态码 200"),
+            "multi-byte UTF-8 text must not be corrupted at {}-byte chunking; got: {}",
+            chunk_size,
+            out
+        );
+        assert!(
+            !out.contains('\u{FFFD}'),
+            "no U+FFFD replacement chars may appear at {}-byte chunking; got: {}",
+            chunk_size,
+            out
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transform_reassembles_sse_lines_split_at_arbitrary_byte_offsets() {
+        // Regression for the real-world Agnes relay failure: TCP delivered SSE
+        // chunks split at arbitrary byte offsets, so the translator saw
+        // fragments like `{"i`, `data`, `: {"id":...`, or
+        // `.completion.chunk","choices":[...`. Each was parsed as a standalone
+        // line, failed, and was dropped — silently truncating tool-call
+        // arguments and assistant text while the stream still reported a
+        // normal `finish_reason` + `[DONE]` ending. Sweeping the chunk size
+        // walks the split point across every byte boundary, including through
+        // the `data:` prefix and through multi-byte UTF-8 sequences.
+        for chunk_size in [1usize, 2, 3, 4, 5, 7, 13, 31, 64, 97, 128, 333] {
+            assert_transcript_survives_split(chunk_size).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transform_survives_severed_data_prefix() {
+        // Exact shape observed in production logs: the `data:` prefix itself was
+        // cut in half, yielding `data` and `: {...}`. Neither fragment starts
+        // with `data:`, so both were treated as bare lines; concatenating them
+        // still leaves the `data` prefix attached, so the payload could never be
+        // parsed and the fragment buffer stayed poisoned for subsequent lines.
+        let upstream = futures::stream::iter(vec![
+            Ok::<axum::body::Bytes, reqwest::Error>(axum::body::Bytes::from("data")),
+            Ok(axum::body::Bytes::from(
+                ": {\"id\":\"chatcmpl-sev\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-sev\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+            )),
+        ]);
+
+        let out = collect_translator_stream(transform_stream_to_responses(upstream, "gpt-4")).await;
+
+        assert!(
+            out.contains("hello"),
+            "content must survive a severed `data:` prefix; got: {}",
             out
         );
     }
