@@ -17,7 +17,6 @@ permissions:
 
 env:
   NODE_VERSION: "22"
-  MINISIGN_VERSION: "0.12"
   # Tauri updater platforms map to OS/distro identifiers
   # See: https://tauri.app/distribute/updater/#platform-identifiers
   TAURI_PLATFORMS_WIN: "windows-x64"
@@ -39,6 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Extract version
         id: version
         run: |
@@ -56,26 +60,6 @@ jobs:
           fi
           echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Download minisign binary
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p /tmp/minisign
-          gh release download "${MINISIGN_VERSION}" \
-            --repo jedisct1/minisign \
-            --pattern "minisign-0.12-linux.tar.gz" \
-            -D /tmp/minisign --clobber
-
-      - name: Extract minisign
-        run: |
-          cd /tmp/minisign
-          tar xzf minisign-0.12-linux.tar.gz
-          # Binary is at minisign-linux/x86_64/minisign on Linux runners
-          cp minisign-linux/x86_64/minisign .
-          rm -rf minisign-linux
-          chmod +x minisign
-          ./minisign -v
-
       - name: Download all release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -85,19 +69,19 @@ jobs:
             --dir /tmp/release-assets --clobber || true
           ls -la /tmp/release-assets/
 
-      - name: Build updater.json with minisign signature
+      - name: Build and sign updater.json
+        # Reuse the exact same signing key + password as the Release build.
+        # `tauri signer sign` reads TAURI_SIGNING_PRIVATE_KEY (base64) and
+        # TAURI_SIGNING_PRIVATE_KEY_PASSWORD from the environment, exactly like
+        # the Release pipeline does for the binaries. This avoids the fragile
+        # base64/manisign CLI handling and the interactive password prompt.
         env:
-          MINISIGN_PRIVKEY: ${{ secrets.MINISIGN_PRIVKEY }}
-          MINISIGN_PRIVKEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           TAG="${{ steps.tag.outputs.TAG_NAME }}"
           GH_URL="https://github.com/wq1131173682/antigravity-hub/releases/download/${TAG}"
-
-          # Strip all whitespace from secret (including newlines), then base64-decode to raw rsign key
-          printf '%s' "$MINISIGN_PRIVKEY" | tr -d '[:space:]' | base64 -d > /tmp/minisign.key
-          echo "Private key content:"
-          cat /tmp/minisign.key
 
           # Collect available assets
           NSIS=""
@@ -148,26 +132,27 @@ jobs:
           echo "Generated updater.json (before signing):"
           cat updater.json
 
-          # Sign the updater.json with minisign (password via stdin for rsign encrypted key)
-          echo "$MINISIGN_PRIVKEY_PASSWORD" | /tmp/minisign/minisign -S \
-            -s /tmp/minisign.key \
-            -m updater.json \
-            -x updater.json.minisig
+          # Sign updater.json with the same key used to sign the release binaries.
+          # `tauri signer sign` emits a minisign-compatible signature to <file>.sig.
+          npx -y @tauri-apps/cli@2.10.0 signer sign updater.json
 
-          echo "Signature created:"
-          cat updater.json.minisig
+          echo "Signature file created:"
+          cat updater.json.sig
 
           # Read signature and embed into updater.json
-          SIG=$(cat updater.json.minisig)
+          SIG=$(cat updater.json.sig)
           python3 -c "
           import json, sys
           with open('updater.json') as f:
               data = json.load(f)
           for platform in data['platforms']:
-              data['platforms'][platform]['signature'] = '''${SIG}'''
+              data['platforms'][platform]['signature'] = '''\${SIG}'''
           with open('updater.json', 'w') as f:
               json.dump(data, f, indent=2)
           "
+
+          # Keep the .minisig artifact name for consistency with prior uploads
+          cp updater.json.sig updater.json.minisig
 
           echo "Final updater.json:"
           cat updater.json
@@ -180,5 +165,7 @@ jobs:
             updater.json
             updater.json.minisig
           token: ${{ secrets.GITHUB_TOKEN }}
-          draft: true
-          dry_run: ${{ github.event_name != 'workflow_dispatch' }}
+          draft: false
+          # Actually publish (upload) in automatic runs triggered by Release.
+          # Only use dry_run when explicitly debugging via workflow_dispatch.
+          dry_run: false
