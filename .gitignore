@@ -76,3 +76,4 @@ src-tauri/minisign/minisign.key
 # Temporary test files
 src/pages/test.txt
 nul
+# Tauri bundle signing key
