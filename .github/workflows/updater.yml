@@ -94,8 +94,8 @@ jobs:
           TAG="${{ steps.tag.outputs.TAG_NAME }}"
           GH_URL="https://github.com/wq1131173682/antigravity-hub/releases/download/${TAG}"
 
-          # Strip whitespace from the secret and write clean minisign key
-          printf '%s' "$MINISIGN_PRIVKEY" | tr -d '[:space:]' > /tmp/minisign.key
+          # Strip whitespace from the secret and base64-decode to get the raw rsign key
+          printf '%s' "$MINISIGN_PRIVKEY" | tr -d '[:space:]' | base64 -d > /tmp/minisign.key
           echo "Private key content:"
           cat /tmp/minisign.key
 
