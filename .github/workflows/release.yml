@@ -29,14 +29,14 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=v${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release (draft)
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
-          name: v${{ steps.version.outputs.VERSION }}
+          name: ${{ steps.version.outputs.VERSION }}
           draft: true
           prerelease: false
           generate_release_notes: true

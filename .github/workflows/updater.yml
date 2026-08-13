@@ -35,7 +35,7 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION=v${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Download minisign binary
         env:
@@ -51,6 +51,9 @@ jobs:
         run: |
           cd /tmp/minisign
           tar xzf minisign-0.12-linux.tar.gz
+          # Binary is at minisign-linux/x86_64/minisign on Linux runners
+          cp minisign-linux/x86_64/minisign .
+          rm -rf minisign-linux
           chmod +x minisign
           ./minisign -v
 
@@ -68,7 +71,7 @@ jobs:
           MINISIGN_PRIVKEY: ${{ secrets.MINISIGN_PRIVKEY }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          TAG="v${VERSION}"
+          TAG="${VERSION}"
           GH_URL="https://github.com/wq1131173682/antigravity-hub/releases/download/${TAG}"
 
           # Collect available assets
@@ -148,7 +151,7 @@ jobs:
       - name: Upload updater files to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.version.outputs.VERSION }}
           files: |
             updater.json
             updater.json.minisig
