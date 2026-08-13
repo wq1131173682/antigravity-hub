@@ -28,7 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -47,7 +47,7 @@
         "https://github.com/wq1131173682/antigravity-hub/releases/latest/download/updater.json"
       ],
       "dialog": true,
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0ODM5NDA0Rjk2OURBRDYKUldUVzJtbjVCSlNEZEw2MXpwVlpzRmlQcTRFQ0J5UUp5UFdrM1ZaUU5SaFVZYXp2Vk9qQXZCODIK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGMjYwREZFOUJGOUUwRkMKL09ENW0vNE5Kcyt2dWNqTys3K1NVT0Zta1c4TEZHOE95RjcveGpFRzZ6Si93TmhZZGZLVnBBPT0K"
     },
     "process": null,
     "fs": null,
