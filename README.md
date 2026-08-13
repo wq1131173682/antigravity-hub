@@ -33,7 +33,7 @@
 - **负载均衡**：请求在可用 Key 之间均匀分发
 - **故障切换**：429 / 5xx 自动轮换到下一个可用 Key（指数退避重试）
 - **配额管理**：按「模型 × Key」维度跟踪 5 小时 / 天 / 月滑动窗口用量，超限自动切换
-- **协议翻译**：透明地完成 Responses API ↔ Chat Completions 互转，让 Codex CLI 等工具可以调用任意上游模型
+- **OpenAI 协议穿透 + Key 轮转**：OpenAI Chat Completions 请求原样转发上游，本地统一管理并按配额/故障智能轮换 API Key
 
 核心就一件事：**统一入口，多 Key 轮询，按配额智能调度**。
 
@@ -42,7 +42,7 @@
 ### 🚀 核心代理
 - 本地 OpenAI 兼容代理（默认 `127.0.0.1:8045`），支持任意 OpenAI 兼容 SDK / 客户端接入
 - 自动 Key 轮换与负载均衡，429/5xx 智能退避，单 Key 也支持
-- **Responses API ↔ Chat Completions 透明翻译**：Codex CLI 等工具可直接使用
+- ⚠️ **Codex 集成与 Responses API 协议转换已于 v5.3.10 封存**：代码保留、界面灰显禁用；代理以 OpenAI Chat Completions 穿透为主路径
 - 兼容多种上游格式：多字段推理内容（`reasoning_content` / `thinking` 等）、内联 thinking 块（`>think` / `<think>` / `[think]` 等标记）、工具调用、流式与非流式
 
 ### 💳 多平台账号管理
@@ -55,7 +55,8 @@
 - 429 / 500 错误计数与自动退避，到期自动恢复
 - 全局 + 按平台的 **Token 用量统计**（持久化，重启不丢失）
 
-### 🤖 Codex CLI 集成
+### 🤖 Codex CLI 集成（已封存 · v5.3.10）
+> 自 v5.3.10 起 Codex 集成与 Responses API 协议转换已**封存停用**（代码保留、设置页灰显禁用、不响应交互）。以下能力在当前版本暂不可用。
 - 一键生成并应用 Codex `config.toml`（`model_providers.custom` + API Key 认证）
 - 配置备份 / 一键恢复，清除残留 OAuth 数据
 - 环境变量冲突检测（`OPENAI_API_KEY` / `OPENAI_BASE_URL` 等）
@@ -93,7 +94,7 @@ npm run tauri build
 1. 启动应用，在「账号管理」中添加平台与 API Key
 2. 启动本地代理（默认端口 `8045`）
 3. 任意 OpenAI 兼容客户端指向 `http://127.0.0.1:8045/{平台前缀}/v1` 即可
-4. 在「设置 → Codex CLI 集成」中一键应用配置，即可在 Codex CLI 中使用
+4. （可选）Codex CLI 集成已在 v5.3.10 封存停用，如需启用请关注后续版本
 
 > 完整的使用说明与各平台配置示例，见项目 Wiki（建设中）与「设置」页面的内嵌提示。
 
@@ -104,7 +105,7 @@ npm run tauri build
 | 前端 | React 19 · TypeScript · Ant Design · Tailwind CSS · daisyUI · Zustand · i18next |
 | 后端 | Rust · Tauri v2 · Axum（本地代理） |
 | 存储 | JSON 文件（`api_keys.json` / `quota_windows.json` / `token_stats.json` / `config.json` 等，位于系统数据目录） |
-| 代理协议 | OpenAI Chat Completions / Responses API（透明互转） |
+| 代理协议 | OpenAI Chat Completions（穿透） / Responses API（v5.3.10 起封存） |
 
 ## 项目结构
 
@@ -127,6 +128,10 @@ npm run tauri build
 
 <!-- 注意：版本条目必须保持「- **vX.Y.Z** 标题 + 缩进子项」格式，release.yml 依赖该格式提取发布说明 -->
 
+- **v5.3.10** 重点版本 · 稳定性集中修复（⭐ milestone）
+  - 封存 Codex 集成与 Responses API 协议转换（`CODEX_ENABLED=false`，代码保留、界面灰显禁用）
+  - OpenAI 协议直接穿透，API Key 本地轮转（429/5xx 自动切换下一把 Key）
+  - 修复：代理下对话/工具调用中断（SSE 流结束 `Connection: close`）、半帧静默中断（保活仅事件边界注入）、平台 key 429 限流中断（冷却期退避重试）
 - **v5.2.11** 兼容性增强与多项修复
   - 兼容性：Responses API 翻译全面兼容不同平台/模型（`reasoning` → `reasoning_effort`、`tool_choice` 格式转换、thinking 标记 `>think`/`<think>`/`[think]` 识别、多字段推理名）
   - 修复：空上游流改为明确报错而非静默空完成；仅 2xx 计入配额（修复 4xx 灌满配额导致对话中断）；模型改写仅限 Responses API

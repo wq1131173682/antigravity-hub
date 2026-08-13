@@ -33,7 +33,7 @@ A locally running **API key rotation proxy**. Add API keys from multiple platfor
 - **Load balancing** — requests are evenly distributed across available keys
 - **Failover** — automatically rotates to the next usable key on 429 / 5xx (with exponential backoff)
 - **Quota management** — per (model × key) sliding-window tracking for 5-hour / daily / monthly usage, auto-switching when limits are exceeded
-- **Protocol translation** — transparent conversion between the Responses API and Chat Completions, so tools like Codex CLI can call any upstream model
+- **OpenAI protocol pass-through + key rotation** — OpenAI Chat Completions requests are forwarded upstream as-is, with keys managed and rotated locally by quota/failure policy
 
 One entry point, many keys, smart quota-aware scheduling.
 
@@ -42,7 +42,7 @@ One entry point, many keys, smart quota-aware scheduling.
 ### 🚀 Core Proxy
 - Local OpenAI-compatible proxy (default `127.0.0.1:8045`) for any OpenAI-compatible SDK / client
 - Automatic key rotation & load balancing with intelligent 429/5xx backoff (single key supported too)
-- **Transparent Responses API ↔ Chat Completions translation** for Codex CLI and other tools
+- ⚠️ **Codex integration & Responses API translation archived in v5.3.10** — code retained, UI greyed/disabled; the proxy now targets OpenAI Chat Completions pass-through
 - Broad upstream compatibility: multiple reasoning field names (`reasoning_content` / `thinking` / …), inline thinking blocks (`>think` / `<think>` / `[think]` markers), tool calls, streaming & non-streaming
 
 ### 💳 Multi-platform Account Management
@@ -55,7 +55,8 @@ One entry point, many keys, smart quota-aware scheduling.
 - 429/500 error counting with automatic backoff and expiry recovery
 - Global + per-platform **token usage statistics** (persisted across restarts)
 
-### 🤖 Codex CLI Integration
+### 🤖 Codex CLI Integration (archived · v5.3.10)
+> As of v5.3.10, Codex integration and Responses API translation are **archived/disabled** (code retained, Settings greyed out and non-interactive). The following capabilities are unavailable in the current release.
 - One-click generation & application of Codex `config.toml` (`model_providers.custom` + API key auth)
 - Config backup / one-click restore, clear residual OAuth data
 - Environment variable conflict detection (`OPENAI_API_KEY` / `OPENAI_BASE_URL` / …)
@@ -93,7 +94,7 @@ npm run tauri build
 1. Launch the app and add platforms & API keys under "Account Management"
 2. Start the local proxy (default port `8045`)
 3. Point any OpenAI-compatible client at `http://127.0.0.1:8045/{platform-prefix}/v1`
-4. For Codex CLI, apply the configuration with one click under "Settings → Codex CLI Integration"
+4. (Optional) Codex CLI integration is archived/disabled in v5.3.10; watch for it in a future release
 
 ## Tech Stack
 
@@ -102,7 +103,7 @@ npm run tauri build
 | Frontend | React 19 · TypeScript · Ant Design · Tailwind CSS · daisyUI · Zustand · i18next |
 | Backend | Rust · Tauri v2 · Axum (local proxy) |
 | Storage | JSON files (`api_keys.json` / `quota_windows.json` / `token_stats.json` / `config.json` etc., in the OS data directory) |
-| Proxy protocol | OpenAI Chat Completions / Responses API (transparent translation) |
+| Proxy protocol | OpenAI Chat Completions (pass-through) / Responses API (archived in v5.3.10) |
 
 ## Project Structure
 
@@ -125,6 +126,10 @@ npm run tauri build
 
 <!-- Note: keep the version entries in the "- **vX.Y.Z** title + indented items" format to stay consistent with release.yml note extraction -->
 
+- **v5.3.10** Key release · stability fixes (⭐ milestone)
+  - Archived Codex integration & Responses API translation (`CODEX_ENABLED=false`; code retained, UI greyed/disabled)
+  - OpenAI protocol pass-through with local key rotation (429/5xx auto-failover to next key)
+  - Fix: proxied chat/tool-call drops (Connection: close after SSE), mid-frame idle cutoff (keepalive at event boundary only), 429 rate-limit exhaustion (cooldown backoff retry)
 - **v5.2.11** Compatibility enhancements & fixes
   - Compatibility: broad cross-platform Responses API translation (`reasoning` → `reasoning_effort`, `tool_choice` conversion, thinking markers `>think`/`<think>`/`[think]`, more reasoning field names)
   - Fix: empty upstream streams now surface as errors instead of silent empty completions; only 2xx counts toward quota (fixes 4xx inflating usage and dropping keys); model rewriting scoped to Responses API only

@@ -1,5 +1,7 @@
 # Responses API ↔ Chat Completions 双向字段映射文档
 
+> ⚠️ **已封存（v5.3.10）**：Codex 集成与 Responses API 协议转换已于 v5.3.10 封存停用（`CODEX_ENABLED=false`，代码保留）。该转换器当前不启用，本文档仅供历史参考。
+
 > 适用范围：`src-tauri/src/modules/responses_bridge.rs`（核心转换器）与
 > `src-tauri/src/bin/responses_relay.rs`（中转网关服务，端口 8046）。
 > 本文档是 **v2 修复版**（多轮工具调用会话不被提前终止）的权威映射说明。
