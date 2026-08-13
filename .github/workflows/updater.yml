@@ -78,6 +78,11 @@ jobs:
           TAG="${VERSION}"
           GH_URL="https://github.com/wq1131173682/antigravity-hub/releases/download/${TAG}"
 
+          # Decode the base64-encoded private key to get the raw minisign key format
+          echo "$MINISIGN_PRIVKEY" | base64 -d > /tmp/minisign.key
+          echo "Private key content:"
+          cat /tmp/minisign.key
+
           # Collect available assets
           NSIS=""
           MSI=""
