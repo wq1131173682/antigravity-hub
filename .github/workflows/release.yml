@@ -5,27 +5,25 @@ on:
     tags:
       - "v*"
 
-# Prevent concurrent release builds
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: write
-  packages: write
 
 env:
   NODE_VERSION: "22"
   RUST_TOOLCHAIN: "stable"
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  # ── Determine if we should create a GitHub Release ────────────────────────
+  # ── Extract version (used by all jobs) ────────────────────────────────────
   release-meta:
     name: Release Metadata
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,19 +33,9 @@ jobs:
           VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
           echo "VERSION=v${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release (draft)
-        id: create_release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          name: ${{ steps.version.outputs.VERSION }}
-          draft: true
-          prerelease: false
-          generate_release_notes: true
-
-  # ── Windows Build & Release ───────────────────────────────────────────────
+  # ── Windows Build ──────────────────────────────────────────────────────────
   build-windows:
-    name: Build & Release Windows (x64)
+    name: Build Windows (x64)
     needs: [release-meta]
     runs-on: windows-latest
     steps:
@@ -63,22 +51,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install WebView2
+      - name: Install llvm (required by Rust on Windows)
+        run: choco install llvm -y --no-progress
+
+      - name: Install WebView2 (official Microsoft Edge runtime)
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri "https://github.com/webview/webview2/releases/download/126.0.2592.102/WinWebview2Setup.exe" -OutFile "$env:TEMP\WebView2.exe"
-          Start-Process "$env:TEMP\WebView2.exe" -ArgumentList "/silent", "/install" -Wait
+          # Use the stable channel WebView2 bootstrap installer
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\WebView2Setup.exe"
+          Start-Process "$env:TEMP\WebView2Setup.exe" -ArgumentList "/silent", "/install" -Wait
 
-      - name: Install system dependencies
-        run: choco install llvm -y
-
-      - name: npm ci
-        run: npm ci
+      - name: npm ci (with legacy peer deps for @lobehub/icons compatibility)
+        run: npm ci --legacy-peer-deps
 
       - name: Build Tauri app (Windows)
         run: npx tauri build
 
-      - name: Upload NSIS setup.exe to Release
+      - name: Upload NSIS setup.exe
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.version }}
@@ -86,7 +75,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-      - name: Upload MSI to Release
+      - name: Upload MSI
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.version }}
@@ -94,9 +83,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # ── macOS Build & Release ─────────────────────────────────────────────────
+  # ── macOS Build ────────────────────────────────────────────────────────────
   build-macos:
-    name: Build & Release macOS (universal)
+    name: Build macOS (universal)
     needs: [release-meta]
     runs-on: macos-latest
     steps:
@@ -112,13 +101,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: npm ci
-        run: npm ci
+      - name: npm ci (with legacy peer deps for @lobehub/icons compatibility)
+        run: npm ci --legacy-peer-deps
 
       - name: Build Tauri app (macOS universal)
         run: npx tauri build
 
-      - name: Upload .dmg to Release
+      - name: Upload .dmg
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.version }}
@@ -126,9 +115,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # ── Linux Build & Release ─────────────────────────────────────────────────
+  # ── Linux Build ────────────────────────────────────────────────────────────
   build-linux:
-    name: Build & Release Linux (x64)
+    name: Build Linux (x64)
     needs: [release-meta]
     runs-on: ubuntu-latest
     steps:
@@ -149,13 +138,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator-dev libvips-dev
 
-      - name: npm ci
-        run: npm ci
+      - name: npm ci (with legacy peer deps for @lobehub/icons compatibility)
+        run: npm ci --legacy-peer-deps
 
       - name: Build Tauri app (Linux)
         run: npx tauri build
 
-      - name: Upload .deb to Release
+      - name: Upload .deb
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.version }}
@@ -163,7 +152,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-      - name: Upload AppImage to Release
+      - name: Upload AppImage
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release-meta.outputs.version }}
@@ -171,7 +160,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # ── Auto-publish release after manual review ──────────────────────────────
+  # ── Publish Release (after all platforms succeed) ──────────────────────────
   publish:
     name: Publish Release
     needs: [build-windows, build-macos, build-linux, release-meta]
