@@ -139,12 +139,15 @@ jobs:
           echo "Signature file created:"
           cat updater.json.sig
 
-          # Read signature from file (avoids shell variable-expansion pitfalls)
-          # and embed it into updater.json's per-platform signature fields.
-          cp updater.json.sig /tmp/updater.sig
+          # `tauri signer sign` writes a base64-encoded signature to updater.json.sig.
+          # The Tauri updater expects the *plaintext* minisign signature (multi-line)
+          # in the per-platform `signature` field, so base64-decode it first.
+          base64 -d updater.json.sig > /tmp/updater.sig.plain
+
+          # Embed the decoded plaintext signature (avoids shell var-expansion pitfalls)
           python3 -c "
           import json
-          with open('/tmp/updater.sig') as f:
+          with open('/tmp/updater.sig.plain') as f:
               sig = f.read()
           with open('updater.json') as f:
               data = json.load(f)
