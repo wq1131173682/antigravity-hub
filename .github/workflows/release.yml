@@ -18,7 +18,6 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # ── Extract version (used by all jobs) ────────────────────────────────────
   release-meta:
     name: Release Metadata
     runs-on: ubuntu-latest
@@ -26,47 +25,39 @@ jobs:
       version: ${{ steps.version.outputs.VERSION }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Extract version from Cargo.toml
         id: version
         run: |
           VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
           echo "VERSION=v${VERSION}" >> $GITHUB_OUTPUT
 
-  # ── Windows Build ──────────────────────────────────────────────────────────
   build-windows:
     name: Build Windows (x64)
     needs: [release-meta]
     runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install llvm (required by Rust on Windows)
+      - name: Install llvm
         run: choco install llvm -y --no-progress
-
-      - name: Install WebView2 (official Microsoft Edge runtime)
+      - name: Install WebView2
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          # Use the stable channel WebView2 bootstrap installer
           Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "$env:TEMP\WebView2Setup.exe"
           Start-Process "$env:TEMP\WebView2Setup.exe" -ArgumentList "/silent", "/install" -Wait
-
-      - name: npm ci (with legacy peer deps for @lobehub/icons compatibility)
+      - name: npm ci
         run: npm ci --legacy-peer-deps
-
       - name: Build Tauri app (Windows)
         run: npx tauri build
-
       - name: Upload NSIS setup.exe
         uses: softprops/action-gh-release@v2
         with:
@@ -74,7 +65,6 @@ jobs:
           files: src-tauri/target/release/bundle/nsis/*.exe
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
-
       - name: Upload MSI
         uses: softprops/action-gh-release@v2
         with:
@@ -83,30 +73,26 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # ── macOS Build ────────────────────────────────────────────────────────────
   build-macos:
     name: Build macOS (universal)
     needs: [release-meta]
     runs-on: macos-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: npm ci (with legacy peer deps for @lobehub/icons compatibility)
+      - name: npm ci
         run: npm ci --legacy-peer-deps
-
       - name: Build Tauri app (macOS universal)
         run: npx tauri build
-
       - name: Upload .dmg
         uses: softprops/action-gh-release@v2
         with:
@@ -115,35 +101,30 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # ── Linux Build ────────────────────────────────────────────────────────────
   build-linux:
     name: Build Linux (x64)
     needs: [release-meta]
     runs-on: ubuntu-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: package-lock.json
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator-dev libvips-dev
-
-      - name: npm ci (with legacy peer deps for @lobehub/icons compatibility)
+      - name: npm ci
         run: npm ci --legacy-peer-deps
-
       - name: Build Tauri app (Linux)
         run: npx tauri build
-
       - name: Upload .deb
         uses: softprops/action-gh-release@v2
         with:
@@ -151,7 +132,6 @@ jobs:
           files: src-tauri/target/release/bundle/deb/*.deb
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
-
       - name: Upload AppImage
         uses: softprops/action-gh-release@v2
         with:
@@ -160,7 +140,6 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
-  # ── Publish Release (after all platforms succeed) ──────────────────────────
   publish:
     name: Publish Release
     needs: [build-windows, build-macos, build-linux, release-meta]
