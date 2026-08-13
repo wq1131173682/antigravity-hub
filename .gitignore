@@ -70,6 +70,9 @@ DOCKER_DEPLOYMENT.md
 # Agent workspace memory (not part of the app)
 .workbuddy/
 
+# Minisign private key (keep secret!)
+src-tauri/minisign/minisign.key
+
 # Temporary test files
 src/pages/test.txt
 nul

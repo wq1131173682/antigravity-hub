@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Prevent concurrent release builds
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22"
+  RUST_TOOLCHAIN: "stable"
+
+jobs:
+  # ── Determine if we should create a GitHub Release ────────────────────────
+  release-meta:
+    name: Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release (draft)
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: v${{ steps.version.outputs.VERSION }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+
+  # ── Windows Build & Release ───────────────────────────────────────────────
+  build-windows:
+    name: Build & Release Windows (x64)
+    needs: [release-meta]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install WebView2
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/webview/webview2/releases/download/126.0.2592.102/WinWebview2Setup.exe" -OutFile "$env:TEMP\WebView2.exe"
+          Start-Process "$env:TEMP\WebView2.exe" -ArgumentList "/silent", "/install" -Wait
+
+      - name: Install system dependencies
+        run: choco install llvm -y
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Tauri app (Windows)
+        run: npx tauri build
+
+      - name: Upload NSIS setup.exe to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.version }}
+          files: src-tauri/target/release/bundle/nsis/*.exe
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+
+      - name: Upload MSI to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.version }}
+          files: src-tauri/target/release/bundle/msi/*.msi
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+
+  # ── macOS Build & Release ─────────────────────────────────────────────────
+  build-macos:
+    name: Build & Release macOS (universal)
+    needs: [release-meta]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Tauri app (macOS universal)
+        run: npx tauri build
+
+      - name: Upload .dmg to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.version }}
+          files: src-tauri/target/release/bundle/dmg/*.dmg
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+
+  # ── Linux Build & Release ─────────────────────────────────────────────────
+  build-linux:
+    name: Build & Release Linux (x64)
+    needs: [release-meta]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator-dev libvips-dev
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Tauri app (Linux)
+        run: npx tauri build
+
+      - name: Upload .deb to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.version }}
+          files: src-tauri/target/release/bundle/deb/*.deb
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+
+      - name: Upload AppImage to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.version }}
+          files: src-tauri/target/release/bundle/appimage/*.AppImage
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
+
+  # ── Auto-publish release after manual review ──────────────────────────────
+  publish:
+    name: Publish Release
+    needs: [build-windows, build-macos, build-linux, release-meta]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.version }}
+          publish: true
+          token: ${{ secrets.GITHUB_TOKEN }}

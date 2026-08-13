@@ -1,0 +1,156 @@
+name: Updater
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: updater-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22"
+  MINISIGN_VERSION: "0.12"
+  # Tauri updater platforms map to OS/distro identifiers
+  # See: https://tauri.app/distribute/updater/#platform-identifiers
+  TAURI_PLATFORMS_WIN: "windows-x64"
+  TAURI_PLATFORMS_LINUX_GNOME: "linux-gnome"
+  TAURI_PLATFORMS_LINUX_APPIMAGE: "linux-appimage"
+  TAURI_PLATFORMS_MACOS: "darwin"
+
+jobs:
+  # Build updater.json for Tauri's built-in auto-update mechanism.
+  # This file is downloaded by the app from:
+  #   https://github.com/wq1131173682/antigravity-hub/releases/latest/download/updater.json
+  generate-updater-manifest:
+    name: Generate Updater Manifest
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download minisign binary
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/minisign
+          gh release download "${MINISIGN_VERSION}" \
+            --repo jedisct1/minisign \
+            --pattern "minisign-0.12-linux.tar.gz" \
+            -D /tmp/minisign --clobber
+
+      - name: Extract minisign
+        run: |
+          cd /tmp/minisign
+          tar xzf minisign-0.12-linux.tar.gz
+          chmod +x minisign
+          ./minisign -v
+
+      - name: Download all release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/release-assets
+          gh release download "${{ steps.version.outputs.VERSION }}" \
+            --dir /tmp/release-assets --clobber || true
+          ls -la /tmp/release-assets/
+
+      - name: Build updater.json with minisign signature
+        env:
+          MINISIGN_PRIVKEY: ${{ secrets.MINISIGN_PRIVKEY }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          TAG="v${VERSION}"
+          GH_URL="https://github.com/wq1131173682/antigravity-hub/releases/download/${TAG}"
+
+          # Collect available assets
+          NSIS=""
+          MSI=""
+          DMG=""
+          APPIMAGE=""
+          DEB=""
+
+          for f in /tmp/release-assets/*; do
+            base=$(basename "$f")
+            url="${GH_URL}/${base}"
+            case "$base" in
+              *.exe)       NSIS="$url" ;;
+              *.msi)       MSI="$url" ;;
+              *.dmg)       DMG="$url" ;;
+              *.AppImage)  APPIMAGE="$url" ;;
+              *.deb)       DEB="$url" ;;
+            esac
+          done
+
+          # Write updater.json template (no signature yet)
+          cat > updater.json <<EOF
+          {
+            "version": "${VERSION}",
+            "notes": "Release ${VERSION}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "${TAURI_PLATFORMS_WIN}": {
+                "signature": "",
+                "url": "${NSIS}"
+              },
+              "${TAURI_PLATFORMS_LINUX_GNOME}": {
+                "signature": "",
+                "url": "${DEB}"
+              },
+              "${TAURI_PLATFORMS_LINUX_APPIMAGE}": {
+                "signature": "",
+                "url": "${APPIMAGE}"
+              },
+              "${TAURI_PLATFORMS_MACOS}": {
+                "signature": "",
+                "url": "${DMG}"
+              }
+            }
+          }
+          EOF
+
+          echo "Generated updater.json (before signing):"
+          cat updater.json
+
+          # Sign the updater.json with minisign
+          echo "${MINISIGN_PRIVKEY}" > /tmp/minisign.key
+          /tmp/minisign/minisign -S \
+            -s /tmp/minisign.key \
+            -m updater.json \
+            -x updater.json.minisig
+
+          echo "Signature created:"
+          cat updater.json.minisig
+
+          # Read signature and embed into updater.json
+          SIG=$(cat updater.json.minisig)
+          python3 -c "
+          import json, sys
+          with open('updater.json') as f:
+              data = json.load(f)
+          for platform in data['platforms']:
+              data['platforms'][platform]['signature'] = '''${SIG}'''
+          with open('updater.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          "
+
+          echo "Final updater.json:"
+          cat updater.json
+
+      - name: Upload updater files to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          files: |
+            updater.json
+            updater.json.minisig
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
