@@ -120,7 +120,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator-dev libvips-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev libvips-dev
       - name: npm ci
         run: npm ci --legacy-peer-deps
       - name: Build Tauri app (Linux)
