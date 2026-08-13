@@ -60,7 +60,8 @@ jobs:
       - name: Setup signing key
         run: |
           # Strip all whitespace (including \r\n) from the secret and write clean base64 key
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]' > "$env:TEMP\tauri-signing.key"
+          $key = $env:TAURI_SIGNING_PRIVATE_KEY -replace '\s+', ''
+          [System.IO.File]::WriteAllText("$env:TEMP\tauri-signing.key", $key)
           echo "TAURI_SIGNING_PRIVATE_KEY=$env:TEMP\tauri-signing.key" >> $env:GITHUB_ENV
       - name: Build Tauri app (Windows)
         env:
