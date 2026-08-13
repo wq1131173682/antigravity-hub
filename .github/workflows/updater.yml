@@ -1,9 +1,10 @@
 name: Updater
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
 
 concurrency:
   group: updater-${{ github.ref }}
@@ -12,6 +13,7 @@ concurrency:
 permissions:
   contents: write
   packages: write
+  actions: read
 
 env:
   NODE_VERSION: "22"
@@ -29,9 +31,11 @@ jobs:
   #   https://github.com/wq1131173682/antigravity-hub/releases/latest/download/updater.json
   generate-updater-manifest:
     name: Generate Updater Manifest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
+      tag_name: ${{ steps.tag.outputs.TAG_NAME }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +44,17 @@ jobs:
         run: |
           VERSION=$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '"')
           echo "VERSION=v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_NAME="v$(grep '^version' src-tauri/Cargo.toml | head -1 | awk '{print $3}' | tr -d '\"')"
+          else
+            # Extract tag from workflow_run event
+            TAG_NAME="${{ github.event.workflow_run.head_branch }}"
+          fi
+          echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
 
       - name: Download minisign binary
         env:
@@ -66,7 +81,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/release-assets
-          gh release download "${{ steps.version.outputs.VERSION }}" \
+          gh release download "${{ steps.tag.outputs.TAG_NAME }}" \
             --dir /tmp/release-assets --clobber || true
           ls -la /tmp/release-assets/
 
@@ -75,11 +90,11 @@ jobs:
           MINISIGN_PRIVKEY: ${{ secrets.MINISIGN_PRIVKEY }}
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
-          TAG="${VERSION}"
+          TAG="${{ steps.tag.outputs.TAG_NAME }}"
           GH_URL="https://github.com/wq1131173682/antigravity-hub/releases/download/${TAG}"
 
-          # Decode the base64-encoded private key to get the raw minisign key format
-          echo "$MINISIGN_PRIVKEY" | base64 -d > /tmp/minisign.key
+          # Write the raw private key to file (stored as plaintext, not base64)
+          echo "$MINISIGN_PRIVKEY" > /tmp/minisign.key
           echo "Private key content:"
           cat /tmp/minisign.key
 
@@ -132,7 +147,7 @@ jobs:
           echo "Generated updater.json (before signing):"
           cat updater.json
 
-          # Sign the updater.json with minisign (key already decoded at /tmp/minisign.key)
+          # Sign the updater.json with minisign
           /tmp/minisign/minisign -S \
             -s /tmp/minisign.key \
             -m updater.json \
@@ -159,9 +174,10 @@ jobs:
       - name: Upload updater files to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
           files: |
             updater.json
             updater.json.minisig
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
+          dry_run: ${{ github.event_name != 'workflow_dispatch' }}
