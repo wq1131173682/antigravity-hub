@@ -56,6 +56,10 @@ jobs:
           Start-Process "$env:TEMP\WebView2Setup.exe" -ArgumentList "/silent", "/install" -Wait
       - name: npm ci
         run: npm ci --legacy-peer-deps
+      - name: Decode signing key
+        run: |
+          echo "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > /tmp/tauri-signing.key
+          echo "TAURI_SIGNING_PRIVATE_KEY=/tmp/tauri-signing.key" >> $GITHUB_ENV
       - name: Build Tauri app (Windows)
         run: npx tauri build
       - name: Upload NSIS setup.exe
@@ -91,6 +95,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: npm ci
         run: npm ci --legacy-peer-deps
+      - name: Decode signing key
+        run: |
+          echo "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > /tmp/tauri-signing.key
+          echo "TAURI_SIGNING_PRIVATE_KEY=/tmp/tauri-signing.key" >> $GITHUB_ENV
       - name: Build Tauri app (macOS universal)
         run: npx tauri build
       - name: Upload .dmg
@@ -123,6 +131,10 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libappindicator3-dev libvips-dev
       - name: npm ci
         run: npm ci --legacy-peer-deps
+      - name: Decode signing key
+        run: |
+          echo "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > /tmp/tauri-signing.key
+          echo "TAURI_SIGNING_PRIVATE_KEY=/tmp/tauri-signing.key" >> $GITHUB_ENV
       - name: Build Tauri app (Linux)
         run: npx tauri build
       - name: Upload .deb
