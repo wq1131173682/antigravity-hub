@@ -139,14 +139,17 @@ jobs:
           echo "Signature file created:"
           cat updater.json.sig
 
-          # Read signature and embed into updater.json
-          SIG=$(cat updater.json.sig)
+          # Read signature from file (avoids shell variable-expansion pitfalls)
+          # and embed it into updater.json's per-platform signature fields.
+          cp updater.json.sig /tmp/updater.sig
           python3 -c "
-          import json, sys
+          import json
+          with open('/tmp/updater.sig') as f:
+              sig = f.read()
           with open('updater.json') as f:
               data = json.load(f)
           for platform in data['platforms']:
-              data['platforms'][platform]['signature'] = '''\${SIG}'''
+              data['platforms'][platform]['signature'] = sig
           with open('updater.json', 'w') as f:
               json.dump(data, f, indent=2)
           "
@@ -166,6 +169,3 @@ jobs:
             updater.json.minisig
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: false
-          # Actually publish (upload) in automatic runs triggered by Release.
-          # Only use dry_run when explicitly debugging via workflow_dispatch.
-          dry_run: false
