@@ -148,11 +148,9 @@ jobs:
           echo "Generated updater.json (before signing):"
           cat updater.json
 
-          # Sign the updater.json with minisign (using password for rsign encrypted key)
-          echo "$MINISIGN_PRIVKEY_PASSWORD" > /tmp/minisign.password
-          /tmp/minisign/minisign -S \
+          # Sign the updater.json with minisign (password via stdin for rsign encrypted key)
+          echo "$MINISIGN_PRIVKEY_PASSWORD" | /tmp/minisign/minisign -S \
             -s /tmp/minisign.key \
-            -p /tmp/minisign.password \
             -m updater.json \
             -x updater.json.minisig
 
