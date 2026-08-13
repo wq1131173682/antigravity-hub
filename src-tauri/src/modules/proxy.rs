@@ -683,11 +683,14 @@ fn apply_default_model_override(
 ///   ]
 /// }
 /// ```
-fn handle_models_request() -> axum::response::Response {
+fn handle_models_request(platform_filter: Option<&str>) -> axum::response::Response {
     use crate::modules::config;
     use crate::modules::model_manager;
-    // Check cache first
-    {
+    // Cache only the global (prefix-agnostic) list. Per-platform filtered lists
+    // are computed fresh so a cached global list is never served for a
+    // platform-scoped request.
+    let is_global = platform_filter.is_none();
+    if is_global {
         let cache = MODELS_CACHE.lock().unwrap();
         if let Some((ref cached_body, ref cached_at)) = *cache {
             if cached_at.elapsed().as_secs() < MODELS_CACHE_TTL_SECS {
@@ -707,6 +710,13 @@ fn handle_models_request() -> axum::response::Response {
         Ok(cfg) => {
             info!("handle_models_request: loaded config with {} platforms", cfg.platforms.len());
             for platform in &cfg.platforms {
+                // When a platform prefix is supplied (e.g. /sensenova/v1/models),
+                // return only that platform's models. Otherwise return all.
+                if let Some(filter) = platform_filter {
+                    if platform.id != filter {
+                        continue;
+                    }
+                }
                 match model_manager::list_models(&platform.id) {
                     Ok(models) => {
                         info!("handle_models_request: platform '{}' has {} models", platform.id, models.len());
@@ -739,8 +749,8 @@ fn handle_models_request() -> axum::response::Response {
         "data": data,
     });
     let body_str = serde_json::to_string(&response_body).unwrap_or_else(|_| "{\"error\":\"internal error\"}".to_string());
-    // Update cache
-    {
+    // Update cache only for the global list.
+    if is_global {
         let mut cache = MODELS_CACHE.lock().unwrap();
         *cache = Some((body_str.clone(), std::time::Instant::now()));
     }
@@ -1166,6 +1176,16 @@ async fn proxy_handler(
 ) -> axum::response::Response {
     let path = uri.path().trim_start_matches('/');
 
+    // Model discovery is prefix-agnostic: serve the global model list for
+    // /v1/models (or /models) whether or not a platform prefix is present, so
+    // OpenAI-compatible clients can always discover available models. This is
+    // handled before platform resolution so the no-prefix 404 below does not
+    // break discovery.
+    if path == "v1/models" || path == "v1/models/" || path == "models" {
+        info!("Intercepting model discovery request (prefix-agnostic): /{}", path);
+        return handle_models_request(None);
+    }
+
     // Split path into platform prefix and remaining API path
     let (platform_prefix, remaining_path) = match path.split_once('/') {
         Some((prefix, rest)) => (prefix.to_string(), format!("/{}", rest)),
@@ -1182,23 +1202,24 @@ async fn proxy_handler(
             (base, id, auto, remaining_path)
         }
         None => {
-            // Fallback: no platform matches this prefix => use the first configured platform
-            // and treat the ENTIRE original path as the API path
-            match get_first_platform() {
-                Some((base, id, auto)) => {
-                    info!(
-                        "No platform matches prefix '{}', falling back to '{}' with full path /{}",
-                        platform_prefix, id, path
-                    );
-                    (base, id, auto, format!("/{}", path))
-                }
-                None => {
-                    warn!("Unknown platform prefix: {} (no platforms configured)", platform_prefix);
-                    return error_response(404, format!(
-                        "Unknown platform: {}. Check your proxy path prefix.", platform_prefix
-                    ));
-                }
-            }
+            // No platform matches this path prefix. Previously this silently
+            // fell back to the FIRST configured platform, which would route a
+            // request to the WRONG key pool (e.g. glm-5.2 sent without its
+            // /sensenova prefix hitting a different platform's keys). Refuse
+            // loudly so misconfiguration is obvious instead of silently
+            // cross-platform. (Model discovery at /v1/models is handled
+            // prefix-agnostically above, so it is unaffected.)
+            warn!(
+                "No platform matches prefix '{}' — refusing request (use /<platform>/... path prefix)",
+                platform_prefix
+            );
+            return error_response(
+                404,
+                format!(
+                    "Unknown platform prefix: '{}'. Requests must include a platform prefix, e.g. /sensenova/v1/chat/completions.",
+                    platform_prefix
+                ),
+            );
         }
     };
 
@@ -1231,7 +1252,7 @@ async fn proxy_handler(
     // models), we intercept and return the models configured in Antigravity Hub.
     if target_path == "/v1/models" || target_path == "/v1/models/" {
         info!("Intercepting /v1/models request, returning configured models");
-        return handle_models_request();
+        return handle_models_request(Some(&platform_prefix));
     }
 
     // Check for path-specific base URL overrides (e.g., /agnesapi at the API root, not under /v1)
@@ -1412,13 +1433,9 @@ fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str
 }
 
 /// Get the first configured platform (fallback when no prefix matches)
-fn get_first_platform() -> Option<(String, String, bool)> {
-    use crate::modules::config;
-    let config = config::load_app_config().ok()?;
-    let platform = config.platforms.first()?;
-    let auto_switch = config.auto_switch;
-    Some((platform.base_url.clone(), platform.id.clone(), auto_switch))
-}
+// NOTE: `get_first_platform` was removed. Requests without a platform prefix now
+// return 404 (see proxy_handler) instead of silently falling back to the first
+// configured platform, which caused silent cross-platform key-pool misrouting.
 
 /// Deduplicate overlapping version-like path segments between base_url and target_path.
 /// e.g., base_url="https://api.sensenova.com/v1", target_path="/v1/chat/completions"
@@ -1546,8 +1563,21 @@ async fn forward_with_retry(
 ) -> Result<axum::response::Response, String> {
     // Sequential id for this incoming request (one per proxy_handler call).
     let req_id = REQ_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    let max_retries = if auto_switch { 5 } else { 1 };
+    // ── Retry strategy: time-budget loop ──
+    // Old design: fixed attempt count (max_retries=5) with ZERO backoff on the
+    // multi-key 429 path, so a transient platform-wide 429 (sensenova 429s every
+    // key at once, then self-heals ~10s later) was burned through in
+    // milliseconds and reported as "All keys exhausted" before the cooldown
+    // window even expired. Now we retry until a time budget elapses, waiting out
+    // 429 cooldowns so transient blips recover into a short delay instead of a 502.
+    let retry_budget_secs: i64 = if auto_switch { 60 } else { 0 };
+    let retry_deadline: Option<i64> = if retry_budget_secs > 0 {
+        Some(chrono::Utc::now().timestamp() + retry_budget_secs)
+    } else {
+        None
+    };
     let mut last_error = String::new();
+    let mut attempt: u32 = 0;
 
     // Resolve model_id from model_name (done once outside the loop)
     let model_id: Option<String> = model_name.as_ref().and_then(|name| {
@@ -1569,38 +1599,48 @@ async fn forward_with_retry(
     // rate-limited" when `get_keys_to_try` returns empty mid-retry.
     let candidates = get_candidate_keys(platform_id, model_name.clone());
 
-    for attempt in 0..max_retries {
-        // Refresh keys_to_try on each attempt so that keys entering cooldown
-        // (429) or disabled by a 500 on a previous attempt are excluded.
+    loop {
+        attempt += 1;
+        // Refresh keys_to_try each iteration so keys entering cooldown (429) or
+        // disabled by a 500 on a previous attempt are excluded.
         let keys_to_try = get_keys_to_try(&candidates, model_id.as_deref());
 
         if keys_to_try.is_empty() {
-            // If there ARE candidate keys but every one is in a 429 cooldown,
-            // wait for the earliest cooldown to expire and retry — instead of
-            // failing with "All keys exhausted". Transient rate limits recover
-            // within the cooldown window, so this turns a hard failure into a
-            // short delay. (Observed: sensenova returned 429 on all 4 keys, then
-            // recovered ~10s later — without this wait the request died instantly.)
+            // Every candidate key is in a 429 cooldown or has an exceeded quota
+            // window. If a cooldown is pending and we still have retry budget,
+            // wait for the earliest one to expire and retry — this is what turns
+            // a transient multi-key 429 into a short delay instead of a hard 502.
+            let mut waited = false;
             if let Some(mid) = model_id.as_ref() {
-                if let Some(expiry) = crate::modules::quota_window::earliest_cooldown_expiry(&candidates, mid) {
-                    if attempt < max_retries - 1 {
-                        let now = chrono::Utc::now().timestamp();
+                if let Some(expiry) =
+                    crate::modules::quota_window::earliest_cooldown_expiry(&candidates, mid)
+                {
+                    let now = chrono::Utc::now().timestamp();
+                    if expiry > now {
                         let wait = (expiry - now).clamp(1, 30) as u64;
-                        warn!(
-                            "[req {}] all keys rate-limited (429 cooldown), waiting {}s before retry",
-                            req_id, wait
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                        continue;
+                        let budget_left =
+                            retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
+                        // Only wait if it fits within the remaining retry budget.
+                        if budget_left > 0 && (budget_left as u64) >= wait {
+                            warn!(
+                                "[req {}] all keys rate-limited (429 cooldown), waiting {}s before retry (attempt {})",
+                                req_id, wait, attempt
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                            waited = true;
+                        }
                     }
                 }
             }
-            return Err("No active API keys available for this platform".to_string());
+            if !waited {
+                return Err("No active API keys available for this platform".to_string());
+            }
+            continue;
         }
 
-        // Pick the next key (cycling through available keys; after a failure
-        // the list is refreshed, so we try attempt % len to pick a new key).
-        let key_idx = attempt % keys_to_try.len();
+        // Pick the next key (cycling through available keys; the list is
+        // refreshed each iteration, so rotating by attempt spreads load).
+        let key_idx = ((attempt as usize) - 1) % keys_to_try.len();
         let key_id = &keys_to_try[key_idx];
 
         // Look up key value from pre-loaded map (avoids file I/O per retry)
@@ -1660,8 +1700,10 @@ async fn forward_with_retry(
             Ok(r) => r,
             Err(e) => {
                 last_error = format!("Request failed: {}", e);
-                if attempt < max_retries - 1 {
-                    info!("Connection error, trying next key: {}", e);
+                let budget_left =
+                    retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
+                if budget_left > 0 {
+                    info!("Connection error, retrying (budget left {}s): {}", budget_left, e);
                     continue;
                 }
                 break;
@@ -1686,9 +1728,15 @@ async fn forward_with_retry(
             }
             warn!("429 from {}, key[{}]={}, model={}", target_url, key_idx, key_id, model_identifier);
             last_error = "Rate limited (429)".to_string();
+            let budget_left =
+                retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
+            // Budget exhausted (or single-attempt mode): stop retrying.
+            if budget_left <= 0 {
+                break;
+            }
             let has_multiple_keys = keys_to_try.len() > 1;
-            if attempt < max_retries - 1 && has_multiple_keys {
-                // Emit a key-switched event so the frontend can refresh its view.
+            // Emit a key-switched event so the frontend can refresh its view.
+            if has_multiple_keys {
                 if let Some(next_key_id) = keys_to_try.get((key_idx + 1) % keys_to_try.len()) {
                     let platform_name = crate::modules::config::load_app_config()
                         .ok()
@@ -1708,18 +1756,27 @@ async fn forward_with_retry(
                     );
                 }
                 info!(
-                    "429 from key[{}]={}, rotating to next key (attempt {}/{})",
-                    key_idx, key_id, attempt + 2, max_retries
+                    "429 from key[{}]={}, rotating to next key (attempt {})",
+                    key_idx, key_id, attempt
                 );
-                continue;
-            } else if attempt < max_retries - 1 {
-                // Single key (or only one left): back off and retry the same key.
-                let backoff_secs = std::cmp::min(32, 2_u64.pow(attempt as u32 + 1));
-                info!("429 from single key, waiting {}s before retry...", backoff_secs);
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                // Brief backoff before hitting the next key so we don't blitz
+                // every key within the same millisecond — that burst is exactly
+                // what tripped sensenova's account-level limit in the first place.
+                // Bounded by the remaining retry budget.
+                let backoff = std::cmp::min(budget_left as u64, 1);
+                if backoff > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                }
                 continue;
             }
-            break;
+            // Single key (or only one left): exponential backoff, retry same key.
+            let backoff_secs = std::cmp::min(
+                budget_left as u64,
+                2_u64.pow(std::cmp::min(attempt as u32 + 1, 5)),
+            );
+            info!("429 from single key, waiting {}s before retry...", backoff_secs);
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            continue;
         }
 
         let is_error = status.is_server_error();
@@ -1733,10 +1790,12 @@ async fn forward_with_retry(
             // Keys are a precious resource; disabling them on transient server
             // errors would leave the proxy unable to serve requests until the
             // user manually re-enables them.
+            let budget_left =
+                retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
             let has_multiple_keys = keys_to_try.len() > 1;
 
             // Emit key-switched event so frontend can refresh quota display
-            if attempt < max_retries - 1 && has_multiple_keys {
+            if has_multiple_keys && budget_left > 0 {
                 let next_key_id = keys_to_try
                     .get((key_idx + 1) % keys_to_try.len())
                     .cloned()
@@ -1760,18 +1819,26 @@ async fn forward_with_retry(
             }
 
             last_error = format!("HTTP {} from upstream", status);
-            if attempt < max_retries - 1 && has_multiple_keys {
-                // Multiple keys: rotate to next key
-                info!("Rotating to next key (attempt {}/{})", attempt + 2, max_retries);
-                continue;
-            } else if attempt < max_retries - 1 {
-                // Single key (or last few retries): exponential backoff, retry same key
-                let backoff_secs = std::cmp::min(32, 2_u64.pow(attempt as u32 + 1));
-                info!("Waiting {}s before retrying same key (single key mode)...", backoff_secs);
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            if budget_left <= 0 {
+                break;
+            }
+            if has_multiple_keys {
+                // Multiple keys: rotate to next key (with a brief backoff).
+                info!("Rotating to next key (attempt {})", attempt);
+                let backoff = std::cmp::min(budget_left as u64, 1);
+                if backoff > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                }
                 continue;
             }
-            break;
+            // Single key (or only one left): exponential backoff, retry same key.
+            let backoff_secs = std::cmp::min(
+                budget_left as u64,
+                2_u64.pow(std::cmp::min(attempt as u32 + 1, 5)),
+            );
+            info!("Waiting {}s before retrying same key (single key mode)...", backoff_secs);
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            continue;
         }
 
         // Success case - record the API call.

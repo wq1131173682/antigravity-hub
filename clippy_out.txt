@@ -1,0 +1,877 @@
+    Checking antigravity_tools v5.3.20 (D:\openclaw\workspace\antigravity-hub\src-tauri)
+error: empty line after doc comment
+    --> src\modules\proxy.rs:1435:1
+     |
+1435 | / /// Get the first configured platform (fallback when no prefix matches)
+...    |
+1439 | |
+     | |_^
+...
+1445 |   fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
+     |   ----------------------- the comment documents this function
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#empty_line_after_doc_comments
+     = note: `-D clippy::empty-line-after-doc-comments` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::empty_line_after_doc_comments)]`
+     = help: if the empty line is unintentional, remove it
+help: if the doc comment should not document function `deduplicate_url_path` then comment it out
+     |
+1435 | // /// Get the first configured platform (fallback when no prefix matches)
+     | ++
+
+error: value assigned to `last_error` is never read
+    --> src\modules\proxy.rs:1579:26
+     |
+1579 |     let mut last_error = String::new();
+     |                          ^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+1821 |             last_error = format!("HTTP {} from upstream", status);
+     |             ---------- `last_error` is overwritten here before the previous value is read
+     |
+     = note: `-D unused-assignments` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(unused_assignments)]`
+
+error: value assigned to `last_error` is never read
+    --> src\modules\proxy.rs:1651:17
+     |
+1651 |                 last_error = format!("Key not found: {}", key_id);
+     |                 ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+error: function `list_all_keys` is never used
+  --> src\modules\keystore.rs:65:8
+   |
+65 | pub fn list_all_keys() -> Result<Vec<ApiKey>, String> {
+   |        ^^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: function `get_next_active_key` is never used
+   --> src\modules\keystore.rs:138:8
+    |
+138 | pub fn get_next_active_key(platform_id: &str) -> Result<Option<ApiKey>, String> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+error: function `get_best_available_key` is never used
+   --> src\modules\keystore.rs:167:8
+    |
+167 | pub fn get_best_available_key(platform_id: &str) -> Result<Option<ApiKey>, String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `count_active_keys` is never used
+   --> src\modules\keystore.rs:194:8
+    |
+194 | pub fn count_active_keys(platform_id: &str) -> Result<usize, String> {
+    |        ^^^^^^^^^^^^^^^^^
+
+error: function `reorder_keys` is never used
+   --> src\modules\keystore.rs:202:8
+    |
+202 | pub fn reorder_keys(key_ids: Vec<String>) -> Result<(), String> {
+    |        ^^^^^^^^^^^^
+
+error: methods `count_active` and `is_empty` are never used
+  --> src\modules\quota_window.rs:55:12
+   |
+24 | impl UsageWindow {
+   | ---------------- methods in this implementation
+...
+55 |     pub fn count_active(&mut self, now: i64, duration_secs: i64) -> u32 {
+   |            ^^^^^^^^^^^^
+...
+65 |     pub fn is_empty(&self) -> bool {
+   |            ^^^^^^^^
+
+error: method `clean_all_windows` is never used
+   --> src\modules\quota_window.rs:153:12
+    |
+100 | impl ModelKeyTracker {
+    | -------------------- method in this implementation
+...
+153 |     pub fn clean_all_windows(&mut self) {
+    |            ^^^^^^^^^^^^^^^^^
+
+error: methods `get_best_available_key_for_model` and `remove_tracker` are never used
+   --> src\modules\quota_window.rs:252:12
+    |
+250 | impl QuotaWindowState {
+    | --------------------- methods in this implementation
+251 |     /// Get the best available key for a specific model (lowest total usage).
+252 |     pub fn get_best_available_key_for_model(&self, model_id: &str) -> Option<&ModelKeyTracker> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+273 |     pub fn remove_tracker(&mut self, key_id: &str, model_id: &str) {
+    |            ^^^^^^^^^^^^^^
+
+error: function `load_quota_state_internal` is never used
+   --> src\modules\quota_window.rs:356:8
+    |
+356 | pub fn load_quota_state_internal() -> Result<QuotaWindowState, String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `get_best_available_key_for_model` is never used
+   --> src\modules\quota_window.rs:479:8
+    |
+479 | pub fn get_best_available_key_for_model(model_id: &str) -> Result<Option<String>, String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: function `log_info` is never used
+   --> src\modules\logger.rs:212:8
+    |
+212 | pub fn log_info(message: &str) {
+    |        ^^^^^^^^
+
+error: function `log_warn` is never used
+   --> src\modules\logger.rs:217:8
+    |
+217 | pub fn log_warn(message: &str) {
+    |        ^^^^^^^^
+
+error: function `log_error` is never used
+   --> src\modules\logger.rs:222:8
+    |
+222 | pub fn log_error(message: &str) {
+    |        ^^^^^^^^^
+
+error: function `emit_accounts_refreshed` is never used
+  --> src\modules\log_bridge.rs:90:8
+   |
+90 | pub fn emit_accounts_refreshed() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: fields `current`, `quota`, `no_account`, `unknown_quota`, and `forbidden` are never read
+  --> src\modules\i18n.rs:7:9
+   |
+ 6 | pub struct TrayTexts {
+   |            --------- fields in this struct
+ 7 |     pub current: String,
+   |         ^^^^^^^
+ 8 |     pub quota: String,
+   |         ^^^^^
+...
+13 |     pub no_account: String,
+   |         ^^^^^^^^^^
+14 |     pub unknown_quota: String,
+   |         ^^^^^^^^^^^^^
+15 |     pub forbidden: String,
+   |         ^^^^^^^^^
+   |
+   = note: `TrayTexts` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+error: function `backup_codex_config` is never used
+   --> src\modules\codex_integration.rs:264:8
+    |
+264 | pub fn backup_codex_config() -> Result<Option<String>, String> {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+error: function `as_str_opt` is never used
+   --> src\modules\diagnostics.rs:229:4
+    |
+229 | fn as_str_opt(v: &Value) -> Option<&str> {
+    |    ^^^^^^^^^^
+
+error: static `SHARED_CLIENT` is never used
+ --> src\utils\http.rs:5:12
+  |
+5 | pub static SHARED_CLIENT: Lazy<Client> = Lazy::new(|| {
+  |            ^^^^^^^^^^^^^
+
+error: static `SHARED_CLIENT_LONG` is never used
+  --> src\utils\http.rs:13:12
+   |
+13 | pub static SHARED_CLIENT_LONG: Lazy<Client> = Lazy::new(|| {
+   |            ^^^^^^^^^^^^^^^^^^
+
+error: function `get_client` is never used
+  --> src\utils\http.rs:21:8
+   |
+21 | pub fn get_client() -> Client {
+   |        ^^^^^^^^^^
+
+error: function `get_long_client` is never used
+  --> src\utils\http.rs:26:8
+   |
+26 | pub fn get_long_client() -> Client {
+   |        ^^^^^^^^^^^^^^^
+
+error: function `get_standard_client` is never used
+  --> src\utils\http.rs:31:8
+   |
+31 | pub fn get_standard_client() -> Client {
+   |        ^^^^^^^^^^^^^^^^^^^
+
+error: function `get_long_standard_client` is never used
+  --> src\utils\http.rs:36:8
+   |
+36 | pub fn get_long_standard_client() -> Client {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: variant `LocalInstallation` is never constructed
+  --> src\constants.rs:51:5
+   |
+50 | enum VersionSource {
+   |      ------------- variant in this enum
+51 |     LocalInstallation,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `VersionSource` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+error: this `impl` can be derived
+  --> src\models\apikey.rs:14:1
+   |
+14 | / impl Default for KeyStatus {
+15 | |     fn default() -> Self {
+16 | |         Self::Active
+17 | |     }
+18 | | }
+   | |_^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#derivable_impls
+   = note: `-D clippy::derivable-impls` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(clippy::derivable_impls)]`
+help: replace the manual implementation with a derive attribute and mark the default variant
+   |
+ 5 + #[derive(Default)]
+ 6 | pub enum KeyStatus {
+ 7 |     /// Key is active and ready for use
+ 8 |     #[serde(rename = "active")]
+ 9 ~     #[default]
+10 ~     Active,
+   |
+
+error: this `match` expression can be replaced with `?`
+   --> src\modules\proxy.rs:291:9
+    |
+291 | /         match text.find('{') {
+292 | |             Some(p) => p,
+293 | |             None => return None,
+294 | |         }
+    | |_________^ help: try instead: `text.find('{')?`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#question_mark
+    = note: `-D clippy::question-mark` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::question_mark)]`
+
+error: this `map_or` can be simplified
+   --> src\modules\proxy.rs:577:21
+    |
+577 |                     val.as_u64().map_or(true, |n| n == 0 || n > 65536)
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_map_or
+    = note: `-D clippy::unnecessary-map-or` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_map_or)]`
+help: use `is_none_or` instead
+    |
+577 -                     val.as_u64().map_or(true, |n| n == 0 || n > 65536)
+577 +                     val.as_u64().is_none_or(|n| n == 0 || n > 65536)
+    |
+
+error: unnecessary map of the identity function
+   --> src\modules\proxy.rs:876:36
+    |
+876 |         .or_else(|| body.as_array().map(|a| a))
+    |                                    ^^^^^^^^^^^ help: remove the call to `map`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#map_identity
+    = note: `-D clippy::map-identity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::map_identity)]`
+
+error: this `if` has identical blocks
+    --> src\modules\proxy.rs:1296:47
+     |
+1296 |       let body_bytes = if body_bytes.is_empty() {
+     |  _______________________________________________^
+1297 | |         body_bytes
+1298 | |     } else if serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok() {
+     | |_____^
+     |
+note: same as this
+    --> src\modules\proxy.rs:1298:80
+     |
+1298 |       } else if serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok() {
+     |  ________________________________________________________________________________^
+1299 | |         body_bytes
+1300 | |     } else if let Some(inner) = extract_json_from_http_text(&body_bytes) {
+     | |_____^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#if_same_then_else
+     = note: `-D clippy::if-same-then-else` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::if_same_then_else)]`
+
+error: taken reference of right operand
+    --> src\modules\proxy.rs:1418:20
+     |
+1418 |                 if target_path == &override_entry.path_prefix
+     |                    ^^^^^^^^^^^^^^^---------------------------
+     |                                   |
+     |                                   help: use the right value directly: `override_entry.path_prefix`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#op_ref
+     = note: `-D clippy::op-ref` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::op_ref)]`
+
+error: this function has too many arguments (11/7)
+    --> src\modules\proxy.rs:1547:1
+     |
+1547 | / async fn forward_with_retry(
+1548 | |     client: Client,
+1549 | |     method: &axum::http::Method,
+1550 | |     target_url: &url::Url,
+...    |
+1562 | |     early_flush_mode: bool,
+1563 | | ) -> Result<axum::response::Response, String> {
+     | |_____________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#too_many_arguments
+     = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: casting to the same type is unnecessary (`u32` -> `u32`)
+    --> src\modules\proxy.rs:1775:41
+     |
+1775 |                 2_u64.pow(std::cmp::min(attempt as u32 + 1, 5)),
+     |                                         ^^^^^^^^^^^^^^ help: try: `attempt`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+     = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: casting to the same type is unnecessary (`u32` -> `u32`)
+    --> src\modules\proxy.rs:1837:41
+     |
+1837 |                 2_u64.pow(std::cmp::min(attempt as u32 + 1, 5)),
+     |                                         ^^^^^^^^^^^^^^ help: try: `attempt`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_cast
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src\modules\proxy.rs:1900:77
+     |
+1900 |             crate::modules::token_stats::record_streaming_for_platform(Some(&platform_id));
+     |                                                                             ^^^^^^^^^^^^ help: change this to: `platform_id`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_borrow
+     = note: `-D clippy::needless-borrow` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_borrow)]`
+
+error: this expression creates a reference which is immediately dereferenced by the compiler
+    --> src\modules\proxy.rs:1982:81
+     |
+1982 |                     crate::modules::token_stats::record_usage_for_platform(Some(&platform_id), prompt, completion);
+     |                                                                                 ^^^^^^^^^^^^ help: change this to: `platform_id`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_borrow
+
+error: unnecessary `if let` since only the `Ok` variant of the iterator element is used
+   --> src\modules\logger.rs:112:5
+    |
+112 | /     for entry in entries {
+113 | |         if let Ok(entry) = entry {
+114 | |             let path = entry.path();
+115 | |             if !path.is_file() {
+...   |
+130 | |     }
+    | |_____^
+    |
+help: try `.flatten()` and remove the `if let` statement in the for loop
+   --> src\modules\logger.rs:113:9
+    |
+113 | /         if let Ok(entry) = entry {
+114 | |             let path = entry.path();
+115 | |             if !path.is_file() {
+116 | |                 continue;
+...   |
+129 | |         }
+    | |_________^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_flatten
+    = note: `-D clippy::manual-flatten` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_flatten)]`
+help: try
+    |
+112 ~     for entry in entries.flatten() {
+113 +         let path = entry.path();
+114 +         if !path.is_file() {
+115 +             continue;
+116 +         }
+117 +         
+118 +         if let Ok(metadata) = fs::metadata(&path) {
+119 +             let modified = metadata.modified().unwrap_or(SystemTime::now());
+120 +             let modified_secs = modified
+121 +                 .duration_since(UNIX_EPOCH)
+122 +                 .map(|d| d.as_secs())
+123 +                 .unwrap_or(0);
+124 +             
+125 +             let size = metadata.len();
+126 +             entries_info.push((path, size, modified_secs));
+127 +         }
+128 +     }
+    |
+
+error: unnecessary `if let` since only the `Ok` variant of the iterator element is used
+   --> src\modules\logger.rs:195:9
+    |
+195 | /         for entry in entries {
+196 | |             if let Ok(entry) = entry {
+197 | |                 let path = entry.path();
+198 | |                 if path.is_file() {
+...   |
+206 | |         }
+    | |_________^
+    |
+help: try `.flatten()` and remove the `if let` statement in the for loop
+   --> src\modules\logger.rs:196:13
+    |
+196 | /             if let Ok(entry) = entry {
+197 | |                 let path = entry.path();
+198 | |                 if path.is_file() {
+...   |
+205 | |             }
+    | |_____________^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_flatten
+help: try
+    |
+195 ~         for entry in entries.flatten() {
+196 +             let path = entry.path();
+197 +             if path.is_file() {
+198 +                 // Open file in truncation mode, set size to 0
+199 +                 let _ = fs::OpenOptions::new()
+200 +                     .write(true)
+201 +                     .truncate(true)
+202 +                     .open(path);
+203 +             }
+204 +         }
+    |
+
+error: this function has too many arguments (8/7)
+   --> src\modules\codex_integration.rs:295:1
+    |
+295 | / pub fn apply_codex_config(
+296 | |     proxy_host: &str,
+297 | |     proxy_port: u16,
+298 | |     path_prefix: &str,
+...   |
+303 | |     enable_model_catalog: Option<bool>,
+304 | | ) -> Result<ApplyResult, String> {
+    | |________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#too_many_arguments
+
+error: use of `unwrap_or_else` to construct default value
+   --> src\modules\codex_integration.rs:448:10
+    |
+448 |         .unwrap_or_else(toml::Table::new);
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `unwrap_or_default()`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unwrap_or_default
+    = note: `-D clippy::unwrap-or-default` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unwrap_or_default)]`
+
+error: you are using an explicit closure for cloning elements
+   --> src\modules\codex_integration.rs:444:31
+    |
+444 |       let mut model_providers = config
+    |  _______________________________^
+445 | |         .get("model_providers")
+446 | |         .and_then(|v| v.as_table())
+447 | |         .map(|t| t.clone())
+    | |___________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#map_clone
+    = note: `-D clippy::map-clone` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::map_clone)]`
+help: consider calling the dedicated `cloned` method
+    |
+444 ~     let mut model_providers = config
+445 +         .get("model_providers")
+446 +         .and_then(|v| v.as_table()).cloned()
+    |
+
+error: this `match` can be collapsed into the outer `if let`
+   --> src\modules\codex_translator.rs:310:17
+    |
+310 | /                 match content {
+311 | |                     serde_json::Value::Array(arr) => {
+312 | |                         for part in arr.iter_mut() {
+313 | |                             convert_content_part(part);
+...   |
+316 | |                     _ => {} // string content is fine as-is
+317 | |                 }
+    | |_________________^
+    |
+help: the outer pattern can be modified to include the inner pattern
+   --> src\modules\codex_translator.rs:309:25
+    |
+309 |             if let Some(content) = obj.get_mut("content") {
+    |                         ^^^^^^^ replace this binding
+310 |                 match content {
+311 |                     serde_json::Value::Array(arr) => {
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ with this pattern
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#collapsible_match
+    = note: `-D clippy::collapsible-match` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_match)]`
+
+error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+   --> src\modules\codex_translator.rs:310:17
+    |
+310 | /                 match content {
+311 | |                     serde_json::Value::Array(arr) => {
+312 | |                         for part in arr.iter_mut() {
+313 | |                             convert_content_part(part);
+...   |
+316 | |                     _ => {} // string content is fine as-is
+317 | |                 }
+    | |_________________^
+    |
+    = note: you might want to preserve the comments from inside the `match`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#single_match
+    = note: `-D clippy::single-match` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::single_match)]`
+help: try
+    |
+310 ~                 if let serde_json::Value::Array(arr) = content {
+311 +                     for part in arr.iter_mut() {
+312 +                         convert_content_part(part);
+313 +                     }
+314 +                 }
+    |
+
+error: manual implementation of `Option::map`
+   --> src\modules\codex_translator.rs:643:16
+    |
+643 |           } else if let Some(e) = reasoning.as_str() {
+    |  ________________^
+644 | |             // Some clients send a bare string instead of an object
+645 | |             Some(e.to_string())
+646 | |         } else {
+647 | |             None
+648 | |         };
+    | |_________^ help: try: `{ reasoning.as_str().map(|e| e.to_string()) }`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#manual_map
+    = note: `-D clippy::manual-map` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_map)]`
+
+error: this `map_or` can be simplified
+   --> src\modules\codex_translator.rs:895:25
+    |
+895 |                       && !m.get("tool_call_id")
+    |  _________________________^
+896 | |                         .and_then(|c| c.as_str())
+897 | |                         .map_or(false, |cid| tool_call_ids.contains(cid));
+    | |_________________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_map_or
+help: use `is_some_and` instead
+    |
+897 -                         .map_or(false, |cid| tool_call_ids.contains(cid));
+897 +                         .is_some_and(|cid| tool_call_ids.contains(cid));
+    |
+
+error: enclosing `Some` and `?` operator are unneeded
+   --> src\modules\codex_translator.rs:975:5
+    |
+975 |     Some(serde_json::to_vec(&json).ok()?)
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_question_mark
+    = note: `-D clippy::needless-question-mark` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::needless_question_mark)]`
+help: remove the enclosing `Some` and `?` operator
+    |
+975 -     Some(serde_json::to_vec(&json).ok()?)
+975 +     serde_json::to_vec(&json).ok()
+    |
+
+error: this block may be rewritten with the `?` operator
+   --> src\modules\codex_translator.rs:968:5
+    |
+968 | /     if obj.remove("reasoning_effort").is_none() {
+969 | |         return None;
+970 | |     }
+    | |_____^ help: replace it with: `obj.remove("reasoning_effort")?;`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#question_mark
+
+error: this `map_or` can be simplified
+    --> src\modules\codex_translator.rs:1009:36
+     |
+1009 |                     let has_text = message.get("content").and_then(|c| c.as_str()).map_or(false, |s| !s.is_empty());
+     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_map_or
+help: use `is_some_and` instead
+     |
+1009 -                     let has_text = message.get("content").and_then(|c| c.as_str()).map_or(false, |s| !s.is_empty());
+1009 +                     let has_text = message.get("content").and_then(|c| c.as_str()).is_some_and(|s| !s.is_empty());
+     |
+
+error: this `map_or` can be simplified
+    --> src\modules\codex_translator.rs:1121:8
+     |
+1121 |     if obj.get("id").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_map_or
+help: use `is_none_or` instead
+     |
+1121 -     if obj.get("id").and_then(|v| v.as_str()).map_or(true, |s| s.is_empty()) {
+1121 +     if obj.get("id").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty()) {
+     |
+
+error: this `if` statement can be collapsed
+    --> src\modules\codex_translator.rs:1554:29
+     |
+1554 | / ...                   if !st.has_sent_output_item && !st.has_sent_reasoning && !st.is_thinking_block {
+1555 | | ...                       if is_thinking_marker(content.as_ref()) {
+1556 | | ...                           st.is_thinking_block = true;
+1557 | | ...                       }
+1558 | | ...                   }
+     | |_______________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#collapsible_if
+     = note: `-D clippy::collapsible-if` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+     |
+1554 ~                             if !st.has_sent_output_item && !st.has_sent_reasoning && !st.is_thinking_block
+1555 ~                                 && is_thinking_marker(content.as_ref()) {
+1556 |                                     st.is_thinking_block = true;
+1557 ~                                 }
+     |
+
+error: the following explicit lifetimes could be elided: 'a
+    --> src\modules\codex_translator.rs:2030:30
+     |
+2030 | fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> {
+     |                              ^^        ^^                               ^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#needless_lifetimes
+     = note: `-D clippy::needless-lifetimes` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::needless_lifetimes)]`
+help: elide the lifetimes
+     |
+2030 - fn extract_reasoning_content<'a>(obj: &'a serde_json::Value) -> Option<&'a str> {
+2030 + fn extract_reasoning_content(obj: &serde_json::Value) -> Option<&str> {
+     |
+
+error: this `map_or` can be simplified
+    --> src\modules\codex_translator.rs:2217:20
+     |
+2217 |                 if best.map_or(true, |(bp, _)| pos < bp) {
+     |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_map_or
+help: use `is_none_or` instead
+     |
+2217 -                 if best.map_or(true, |(bp, _)| pos < bp) {
+2217 +                 if best.is_none_or(|(bp, _)| pos < bp) {
+     |
+
+error: equality checks against false can be replaced by a negation
+   --> src\modules\diagnostics.rs:423:24
+    |
+423 |                     if tc.had_result == false {
+    |                        ^^^^^^^^^^^^^^^^^^^^^^ help: try: `!tc.had_result`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#bool_comparison
+    = note: `-D clippy::bool-comparison` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::bool_comparison)]`
+
+error: this `.filter_map(..)` can be written more simply using `.map(..)`
+   --> src\modules\responses_bridge.rs:416:75
+    |
+416 |               let converted: Vec<serde_json::Value> = tools_array.drain(..).filter_map(|tool| {
+    |  ___________________________________________________________________________^
+417 | |                 let tool_type = tool.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+418 | |                 if tool_type == "function" {
+...   |
+444 | |             }).collect();
+    | |______________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#unnecessary_filter_map
+    = note: `-D clippy::unnecessary-filter-map` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_filter_map)]`
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> src\modules\responses_bridge.rs:580:22
+    |
+580 |     pub on_complete: Option<Arc<dyn Fn(Option<String>, bool, bool, u128) + Send + Sync>>,
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: this `impl` can be derived
+   --> src\modules\responses_bridge.rs:583:1
+    |
+583 | / impl Default for StreamHooks {
+584 | |     fn default() -> Self {
+585 | |         Self { on_complete: None }
+586 | |     }
+587 | | }
+    | |_^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#derivable_impls
+help: replace the manual implementation with a derive attribute
+    |
+578 + #[derive(Default)]
+579 | pub struct StreamHooks {
+    |
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> src\modules\responses_bridge.rs:625:20
+    |
+625 |     complete_hook: Option<Arc<dyn Fn(Option<String>, bool, bool, u128) + Send + Sync>>,
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#type_complexity
+
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> src\modules\responses_bridge.rs:641:24
+    |
+641 |         complete_hook: Option<Arc<dyn Fn(Option<String>, bool, bool, u128) + Send + Sync>>,
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#type_complexity
+
+error: this `if` can be collapsed into the outer `match`
+    --> src\modules\responses_bridge.rs:1601:13
+     |
+1601 | /             if !s.is_empty() {
+1602 | |                 parts.push(s.clone());
+1603 | |             }
+     | |_____________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#collapsible_match
+help: collapse nested if block
+     |
+1600 ~         serde_json::Value::String(s)
+1601 ~             if !s.is_empty() => {
+1602 |                 parts.push(s.clone());
+1603 ~             }
+     |
+
+error: this function has too many arguments (8/7)
+   --> src\commands\mod.rs:469:1
+    |
+469 | / pub async fn apply_codex_config(
+470 | |     proxy_host: String,
+471 | |     proxy_port: u16,
+472 | |     path_prefix: String,
+...   |
+477 | |     enable_model_catalog: Option<bool>,
+478 | | ) -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    | |___________________________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#too_many_arguments
+
+error: redundant redefinition of a binding `proxy_host`
+   --> src\commands\mod.rs:482:5
+    |
+482 |     let proxy_host = proxy_host;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `proxy_host` is initially defined here
+   --> src\commands\mod.rs:470:5
+    |
+470 |     proxy_host: String,
+    |     ^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+    = note: `-D clippy::redundant-locals` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::redundant_locals)]`
+
+error: redundant redefinition of a binding `proxy_port`
+   --> src\commands\mod.rs:483:5
+    |
+483 |     let proxy_port = proxy_port;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `proxy_port` is initially defined here
+   --> src\commands\mod.rs:471:5
+    |
+471 |     proxy_port: u16,
+    |     ^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: redundant redefinition of a binding `path_prefix`
+   --> src\commands\mod.rs:484:5
+    |
+484 |     let path_prefix = path_prefix;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `path_prefix` is initially defined here
+   --> src\commands\mod.rs:472:5
+    |
+472 |     path_prefix: String,
+    |     ^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: redundant redefinition of a binding `model_name`
+   --> src\commands\mod.rs:485:5
+    |
+485 |     let model_name = model_name;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `model_name` is initially defined here
+   --> src\commands\mod.rs:473:5
+    |
+473 |     model_name: String,
+    |     ^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: redundant redefinition of a binding `reasoning_effort`
+   --> src\commands\mod.rs:486:5
+    |
+486 |     let reasoning_effort = reasoning_effort;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `reasoning_effort` is initially defined here
+   --> src\commands\mod.rs:474:5
+    |
+474 |     reasoning_effort: Option<String>,
+    |     ^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: redundant redefinition of a binding `disable_response_storage`
+   --> src\commands\mod.rs:487:5
+    |
+487 |     let disable_response_storage = disable_response_storage;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `disable_response_storage` is initially defined here
+   --> src\commands\mod.rs:475:5
+    |
+475 |     disable_response_storage: Option<bool>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: redundant redefinition of a binding `api_key`
+   --> src\commands\mod.rs:488:5
+    |
+488 |     let api_key = api_key;
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `api_key` is initially defined here
+   --> src\commands\mod.rs:476:5
+    |
+476 |     api_key: Option<String>,
+    |     ^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: redundant redefinition of a binding `enable_model_catalog`
+   --> src\commands\mod.rs:489:5
+    |
+489 |     let enable_model_catalog = enable_model_catalog;
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: `enable_model_catalog` is initially defined here
+   --> src\commands\mod.rs:477:5
+    |
+477 |     enable_model_catalog: Option<bool>,
+    |     ^^^^^^^^^^^^^^^^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.96.0/index.html#redundant_locals
+
+error: could not compile `antigravity_tools` (lib) due to 70 previous errors
