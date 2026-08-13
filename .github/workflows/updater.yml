@@ -9,6 +9,10 @@ concurrency:
   group: updater-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  packages: write
+
 env:
   NODE_VERSION: "22"
   MINISIGN_VERSION: "0.12"
