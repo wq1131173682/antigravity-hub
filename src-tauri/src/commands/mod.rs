@@ -457,6 +457,9 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 /// Check Codex CLI status
 #[tauri::command]
 pub async fn check_codex_status() -> Result<crate::modules::codex_integration::CodexStatus, String> {
+    if !crate::modules::feature_flags::CODEX_ENABLED {
+        return Err("Codex integration is disabled (archived).".into());
+    }
     Ok(crate::modules::codex_integration::check_codex_status())
 }
 
@@ -473,6 +476,9 @@ pub async fn apply_codex_config(
     api_key: Option<String>,
     enable_model_catalog: Option<bool>,
 ) -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    if !crate::modules::feature_flags::CODEX_ENABLED {
+        return Err("Codex integration is disabled (archived).".into());
+    }
     let proxy_host = proxy_host;
     let proxy_port = proxy_port;
     let path_prefix = path_prefix;
@@ -501,6 +507,9 @@ pub async fn apply_codex_config(
 /// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
 pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    if !crate::modules::feature_flags::CODEX_ENABLED {
+        return Err("Codex integration is disabled (archived).".into());
+    }
     tokio::task::spawn_blocking(move || {
         crate::modules::codex_integration::restore_codex_config()
     })
@@ -549,6 +558,9 @@ pub async fn test_model(platform_id: String, model_name: String) -> Result<crate
 /// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
 #[tauri::command]
 pub async fn clear_codex_auth() -> Result<crate::modules::codex_integration::ApplyResult, String> {
+    if !crate::modules::feature_flags::CODEX_ENABLED {
+        return Err("Codex integration is disabled (archived).".into());
+    }
     tokio::task::spawn_blocking(move || {
         crate::modules::codex_integration::clear_codex_auth()
     })
@@ -559,6 +571,9 @@ pub async fn clear_codex_auth() -> Result<crate::modules::codex_integration::App
 /// Check for Codex-related environment variable conflicts
 #[tauri::command]
 pub async fn check_codex_env_conflicts() -> Result<crate::modules::codex_integration::EnvConflictResult, String> {
+    if !crate::modules::feature_flags::CODEX_ENABLED {
+        return Err("Codex integration is disabled (archived).".into());
+    }
     Ok(crate::modules::codex_integration::check_codex_env_conflicts())
 }
 

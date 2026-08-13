@@ -7,6 +7,7 @@ import type { TestModelResult, UpstreamModelInfo } from '../services/platformSer
 import { showToast } from '../components/common/ToastContainer';
 import ModalDialog from '../components/common/ModalDialog';
 import * as codexService from '../services/codexService';
+import { CODEX_ENABLED } from '../config/featureFlags';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
@@ -586,10 +587,14 @@ function Accounts() {
                           <div className="flex items-center gap-1 shrink-0">
                             <button
                               className={`p-1.5 rounded-lg transition-colors ${
-                                applyingModelToCodex === model.id
+                                !CODEX_ENABLED
+                                  ? 'text-gray-300 dark:text-gray-600 cursor-not-allowed'
+                                  : applyingModelToCodex === model.id
                                   ? 'text-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 animate-pulse'
                                   : 'text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'
                               }`}
+                              disabled={!CODEX_ENABLED}
+                              title={CODEX_ENABLED ? t('codex.apply_to_codex') : 'Codex 集成已停用（功能已封存）'}
                               onClick={async (e) => {
                                 e.stopPropagation();
                                 if (applyingModelToCodex || !selectedPlatform) return;
@@ -613,7 +618,6 @@ function Accounts() {
                                   setApplyingModelToCodex(null);
                                 }
                               }}
-                              title={t('codex.apply_to_codex')}
                             >
                               {applyingModelToCodex === model.id ? (
                                 <Loader2 className="w-3.5 h-3.5 animate-spin" />

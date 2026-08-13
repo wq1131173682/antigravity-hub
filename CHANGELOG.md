@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式约定。版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.3.10] - 2026-08-13 — ⭐ 重点版本（milestone）
+
+> 本版本集中修复「WorkBuddy 经代理调用模型时对话/工具调用中断」与「平台 key 限流中断」两类核心稳定性问题，建议作为回归基准版本。
+
+### 变更
+- **封存 Codex 集成与 Responses API 协议转换**（`CODEX_ENABLED=false`，代码保留不删除）：后端 5 个 Codex IPC 命令返回「已停用」，`/v1/responses` 不再做协议转换；前端 `CodexIntegration.tsx` 加灰色遮罩（`pointer-events-none` + 遮罩层），`Accounts.tsx` 模型行「应用到 Codex」按钮在停用态禁用并提示
+- **OpenAI 协议直接穿透 + 本地 key 轮转**：穿透路径始终注入轮转后的 `Authorization: Bearer <我们的 key>`，上游 429/5xx 时切换下一把 key
+
+### 修复
+- **代理下对话/工具调用中断（连接层）**：SSE 流结束后新增 `Connection: close`，强制客户端下条请求新建连接，消除「复用已死 keep-alive 连接」导致的秒级空响应
+- **SSE 半帧静默中断**：`SseKeepaliveStream` 改为仅当处于 SSE 事件边界（`\n\n`/`\r\n`）才注入 `: ping`，杜绝上游在半个 `data:` 帧中间停顿时空行提前终结该帧、引发客户端 JSON 解析失败
+- **平台 key 限流中断（429）**：`record_429` 增加冷却期（封顶 30s），全部 key 处于 429 冷却时等待最早到期再重试，不再 <1s 内轮换完所有 key 直接 `All keys exhausted`
+
 ## [5.3.5] - 2026-08-12
 
 ### 修复

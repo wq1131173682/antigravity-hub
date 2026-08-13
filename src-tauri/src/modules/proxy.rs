@@ -332,9 +332,16 @@ fn looks_like_http_request_text(body: &[u8]) -> bool {
 /// and close it — surfacing as "the assistant's response cut off mid-stream".
 ///
 /// To prevent that, we wrap the upstream `bytes_stream` with a keepalive
-/// stream that periodically emits an SSE comment frame (`": ping\n\n"`).
-/// SSE comments are ignored by every compliant SSE client and keep the
-/// underlying TCP socket live.
+/// stream (`SseKeepaliveStream`) that periodically emits an SSE comment frame
+/// (`": ping\n\n"`). SSE comments are ignored by every compliant SSE client
+/// and keep the underlying TCP socket live.
+///
+/// CRITICAL: the comment is injected ONLY at a complete SSE event boundary
+/// (`\n\n`). Injecting it while the upstream is mid `data:` frame — exactly
+/// what happens during a tool-call reasoning gap — would terminate that frame
+/// early and hand the client truncated JSON, aborting the conversation ("cut
+/// off after a tool call"). When the stream is silent inside a partial frame,
+/// the wrapper stays quiet and lets the upstream finish the event.
 ///
 /// Default: 25 seconds. Most SSE implementations tolerate 30-60s of silence;
 /// staying well under that ceiling keeps us safe across browsers, Electron's
@@ -345,46 +352,6 @@ const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 /// SSE keepalive frame. A line beginning with `:` is an SSE comment and is
 /// silently discarded by every compliant client.
 const SSE_KEEPALIVE_BYTES: &[u8] = b": ping\n\n";
-
-/// Thin adapter that lets a `tokio::sync::mpsc::Receiver` be consumed by
-/// `futures::Stream`-based code (axum's `Body::from_stream`, our
-/// `SseKeepaliveStream`, etc.). The `tokio_stream` crate would normally
-/// provide this via `ReceiverStream`, but we avoid pulling in another
-/// dependency by implementing the forward directly.
-pub(crate) struct TokioReceiverStream(
-    pub(crate) tokio::sync::mpsc::Receiver<
-        Result<bytes::Bytes, EarlyFlushError>,
-    >,
-);
-
-impl futures::Stream for TokioReceiverStream {
-    type Item = Result<bytes::Bytes, EarlyFlushError>;
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        // Tokio's mpsc::Receiver is Unpin, so we can safely take &mut self.
-        self.0.poll_recv(cx)
-    }
-}
-
-/// Concrete error type used by the early-flush streaming pass-through.
-/// Needed because `Box<dyn std::error::Error + Send + Sync>` itself does
-/// NOT implement `std::error::Error` (the well-known `Box<dyn Error>`
-/// doesn't satisfy `Error` trait bound), so it cannot be the `E` type
-/// parameter of `SseKeepaliveStream` (whose Stream impl requires
-/// `E: std::error::Error + Send + Sync + 'static` to box it into
-/// `Box<dyn Error + Send + Sync>`).
-#[derive(Debug)]
-pub(crate) struct EarlyFlushError(pub(crate) String);
-
-impl std::fmt::Display for EarlyFlushError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for EarlyFlushError {}
 
 /// Monotonic request counter so proxy logs can be correlated: how many
 /// requests actually reached the proxy vs. how many the client believes it
@@ -421,6 +388,14 @@ pub(crate) struct SseKeepaliveStream<S, E> {
     chunks_relayed: u64,
     /// Keepalive comment frames injected.
     pings_sent: u64,
+    /// Last two relayed bytes, used to detect whether we are sitting on a
+    /// complete SSE event boundary (`\n\n` / `\r\n`). A keepalive comment may
+    /// ONLY be injected at a boundary; injecting it mid partial `data:` frame
+    /// would terminate that frame early and hand the client truncated JSON
+    /// (e.g. a tool_call), surfacing as "conversation cut off after a tool
+    /// call". Initialized to `\n\n` so the very start of the stream is treated
+    /// as a boundary.
+    trailing: [u8; 2],
     /// E is only used in the Stream impl bound; the field keeps the struct
     /// generic over the upstream error type without affecting layout.
     _phantom: std::marker::PhantomData<E>,
@@ -440,8 +415,28 @@ impl<S, E> SseKeepaliveStream<S, E> {
             bytes_relayed: 0,
             chunks_relayed: 0,
             pings_sent: 0,
+            trailing: *b"\n\n",
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Update the trailing-2-bytes window with the last bytes of `bytes`,
+    /// tracking across chunk boundaries so we always know whether the relayed
+    /// stream ends on a complete SSE event delimiter.
+    fn update_trailing(&mut self, bytes: &[u8]) {
+        let len = bytes.len();
+        if len >= 2 {
+            self.trailing = [bytes[len - 2], bytes[len - 1]];
+        } else if len == 1 {
+            self.trailing = [self.trailing[1], bytes[0]];
+        }
+        // len == 0: window unchanged
+    }
+
+    /// True when the relayed stream is sitting on a complete SSE event
+    /// boundary, i.e. safe to inject a `: ping` comment frame.
+    fn at_event_boundary(&self) -> bool {
+        self.trailing == [b'\n', b'\n'] || self.trailing == [b'\r', b'\n']
     }
 }
 
@@ -482,6 +477,7 @@ where
                 pinned.reset(now + std::time::Duration::from_secs(me.keepalive_secs));
                 me.bytes_relayed += bytes.len() as u64;
                 me.chunks_relayed += 1;
+                me.update_trailing(&bytes);
                 return std::task::Poll::Ready(Some(Ok(bytes)));
             }
             std::task::Poll::Ready(Some(Err(e))) => {
@@ -518,14 +514,33 @@ where
 
         // Keepalive path — only reached when the upstream produced no data
         // this call. If the silence has lasted long enough, inject a comment
-        // frame and re-arm.
+        // frame AND re-arm — but ONLY when we are sitting on a complete SSE
+        // event boundary.
         if me.next_ping_at.as_mut().as_mut().poll(cx).is_ready() {
-            let now = tokio::time::Instant::now();
-            me.next_ping_at.as_mut().reset(now + std::time::Duration::from_secs(me.keepalive_secs));
-            me.pings_sent += 1;
-            return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(
-                SSE_KEEPALIVE_BYTES,
-            ))));
+            if me.at_event_boundary() {
+                // Safe to inject: the stream is between complete events, so the
+                // comment's trailing blank line cannot prematurely terminate a
+                // partial `data:` frame (which would hand the client truncated
+                // JSON and abort the conversation mid tool-call).
+                let now = tokio::time::Instant::now();
+                me.next_ping_at.as_mut().reset(now + std::time::Duration::from_secs(me.keepalive_secs));
+                me.pings_sent += 1;
+                // `: ping\n\n` ends on a blank line, so we stay at a boundary.
+                me.trailing = *b"\n\n";
+                return std::task::Poll::Ready(Some(Ok(bytes::Bytes::from_static(
+                    SSE_KEEPALIVE_BYTES,
+                ))));
+            } else {
+                // Upstream went silent in the MIDDLE of a partial `data:` frame
+                // (very common during tool-call reasoning gaps). Do NOT inject a
+                // comment here — re-arm and keep waiting for the upstream to
+                // finish the event first. If the stream is genuinely dead, the
+                // client's own timeout ends it; we must not fabricate a frame
+                // that corrupts the partial one we already relayed.
+                let now = tokio::time::Instant::now();
+                me.next_ping_at.as_mut().reset(now + std::time::Duration::from_secs(me.keepalive_secs));
+                return std::task::Poll::Pending;
+            }
         }
 
         std::task::Poll::Pending
@@ -1192,8 +1207,12 @@ async fn proxy_handler(
     // upstream providers only support Chat Completions (/v1/chat/completions).
     // We detect and translate the API format transparently so the proxy
     // works with Codex CLI and any provider.
-    let is_responses_api = target_path == "/v1/responses"
-        || target_path.starts_with("/v1/responses/");
+    // Codex / Responses API 协议转换已封存（CODEX_ENABLED=false）：不再把
+    // /v1/responses 重写为 /v1/chat/completions。请求按原样穿透到上游，
+    // 由我们注入轮转后的 API Key 即可。OpenAI 原生 /v1/responses 仍会原样
+    // 转发（仅 OpenAI 上游支持），其余上游若不支持则返回其自身的错误。
+    let is_responses_api = crate::modules::feature_flags::CODEX_ENABLED
+        && (target_path == "/v1/responses" || target_path.starts_with("/v1/responses/"));
     let target_path = if is_responses_api {
         let new_path = if target_path == "/v1/responses" {
             "/v1/chat/completions".to_string()
@@ -1239,7 +1258,10 @@ async fn proxy_handler(
     let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
         Ok(b) => b,
         Err(e) => {
-            error!("Failed to read request body: {}", e);
+            error!(
+                "Failed to read request body (likely dead keep-alive connection from client — \
+                 client must reconnect): {}", e
+            );
             return error_response(400, format!("Failed to read body: {}", e));
         }
     };
@@ -1317,6 +1339,16 @@ async fn proxy_handler(
 
     let body_bytes: axum::body::Bytes = body_bytes.into();
 
+    // Early-flush（立即返回 200 + SSE 头）仅用于 sensenova 穿透路径
+    // （WorkBuddy）：该上游首字节延迟可达数秒，需立刻回一个字节防止客户端
+    // SSE 读取器放弃首条发送。注意：现在 key 轮转在「提交 200 之前」完成
+    // （见 forward_with_retry），不再像旧代码那样提交后才发现 429/5xx。
+    let wants_early_flush = !is_responses_api
+        && platform_prefix == "sensenova"
+        && (target_url.path().contains("/chat/completions")
+            || target_url.path().contains("/v1/messages")
+            || target_url.path().contains("/completions"));
+
     // Try forwarding the request with key rotation
     let client = PROXY_CLIENT.read().unwrap().clone();
     let result = forward_with_retry(
@@ -1330,6 +1362,7 @@ async fn proxy_handler(
         auto_switch,
         model_name,
         is_responses_api,
+        wants_early_flush,
     ).await;
 
     match result {
@@ -1435,7 +1468,7 @@ fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
 /// (key_id, model_id) pair as over quota or in backoff. This is what triggers an
 /// automatic key switch when the local counter is past the configured daily /
 /// weekly / monthly limit, even if the upstream keeps returning 200 OK.
-fn get_keys_to_try(platform_id: &str, model_name: Option<String>) -> Vec<String> {
+fn get_candidate_keys(platform_id: &str, model_name: Option<String>) -> Vec<String> {
     // Resolve model_id once (used both for the mapping lookup and the quota filter).
     let model_id: Option<String> = model_name.as_ref().and_then(|name| {
         crate::modules::model_manager::list_models(platform_id)
@@ -1448,7 +1481,7 @@ fn get_keys_to_try(platform_id: &str, model_name: Option<String>) -> Vec<String>
     // Build candidate set: explicit mapping wins, otherwise fall back to all active keys.
     // NOTE: key_model_map returns ALL associated key IDs regardless of keystore status,
     // so we must intersect with active keys to exclude manually-disabled ones.
-    let candidates: Vec<String> = if let Some(mid) = model_id.as_ref() {
+    if let Some(mid) = model_id.as_ref() {
         match crate::modules::key_model_map::get_keys_for_model(mid) {
             Ok(ids) if !ids.is_empty() => {
                 // Filter out keys that are disabled in the keystore (manually disabled)
@@ -1460,13 +1493,16 @@ fn get_keys_to_try(platform_id: &str, model_name: Option<String>) -> Vec<String>
         }
     } else {
         list_active_key_ids(platform_id)
-    };
+    }
+}
 
-    // Skip keys whose quota window is already exceeded or currently in backoff.
-    let mut available = if let Some(mid) = model_id.as_ref() {
-        crate::modules::quota_window::filter_available_keys(&candidates, mid, platform_id)
+fn get_keys_to_try(candidates: &[String], model_id: Option<&str>) -> Vec<String> {
+    // Skip keys whose quota window is already exceeded or currently in cooldown
+    // (e.g. rate-limited by a recent 429 — see `record_429`).
+    let mut available = if let Some(mid) = model_id {
+        crate::modules::quota_window::filter_available_keys(candidates, mid, "")
     } else {
-        candidates
+        candidates.to_vec()
     };
 
     // Load balancing: shuffle available keys so traffic is distributed
@@ -1502,6 +1538,11 @@ async fn forward_with_retry(
     auto_switch: bool,
     model_name: Option<String>,
     is_responses_api: bool,
+    // When true, a 2xx streaming response is committed with an immediate
+    // `: connected` SSE comment (sensenova / WorkBuddy early-flush path).
+    // Key rotation on 429/5xx happens *before* committing, so a throttled key
+    // no longer breaks the conversation.
+    early_flush_mode: bool,
 ) -> Result<axum::response::Response, String> {
     // Sequential id for this incoming request (one per proxy_handler call).
     let req_id = REQ_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1523,17 +1564,37 @@ async fn forward_with_retry(
         keys.into_iter().map(|k| (k.id, k.key_value)).collect()
     };
 
+    // Candidate key set (independent of cooldown/quota filtering) — kept so we
+    // can tell the difference between "no keys at all" and "all keys temporarily
+    // rate-limited" when `get_keys_to_try` returns empty mid-retry.
+    let candidates = get_candidate_keys(platform_id, model_name.clone());
+
     for attempt in 0..max_retries {
-        // Refresh keys_to_try on each attempt (except the first) so that
-        // keys disabled by a 500 error on a previous attempt are excluded.
-        let keys_to_try = if attempt == 0 {
-            get_keys_to_try(platform_id, model_name.clone())
-        } else {
-            // After a failure, re-fetch available keys to skip disabled ones
-            get_keys_to_try(platform_id, model_name.clone())
-        };
+        // Refresh keys_to_try on each attempt so that keys entering cooldown
+        // (429) or disabled by a 500 on a previous attempt are excluded.
+        let keys_to_try = get_keys_to_try(&candidates, model_id.as_deref());
 
         if keys_to_try.is_empty() {
+            // If there ARE candidate keys but every one is in a 429 cooldown,
+            // wait for the earliest cooldown to expire and retry — instead of
+            // failing with "All keys exhausted". Transient rate limits recover
+            // within the cooldown window, so this turns a hard failure into a
+            // short delay. (Observed: sensenova returned 429 on all 4 keys, then
+            // recovered ~10s later — without this wait the request died instantly.)
+            if let Some(mid) = model_id.as_ref() {
+                if let Some(expiry) = crate::modules::quota_window::earliest_cooldown_expiry(&candidates, mid) {
+                    if attempt < max_retries - 1 {
+                        let now = chrono::Utc::now().timestamp();
+                        let wait = (expiry - now).clamp(1, 30) as u64;
+                        warn!(
+                            "[req {}] all keys rate-limited (429 cooldown), waiting {}s before retry",
+                            req_id, wait
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                        continue;
+                    }
+                }
+            }
             return Err("No active API keys available for this platform".to_string());
         }
 
@@ -1594,105 +1655,6 @@ async fn forward_with_retry(
             info!("[req {}] Forwarding to upstream: {} | body: {}", req_id, target_url, preview);
         }
 
-        // ── Early-flush streaming pass-through ──
-        // When the client requests a streaming completion for a pass-through
-        // (non-Responses-API) endpoint, we respond 200 + SSE headers + an
-        // immediate keepalive comment RIGHT AWAY, then bridge the upstream
-        // bytes in via a spawned task and an mpsc channel.
-        //
-        // Without this, clients wait 2–10 seconds in silence while the
-        // upstream model thinks — and some SSE clients (e.g. WorkBuddy's
-        // fetch + ReadableStream reader) give up or stall the FIRST send
-        // during that dead window, surfacing as "the first reply never
-        // appears until the second message is sent".
-        //
-        // Errors from the upstream surface as SSE error frames inside the
-        // 200 stream (standard SSE proxy behaviour). We skip the retry loop
-        // for early-flush because we've already committed the response.
-        // Only enabled for the sensenova pass-through path (WorkBuddy),
-        // which is known to exhibit multi-second "time to first byte"
-        // delays that cause the client SSE reader to abandon the first
-        // send. All other platforms (agnes-cn, etc.) keep the normal path
-        // with upstream-header forwarding and key retries intact.
-        let wants_early_flush = !is_responses_api
-            && platform_prefix == "sensenova"
-            && (target_url.path().contains("/chat/completions")
-                || target_url.path().contains("/v1/messages")
-                || target_url.path().contains("/completions"));
-
-        if wants_early_flush {
-            let client_for_task = client.clone();
-            let upstream_req = match req_builder.build() {
-                Ok(r) => r,
-                Err(e) => return Err(format!("Failed to build upstream request for streaming: {}", e)),
-            };
-            let tag = format!("[req {}]", req_id);
-            let tag_for_spawn = tag.clone();
-            let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, EarlyFlushError>>(32);
-            tokio::spawn(async move {
-                // Immediate SSE comment → client sees a byte straight away
-                // so the connection never looks idle.
-                if tx
-                    .send(Ok(bytes::Bytes::from_static(b": connected\n\n")))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                match client_for_task.execute(upstream_req).await {
-                    Ok(res) => {
-                        info!(
-                            "{} upstream stream started: status={}",
-                            tag_for_spawn,
-                            res.status()
-                        );
-                        let mut body = res.bytes_stream();
-                        while let Some(chunk) =
-                            futures::StreamExt::next(&mut body).await
-                        {
-                            match chunk {
-                                Ok(b) => {
-                                    if tx.send(Ok(b)).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                Err(e) => {
-                                    let _ = tx
-                                        .send(Err(EarlyFlushError(format!(
-                                            "upstream body error: {}",
-                                            e
-                                        ))))
-                                        .await;
-                                    return;
-                                }
-                            }
-                        }
-                        // tx dropped here → rx receives Ready(None)
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EarlyFlushError(format!(
-                                "upstream send error: {}",
-                                e
-                            ))))
-                            .await;
-                    }
-                }
-            });
-            let body = axum::body::Body::from_stream(
-                SseKeepaliveStream::new(TokioReceiverStream(rx), SSE_KEEPALIVE_INTERVAL_SECS, tag),
-            );
-            let response = axum::response::Response::builder()
-                .status(200)
-                .header("content-type", "text/event-stream")
-                .header("cache-control", "no-cache, no-transform")
-                .header("x-accel-buffering", "no")
-                .header("connection", "keep-alive")
-                .body(body)
-                .map_err(|e| format!("Failed to build streaming response: {}", e))?;
-            return Ok(response);
-        }
-
         // Send the request (non-streaming, or streaming with retry loop)
         let resp = match req_builder.send().await {
             Ok(r) => r,
@@ -1709,20 +1671,55 @@ async fn forward_with_retry(
         let status = resp.status();
         info!("[req {}] upstream responded status={} (key[{}]={})", req_id, status, key_idx, key_id);
 
-        // 429: rate limited — wait with exponential backoff, then retry SAME key
-        // Do NOT switch keys for 429; the key is still valid, just temporarily throttled
+        // 429: rate limited. Rotate to a *different* (ideally healthy) key
+        // instead of waiting out the same throttled key.
+        //
+        // Old behaviour retried the SAME key with exponential backoff
+        // (2/4/8/16/32s, up to 62s per request). When only one key in the pool
+        // is rate-limited while others are fine, the client waited ~62s and then
+        // timed out / aborted — surfacing as "conversation interrupted / no
+        // response" during tool-call loops. Now we try the next key immediately
+        // and only fall back to backoff when no alternative key remains.
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            warn!("429 from {}, key[{}]={}, model={}, will retry same key",
-                target_url, key_idx, key_id, model_identifier);
             if let Some(mid) = &model_id {
                 let _ = crate::modules::quota_window::record_429_error(key_id, mid, platform_id);
             }
+            warn!("429 from {}, key[{}]={}, model={}", target_url, key_idx, key_id, model_identifier);
             last_error = "Rate limited (429)".to_string();
-            // Exponential backoff: 2s, 4s, 8s, 16s, 32s (capped at 32s)
-            let backoff_secs = std::cmp::min(32, 2_u64.pow(attempt as u32 + 1));
-            info!("Waiting {}s before retrying same key...", backoff_secs);
-            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-            continue; // Retry the same key
+            let has_multiple_keys = keys_to_try.len() > 1;
+            if attempt < max_retries - 1 && has_multiple_keys {
+                // Emit a key-switched event so the frontend can refresh its view.
+                if let Some(next_key_id) = keys_to_try.get((key_idx + 1) % keys_to_try.len()) {
+                    let platform_name = crate::modules::config::load_app_config()
+                        .ok()
+                        .and_then(|c| c.platforms.into_iter().find(|p| p.id == platform_id))
+                        .map(|p| p.name)
+                        .unwrap_or_else(|| platform_prefix.to_string());
+                    crate::modules::log_bridge::emit_key_switched(
+                        crate::modules::log_bridge::KeySwitchedPayload {
+                            platform_id: platform_id.to_string(),
+                            platform_name,
+                            model_name: model_identifier.clone(),
+                            disabled_key_id: key_id.clone(),
+                            next_key_id: next_key_id.clone(),
+                            reason: "Rate limited (429) - switching key".to_string(),
+                            disabled_until: 0,
+                        },
+                    );
+                }
+                info!(
+                    "429 from key[{}]={}, rotating to next key (attempt {}/{})",
+                    key_idx, key_id, attempt + 2, max_retries
+                );
+                continue;
+            } else if attempt < max_retries - 1 {
+                // Single key (or only one left): back off and retry the same key.
+                let backoff_secs = std::cmp::min(32, 2_u64.pow(attempt as u32 + 1));
+                info!("429 from single key, waiting {}s before retry...", backoff_secs);
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                continue;
+            }
+            break;
         }
 
         let is_error = status.is_server_error();
@@ -1822,6 +1819,16 @@ async fn forward_with_retry(
             // rendered after a subsequent request flushes the buffer").
             response_builder = response_builder.header("cache-control", "no-cache, no-transform");
             response_builder = response_builder.header("x-accel-buffering", "no");
+            // Force connection close after streaming response so that the client
+            // (WorkBuddy / Codex CLI / any SSE consumer) opens a fresh TCP
+            // connection for the next request.  Without this, hyper/axum may
+            // leave the connection in an ambiguous state after a chunked
+            // transfer-encoding stream ends — the client reuses it via HTTP/1.1
+            // keep-alive and hits "error reading a body from connection" on the
+            // next request, which surfaces as "second message gets no reply".
+            // Empirically this pattern repeats multiple times per day (see log
+            // entries at 17:29:26 and 17:42:38 on 2026-08-12).
+            response_builder = response_builder.header("connection", "close");
 
             crate::modules::token_stats::record_streaming_for_platform(Some(&platform_id));
             if is_responses_api {
@@ -1841,20 +1848,36 @@ async fn forward_with_retry(
                     .body(body)
                     .map_err(|e| format!("Failed to build response: {}", e));
             } else {
-                // Pass-through for non-Responses API streaming (ChatGPT Work,
-                // generic OpenAI SDKs, etc.).
+                // Pass-through for non-Responses API streaming (OpenAI SDKs,
+                // ChatGPT Work, generic clients, etc.).
                 //
-                // Wrap the upstream with `SseKeepaliveStream` so the
-                // downstream client never sees a gap wider than
-                // `SSE_KEEPALIVE_INTERVAL_SECS` seconds, even when the
-                // upstream model is reasoning before its first tool call.
-                // Without this, clients like ChatGPT Work that use
+                // Wrap the upstream with `SseKeepaliveStream` so the downstream
+                // client never sees a gap wider than `SSE_KEEPALIVE_INTERVAL_SECS`
+                // seconds, even when the upstream model is reasoning before its
+                // first tool call. Without this, clients that use
                 // `fetch().getReader()` time out on idle SSE connections and
-                // truncate the response mid-stream — surfacing as
-                // "the assistant's reply cut off after a tool call".
+                // truncate the response mid-stream — surfacing as "the assistant's
+                // reply cut off after a tool call".
+                let upstream = resp.bytes_stream();
+                // Early-flush mode (sensenova / WorkBuddy): prepend an immediate
+                // SSE comment so the client's reader never sees an idle socket and
+                // abandons the first send. This branch is reached only AFTER a 2xx
+                // is obtained, so key rotation on 429/5xx happens before we commit.
+                // Both arms below produce the same `Chain<Iter<_>, _>` type so the
+                // `if`/`else` type-checks; the non-early arm just chains an empty
+                // head stream.
+                let head: Vec<Result<bytes::Bytes, reqwest::Error>> = if early_flush_mode {
+                    vec![Ok(bytes::Bytes::from_static(b": connected\n\n"))]
+                } else {
+                    Vec::new()
+                };
+                let wrapped = futures::StreamExt::chain(
+                    futures::stream::iter(head),
+                    upstream,
+                );
                 let body = axum::body::Body::from_stream(
                     SseKeepaliveStream::new(
-                        resp.bytes_stream(),
+                        wrapped,
                         SSE_KEEPALIVE_INTERVAL_SECS,
                         format!("[req {}]", req_id),
                     )
@@ -2263,6 +2286,93 @@ mod tests {
         assert_eq!(&got[..], b": ping\n\n");
         // Second iteration would also be a ping, but we only need to prove
         // the keepalive fires at all when the upstream is silent.
+    }
+
+    /// A keepalive comment must NEVER be injected in the middle of a partial
+    /// SSE `data:` frame. If the upstream streams `data: {...` and then goes
+    /// silent (a reasoning/thinking gap before the tool_call args complete),
+    /// injecting `: ping\n\n` would terminate the dangling frame and hand the
+    /// client truncated JSON — which is exactly the "conversation cut off
+    /// after a tool call" bug. The wrapper must stay silent until the event
+    /// boundary is reached.
+    #[tokio::test(start_paused = true)]
+    async fn test_sse_keepalive_no_ping_mid_frame() {
+        use bytes::Bytes;
+        use futures::StreamExt;
+
+        // Upstream sends a PARTIAL data frame (no trailing \n\n) then goes silent.
+        let upstream = Box::pin(
+            futures::stream::iter(vec![
+                Ok::<_, reqwest::Error>(Bytes::from_static(
+                    b"data: {\"tool_calls\":[{\"function\":{\"arguments\":\"",
+                )),
+            ])
+            .chain(futures::stream::pending::<Result<Bytes, reqwest::Error>>()),
+        );
+        let mut kept = SseKeepaliveStream::new(upstream, 1, "[test]");
+
+        // First poll returns the partial frame verbatim.
+        let first = kept
+            .next()
+            .await
+            .expect("partial frame present")
+            .expect("no error");
+        assert_eq!(
+            &first[..],
+            b"data: {\"tool_calls\":[{\"function\":{\"arguments\":\""
+        );
+
+        // Advance well past the keepalive interval. Because we are NOT at an
+        // event boundary, NO keepalive may be emitted; the wrapper must keep
+        // waiting for the upstream to finish the event.
+        let within_window = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            kept.next(),
+        )
+        .await;
+        assert!(
+            within_window.is_err(),
+            "must NOT inject keepalive mid partial SSE frame (got: {:?})",
+            within_window
+        );
+    }
+
+    /// When the upstream completes the partial frame (ends it with `\n\n`)
+    /// and then goes idle, the keepalive is allowed to fire again — proving
+    /// the boundary detection correctly re-arms after a completed event.
+    #[tokio::test(start_paused = true)]
+    async fn test_sse_keepalive_pings_after_frame_completes() {
+        use bytes::Bytes;
+        use futures::StreamExt;
+
+        let upstream = Box::pin(
+            futures::stream::iter(vec![
+                Ok::<_, reqwest::Error>(Bytes::from_static(
+                    b"data: {\"tool_calls\":[{\"function\":{\"arguments\":\"x\"}}]}\n\n",
+                )),
+            ])
+            .chain(futures::stream::pending::<Result<Bytes, reqwest::Error>>()),
+        );
+        let mut kept = SseKeepaliveStream::new(upstream, 1, "[test]");
+
+        // First poll returns the now-complete event verbatim.
+        let first = kept
+            .next()
+            .await
+            .expect("frame present")
+            .expect("no error");
+        assert!(first.ends_with(b"\n\n"), "complete event forwarded as-is");
+
+        // After the boundary, idle → keepalive must fire.
+        let got = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            kept.next(),
+        )
+        .await
+        .expect("keepalive must fire once at a boundary")
+        .expect("some chunk")
+        .expect("no error");
+        assert_eq!(&got[..], b": ping\n\n");
     }
 
     /// Ping bytes constant never drifts; downstream clients depend on the

@@ -50,7 +50,3 @@ custom-protocol = ["tauri/custom-protocol"]
 [[bin]]
 name = "antigravity_tools"
 path = "src/main.rs"
-
-[[bin]]
-name = "responses_relay"
-path = "src/bin/responses_relay.rs"

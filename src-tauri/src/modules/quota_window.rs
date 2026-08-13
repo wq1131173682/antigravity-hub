@@ -187,14 +187,20 @@ impl ModelKeyTracker {
     }
 
     /// Record a 429 error
-    /// NOTE: 429 does NOT disable the key — it only records the count.
-    /// The proxy should wait and retry the same key, not switch.
+    /// Sets a short cooldown so the proxy does not immediately re-hit a
+    /// rate-limited key. Transient rate limits (observed ~10s) recover within
+    /// this window; the proxy's retry loop waits for the earliest cooldown to
+    /// expire before retrying, instead of failing with "All keys exhausted".
     pub fn record_429(&mut self) {
         let now = chrono::Utc::now().timestamp();
         self.consecutive_429 += 1;
         self.last_429_time = now;
-        // Do NOT set disabled_until — 429 is a rate limit, not an error.
-        // The key remains available for retry after a short wait.
+        // Brief cooldown (10s for the first 429, +5s per consecutive hit, capped
+        // at 30s). This makes `is_available()` exclude the key briefly so the
+        // proxy rotates to a fresh key instead of hammering a throttled one.
+        let cooldown = std::cmp::min(30, 10 + 5 * (self.consecutive_429.saturating_sub(1))) as i64;
+        self.disabled_until = Some(now + cooldown);
+        self.disabled_reason = Some(format!("Rate limited (429 x{}) - cooldown {}s", self.consecutive_429, cooldown));
     }
 
     /// Record a 500 error
@@ -442,6 +448,32 @@ pub fn filter_available_keys(
     // restart if no record_call happens in the meantime.
     mark_dirty();
     result
+}
+
+/// Return the earliest `disabled_until` timestamp among `candidates` that is
+/// still in the future (i.e. the soonest moment a currently-cooled-down key
+/// becomes available again). Used by the proxy retry loop to decide how long to
+/// wait when every candidate key is temporarily rate-limited (429 cooldown).
+///
+/// Returns `None` if no candidate has a pending cooldown (e.g. all keys are
+/// permanently available, or there are simply no candidate keys at all).
+pub fn earliest_cooldown_expiry(candidates: &[String], model_id: &str) -> Option<i64> {
+    let state = match QUOTA_STATE.lock() {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+    let now = chrono::Utc::now().timestamp();
+    candidates
+        .iter()
+        .filter_map(|key_id| {
+            state
+                .trackers
+                .iter()
+                .find(|t| t.key_id == *key_id && t.model_id == model_id)
+                .and_then(|t| t.disabled_until)
+                .filter(|until| *until > now)
+        })
+        .min()
 }
 
 pub fn get_best_available_key_for_model(model_id: &str) -> Result<Option<String>, String> {

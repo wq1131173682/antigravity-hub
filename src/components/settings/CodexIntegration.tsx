@@ -1,5 +1,6 @@
 ﻿import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { CODEX_ENABLED } from '../../config/featureFlags';
 import { useConfigStore } from '../../stores/useConfigStore';
 import { usePlatformStore } from '../../stores/usePlatformStore';
 import * as codexService from '../../services/codexService';
@@ -162,8 +163,22 @@ export default function CodexIntegration() {
     envConflicts.has_codex_home
   );
 
+  // CODEX_ENABLED 来自 `../../config/featureFlags`，与 Rust 端
+  // `feature_flags::CODEX_ENABLED` 同步：Codex 集成与 Responses API 协议转换
+  // 已封存停用。此处用灰色遮罩标识为「不可用」，且不响应交互。
   return (
-    <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
+    <div className="relative bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
+      {!CODEX_ENABLED && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-xl bg-gray-500/40 backdrop-blur-[1px]">
+          <div className="px-4 py-2 rounded-lg bg-base-100 dark:bg-base-200 shadow text-sm font-medium text-gray-600 dark:text-gray-300">
+            Codex 集成已停用（功能已封存）
+          </div>
+          <p className="mt-2 text-xs text-gray-500 dark:text-gray-400 px-6 text-center max-w-sm">
+            该集成依赖 Responses API 协议转换，当前版本已停用。API Key 轮转与 OpenAI 协议穿透不受影响。
+          </p>
+        </div>
+      )}
+      <div className={!CODEX_ENABLED ? 'pointer-events-none opacity-60 select-none' : ''}>
       <div className="flex items-center gap-2 mb-4">
         <Terminal className="w-4 h-4 text-emerald-500" />
         <h2 className="font-semibold text-gray-900 dark:text-base-content">
@@ -448,6 +463,7 @@ export default function CodexIntegration() {
             <pre className="whitespace-pre-wrap font-sans text-xs">{result.message}</pre>
           </div>
         )}
+      </div>
       </div>
     </div>
   );

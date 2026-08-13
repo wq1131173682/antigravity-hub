@@ -1,4 +1,6 @@
 ﻿pub mod config;
+/// 功能开关（封存功能的启用 / 停用，代码不删除，仅通过开关禁用）。
+pub mod feature_flags;
 pub mod platform_manager;
 pub mod model_manager;
 pub mod key_model_map;
