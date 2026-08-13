@@ -58,8 +58,8 @@ jobs:
         run: npm ci --legacy-peer-deps
       - name: Setup signing key
         run: |
-          echo "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/tauri-signing.key
-          echo "TAURI_SIGNING_PRIVATE_KEY=/tmp/tauri-signing.key" >> $GITHUB_ENV
+          echo "$TAURI_SIGNING_PRIVATE_KEY" > "$env:TEMP\tauri-signing.key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$env:TEMP\tauri-signing.key" >> $env:GITHUB_ENV
       - name: Build Tauri app (Windows)
         run: npx tauri build
       - name: Upload NSIS setup.exe
@@ -97,8 +97,8 @@ jobs:
         run: npm ci --legacy-peer-deps
       - name: Setup signing key
         run: |
-          echo "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/tauri-signing.key
-          echo "TAURI_SIGNING_PRIVATE_KEY=/tmp/tauri-signing.key" >> $GITHUB_ENV
+          echo "$TAURI_SIGNING_PRIVATE_KEY" > "$env:TEMP\tauri-signing.key"
+          echo "TAURI_SIGNING_PRIVATE_KEY=$env:TEMP\tauri-signing.key" >> $env:GITHUB_ENV
       - name: Build Tauri app (macOS universal)
         run: npx tauri build
       - name: Upload .dmg
