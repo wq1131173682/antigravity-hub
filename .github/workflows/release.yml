@@ -92,15 +92,21 @@ jobs:
       - name: Remove any existing release for this tag (idempotent)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release delete "${GITHUB_REF_NAME}" --yes || true
+        run: |
+          gh release delete "${GITHUB_REF_NAME}" --yes || true
+          sleep 3
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            updater.json
-            bundles/**/*
-          draft: false
-          prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Collect all bundle files (handles spaces in filenames via null-delimited loop)
+          assets=()
+          while IFS= read -r -d '' f; do
+            assets+=("$f")
+          done < <(find bundles -type f -print0)
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Release ${GITHUB_REF_NAME}" \
+            --latest \
+            updater.json "${assets[@]}"
