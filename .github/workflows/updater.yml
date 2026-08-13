@@ -132,8 +132,7 @@ jobs:
           echo "Generated updater.json (before signing):"
           cat updater.json
 
-          # Sign the updater.json with minisign
-          echo "${MINISIGN_PRIVKEY}" > /tmp/minisign.key
+          # Sign the updater.json with minisign (key already decoded at /tmp/minisign.key)
           /tmp/minisign/minisign -S \
             -s /tmp/minisign.key \
             -m updater.json \
