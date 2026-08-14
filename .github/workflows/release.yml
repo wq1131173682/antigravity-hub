@@ -78,6 +78,24 @@ jobs:
           path: bundles
           merge-multiple: true
 
+      - name: Sanitize bundle filenames (spaces -> dots)
+        # tauri.conf.json productName is "Antigravity Hub" (with a space), so Tauri
+        # emits installer files like "Antigravity Hub_5.3.11_amd64.AppImage".
+        # GitHub's release/artifact layer normalizes spaces to dots on upload, which
+        # made updater.json's download URLs (built from the on-disk name) 404.
+        # Normalize here BEFORE signing so disk name == uploaded asset name == URL.
+        run: |
+          python - <<'PY'
+          import os
+          root = "bundles"
+          for dirpath, _dirs, files in os.walk(root, topdown=False):
+              for fn in files:
+                  if " " in fn:
+                      new = fn.replace(" ", ".")
+                      os.rename(os.path.join(dirpath, fn), os.path.join(dirpath, new))
+                      print(f"renamed: {fn} -> {new}")
+          PY
+
       - name: Sign bundles and generate updater.json
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -120,3 +138,27 @@ jobs:
               echo "  WARN: failed to upload $f (ignored)"
           done
           echo "publish step done"
+
+      - name: Verify updater.json download URLs resolve (HTTP 200)
+        # Defense-in-depth: a wrong filename (e.g. space vs dot) would make the
+        # app's auto-update download 404 even though signatures are valid.
+        run: |
+          python - <<'PY'
+          import json, urllib.request, sys
+          data = json.load(open("updater.json"))
+          bad = []
+          for key, info in data["platforms"].items():
+              url = info["url"]
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      if r.status != 200:
+                          bad.append((key, url, r.status))
+              except Exception as e:
+                  bad.append((key, url, str(e)))
+          if bad:
+              print("FAILED: updater.json URLs did not resolve:")
+              for b in bad:
+                  print("  ", b)
+              sys.exit(1)
+          print("OK: all updater.json download URLs returned HTTP 200")
+          PY
