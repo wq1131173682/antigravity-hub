@@ -93,20 +93,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete "${GITHUB_REF_NAME}" --yes || true
-          sleep 3
+          gh release delete "${GITHUB_REF_NAME}" --yes 2>/dev/null || true
+          sleep 5
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Collect all bundle files (handles spaces in filenames via null-delimited loop)
-          assets=()
-          while IFS= read -r -d '' f; do
-            assets+=("$f")
-          done < <(find bundles -type f -print0)
+          # 1) Create the release with updater.json only (keeps the release alive
+          #    even if a later asset upload fails).
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME}" \
             --notes "Release ${GITHUB_REF_NAME}" \
             --latest \
-            updater.json "${assets[@]}"
+            updater.json
+
+          # 2) Upload only the real installer artifacts (icons/wixpdb/.sig are
+          #    not needed by the updater and some of them 404 on upload).
+          #    A single failing file must not abort the whole release.
+          find bundles -type f \( \
+            -name "*.msi" -o -name "*.exe" -o \
+            -name "*.AppImage" -o -name "*.deb" \) -print0 | \
+          while IFS= read -r -d '' f; do
+            echo "uploading: $f"
+            gh release upload "${GITHUB_REF_NAME}" "$f" --clobber || \
+              echo "  WARN: failed to upload $f (ignored)"
+          done
+          echo "publish step done"
