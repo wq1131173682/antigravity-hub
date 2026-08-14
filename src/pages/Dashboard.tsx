@@ -4,7 +4,9 @@ import { useNavigate } from 'react-router-dom';
 import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
-import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw } from 'lucide-react';
+import { QuotaBar } from '../components/common/QuotaBar';
+import { quotaStatus, STATUS_TINT, STATUS_DOT, STATUS_TEXT } from '../utils/status';
+import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw, Pause, Play, ChevronRight } from 'lucide-react';
 import { getLanIp, getTokenStats, getTokenStatsByPlatform, resetTokenStats, TokenStats } from '../services/platformService';
 import { isTauri } from '../utils/env';
 import { MODEL_CONFIG } from '../config/modelConfig';
@@ -48,6 +50,10 @@ function Dashboard() {
   const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
   const [platformTokenStats, setPlatformTokenStats] = useState<Record<string, TokenStats>>({});
   const [resettingStats, setResettingStats] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterOverLimit, setFilterOverLimit] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const startTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Cleanup timeout on unmount
@@ -109,9 +115,9 @@ function Dashboard() {
     return () => { if (unlistenFn) unlistenFn(); };
   }, [models, fetchModelUsage]);
 
-  // Poll aggregate + per-platform token stats every 3s. Counters are
-  // persisted on the backend but can change as new requests come in, so
-  // polling keeps the dashboard live.
+  // Poll aggregate + per-platform token stats every 3s while auto-refresh is
+  // on. Counters are persisted on the backend but change as requests come in,
+  // so polling keeps the dashboard live. Paused via the auto-refresh toggle.
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
@@ -129,9 +135,20 @@ function Dashboard() {
       }
     };
     refresh();
+    if (!autoRefresh) return;
     const id = setInterval(refresh, 3000);
     return () => { cancelled = true; clearInterval(id); };
-  }, []);
+  }, [autoRefresh]);
+
+  // Proxy health — polled independently of auto-refresh so a backend crash is
+  // reflected immediately instead of staying stuck on "Live" after the process
+  // dies. Fixes the case where proxy status was only re-checked on mount/toggle.
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetchProxyStatus();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [fetchProxyStatus]);
 
   const handleResetTokenStats = async () => {
     if (resettingStats) return;
@@ -195,6 +212,25 @@ function Dashboard() {
     return { totalUsed, totalLimit, limitedKeys, overCount, nearLimitCount, availableKeyCount, ratio, remaining };
   }, [allModels, modelUsage]);
 
+  // Search / filter-aware platform→model grouping for the Models & Quotas panel.
+  const filteredBlocks = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return platforms
+      .map(p => {
+        let pm = models[p.id] || [];
+        if (q) {
+          pm = pm.filter(m =>
+            (m.display_name || m.model_name || '').toLowerCase().includes(q) ||
+            m.model_name.toLowerCase().includes(q));
+        }
+        if (filterOverLimit) {
+          pm = pm.filter(m => (modelUsage[m.id] || []).some(u => !u.is_available));
+        }
+        return { p, pm };
+      })
+      .filter(b => b.pm.length > 0);
+  }, [platforms, models, modelUsage, searchQuery, filterOverLimit]);
+
   // Detect LAN IP when proxy host is 0.0.0.0
   useEffect(() => {
     if (config?.proxy_host === '0.0.0.0') {
@@ -257,18 +293,33 @@ function Dashboard() {
   return (
     <div className="h-full w-full overflow-y-auto">
       <div className="p-5 sm:p-6 md:p-8 space-y-5 w-full">
-        {/* Header */}
-        <div className="flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-base-content">
-            {t('dashboard.hello')}
-          </h1>
-          <div className="flex gap-2">
+        {/* Sticky control bar — key actions stay reachable while scrolling */}
+        <div className="sticky top-0 z-20 -mx-5 sm:-mx-6 md:-mx-8 px-5 sm:px-6 md:px-8 py-3 bg-[#FAFBFC]/90 dark:bg-base-300/90 backdrop-blur border-b border-gray-100 dark:border-base-300 flex items-center justify-between gap-3">
+          <h1 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-base-content truncate">{t('dashboard.hello')}</h1>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setAutoRefresh(v => !v)}
+              title={autoRefresh ? t('dashboard.auto_refresh_on', '实时刷新中') : t('dashboard.auto_refresh_off', '已暂停自动刷新')}
+              aria-pressed={autoRefresh}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors flex items-center gap-1.5 ${autoRefresh ? 'border-emerald-200 dark:border-emerald-800 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20' : 'border-gray-200 dark:border-base-300 text-gray-500 dark:text-gray-400'}`}
+            >
+              {autoRefresh ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">{autoRefresh ? t('dashboard.auto_on', '实时') : t('dashboard.auto_off', '已暂停')}</span>
+            </button>
             <button
               className="px-3 py-1.5 bg-blue-500 text-white text-xs font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm"
               onClick={handleRefresh}
             >
               <RefreshCw className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">{t('dashboard.refresh_quota')}</span>
+            </button>
+            <button
+              className={`relative inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all select-none shadow-sm ${proxyRunning ? 'bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-950/50 dark:text-red-400 dark:hover:bg-red-950/70 border border-red-200 dark:border-red-800/50' : 'bg-green-500 text-white hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-700 border border-green-500 dark:border-green-600'} ${starting ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
+              onClick={handleToggleProxy}
+              disabled={starting}
+            >
+              {starting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : proxyRunning ? <PowerOff className="w-3.5 h-3.5" /> : <Power className="w-3.5 h-3.5" />}
+              <span className="hidden sm:inline">{starting ? '...' : proxyRunning ? t('dashboard.stop_proxy') : t('dashboard.start_proxy')}</span>
             </button>
           </div>
         </div>
@@ -356,26 +407,6 @@ function Dashboard() {
                   )}
                 </div>
               </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                className={`relative inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg transition-all select-none shadow-sm ${
-                  proxyRunning
-                    ? 'bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-950/50 dark:text-red-400 dark:hover:bg-red-950/70 border border-red-200 dark:border-red-800/50'
-                    : 'bg-green-500 text-white hover:bg-green-600 dark:bg-green-600 dark:hover:bg-green-700 border border-green-500 dark:border-green-600'
-                } ${starting ? 'opacity-60 cursor-not-allowed' : 'active:scale-95'}`}
-                onClick={handleToggleProxy}
-                disabled={starting}
-              >
-                {starting ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : proxyRunning ? (
-                  <PowerOff className="w-3.5 h-3.5" />
-                ) : (
-                  <Power className="w-3.5 h-3.5" />
-                )}
-                {starting ? '...' : proxyRunning ? t('dashboard.stop_proxy') : t('dashboard.start_proxy')}
-              </button>
             </div>
           </div>
         </div>
@@ -571,8 +602,10 @@ function Dashboard() {
           )}
         </div>
 
-        {/* ★ 5h Quota Hero — the headline metric, prominently displayed */}
-        {fiveHourSummary.totalLimit > 0 && (
+        {/* ★ 5h Quota Hero — the headline metric, prominently displayed.
+            Always rendered; when no per-5h limits are configured we show a
+            neutral placeholder instead of dropping the section entirely. */}
+        {fiveHourSummary.limitedKeys > 0 ? (
           <div className="relative overflow-hidden rounded-2xl shadow-md border-2 border-indigo-200 dark:border-indigo-800/50 bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 dark:from-indigo-700 dark:via-violet-700 dark:to-purple-800">
             {/* Decorative glow */}
             <div className="absolute -top-8 -right-8 w-40 h-40 bg-white/10 rounded-full blur-2xl" />
@@ -647,18 +680,13 @@ function Dashboard() {
                     {(fiveHourSummary.ratio * 100).toFixed(1)}%
                   </span>
                 </div>
-                <div className="h-3 w-full rounded-full overflow-hidden bg-white/20 ring-1 ring-white/10">
-                  <div
-                    className={`h-full rounded-full transition-all duration-700 ease-out ${
-                      fiveHourSummary.ratio >= 1
-                        ? 'bg-gradient-to-r from-red-400 to-rose-300'
-                        : fiveHourSummary.ratio >= 0.8
-                          ? 'bg-gradient-to-r from-amber-300 to-yellow-200'
-                          : 'bg-gradient-to-r from-emerald-300 to-teal-200'
-                    }`}
-                    style={{ width: `${Math.max(2, fiveHourSummary.ratio * 100)}%` }}
-                  />
-                </div>
+                <QuotaBar
+                  used={fiveHourSummary.totalUsed}
+                  limit={fiveHourSummary.totalLimit}
+                  size="md"
+                  over={fiveHourSummary.ratio >= 1}
+                  trackClassName="bg-white/20 ring-1 ring-white/10"
+                />
                 <div className="flex items-center justify-between mt-1.5 text-[10px] text-indigo-100/70">
                   <span>{fiveHourSummary.limitedKeys} 个有限额 Key</span>
                   <span>{fiveHourSummary.availableKeyCount} 个可用</span>
@@ -666,12 +694,22 @@ function Dashboard() {
               </div>
             </div>
           </div>
+        ) : (
+          <div className="rounded-xl p-5 shadow-sm border border-dashed border-gray-200 dark:border-base-300 bg-white dark:bg-base-100 flex items-center gap-3">
+            <div className="p-2 rounded-lg bg-gray-100 dark:bg-base-300">
+              <Activity className="w-5 h-5 text-gray-400" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-gray-700 dark:text-gray-300">5 小时限额总览</div>
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">未配置 per-5h 限额 · 仅统计用量，不限制</div>
+            </div>
+          </div>
         )}
 
         {/* Model Overview with Quota Limits — Redesigned */}
         {platforms.length > 0 && (
           <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
               <div className="p-1.5 bg-cyan-50 dark:bg-cyan-900/20 rounded-md">
                 <Activity className="w-4 h-4 text-cyan-500 dark:text-cyan-400" />
               </div>
@@ -679,27 +717,64 @@ function Dashboard() {
                 模型与限额 / Models & Quotas
               </h2>
               <span className="text-[11px] text-gray-400 dark:text-gray-500">
-                {allModels.length} models
+                {filteredBlocks.reduce((n, b) => n + b.pm.length, 0)} models
               </span>
+
+              {/* Search by model name */}
+              <div className="flex-1 min-w-[140px]">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder={t('dashboard.search_models', '搜索模型…')}
+                  aria-label={t('dashboard.search_models', '搜索模型')}
+                  className="w-full text-xs px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-base-300 bg-gray-50 dark:bg-base-200/50 text-gray-700 dark:text-gray-200 focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+              {/* Only show models with an exhausted key */}
+              <button
+                onClick={() => setFilterOverLimit(v => !v)}
+                className={`text-[11px] px-2.5 py-1.5 rounded-lg border transition-colors ${filterOverLimit ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-600 dark:text-red-400' : 'border-gray-200 dark:border-base-300 text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-base-200'}`}
+              >
+                {t('dashboard.only_over_limit', '仅看超额')}
+              </button>
+              {/* Expand / collapse all platforms */}
+              <button
+                onClick={() => {
+                  const allOpen = platforms.every(p => expanded[p.id] !== false);
+                  const obj: Record<string, boolean> = {};
+                  platforms.forEach(p => { obj[p.id] = !allOpen; });
+                  setExpanded(obj);
+                }}
+                className="text-[11px] px-2.5 py-1.5 rounded-lg border border-gray-200 dark:border-base-300 text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-base-200 transition-colors"
+              >
+                {platforms.every(p => expanded[p.id] !== false) ? t('dashboard.collapse_all', '全部折叠') : t('dashboard.expand_all', '全部展开')}
+              </button>
             </div>
 
             <div className="space-y-4">
-              {platforms.map(p => {
-                const platformModels = models[p.id] || [];
-                if (platformModels.length === 0) return null;
+              {filteredBlocks.length === 0 && (
+                <div className="text-center py-6 text-xs text-gray-400 dark:text-gray-500">{t('dashboard.no_match', '无匹配模型')}</div>
+              )}
+              {filteredBlocks.map(({ p, pm }) => {
+                const platformModels = pm;
 
                 return (
                   <div key={p.id}>
-                    {/* Platform divider */}
-                    <div className="flex items-center gap-2 mb-3">
+                    <button
+                      onClick={() => setExpanded(prev => ({ ...prev, [p.id]: prev[p.id] === false }))}
+                      className="flex items-center gap-2 mb-3 w-full text-left group"
+                      aria-expanded={expanded[p.id] !== false}
+                    >
+                      <ChevronRight className={`w-4 h-4 text-gray-400 transition-transform ${expanded[p.id] !== false ? 'rotate-90' : ''}`} />
                       <Globe className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500" />
                       <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">{p.name}</span>
                       <span className="text-[10px] font-mono bg-gray-100 dark:bg-base-300 px-1.5 py-0.5 rounded text-gray-500 dark:text-gray-400">
                         /{p.path_prefix}
                       </span>
                       <span className="text-[10px] text-gray-400 dark:text-gray-500">{platformModels.length} models</span>
-                    </div>                        {/* Model cards grid */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-3">
+                    </button>
+                    {expanded[p.id] !== false && (<div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                       {platformModels.map(m => {
                         const usageEntries = modelUsage[m.id] || [];
                         const usageLoaded = usageEntries.length > 0;
@@ -791,16 +866,7 @@ function Dashboard() {
                                         ? 'bg-amber-50/30 dark:bg-amber-900/10'
                                         : 'bg-emerald-50/20 dark:bg-emerald-900/5';
 
-                                    const ratioOf = (count: number, limit: number) => {
-                                      if (limit <= 0) return 0;
-                                      return Math.min(1, count / limit);
-                                    };
-                                    const r5h = ratioOf(u.five_hour.count, m.per_5hour);
-                                    const rDay = ratioOf(u.day.count, m.per_day);
-                                    const rMon = ratioOf(u.month.count, m.per_month);
-
-                                    const barColor = (ratio: number, over: boolean) =>
-                                      over ? 'bg-red-500' : ratio > 0.8 ? 'bg-amber-500' : 'bg-emerald-500';
+                                    const status5h = quotaStatus(u.five_hour.count, m.per_5hour, over5h);
 
                                     const disabledInfo = isDisabled && u.disabled_until
                                       ? `Disabled until ${new Date(u.disabled_until * 1000).toLocaleString()}`
@@ -826,70 +892,24 @@ Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
                                           </span>
                                         </div>
 
-                                        {/* ★ 5h — primary, full-width prominent row */}
-                                        <div className={`rounded-md p-2 mb-1.5 transition-colors ${
-                                          over5h
-                                            ? 'bg-red-100/70 dark:bg-red-900/20 ring-1 ring-red-300/50 dark:ring-red-700/40'
-                                            : r5h > 0.8
-                                              ? 'bg-amber-50/70 dark:bg-amber-900/10'
-                                              : 'bg-indigo-50/40 dark:bg-indigo-900/10'
-                                        }`}>
+                                        {/* ★ 5h — primary, full-width prominent row (semantic status colors) */}
+                                        <div className={`rounded-md p-2 mb-1.5 transition-colors ${STATUS_TINT[status5h]}`}>
                                           <div className="flex items-baseline justify-between mb-1">
                                             <div className="flex items-center gap-1.5">
-                                              <span className={`inline-block w-1.5 h-1.5 rounded-full ${over5h ? 'bg-red-500' : r5h > 0.8 ? 'bg-amber-500' : 'bg-indigo-500'}`} />
+                                              <span className={`inline-block w-1.5 h-1.5 rounded-full ${STATUS_DOT[status5h]}`} />
                                               <span className="text-[10px] font-bold uppercase tracking-wider text-gray-600 dark:text-gray-300">5h 限额</span>
                                             </div>
-                                            <span className={`text-xs font-mono font-bold tabular-nums ${over5h ? 'text-red-600 dark:text-red-400' : r5h > 0.8 ? 'text-amber-600 dark:text-amber-400' : 'text-gray-700 dark:text-gray-200'}`}>
+                                            <span className={`text-xs font-mono font-bold tabular-nums ${STATUS_TEXT[status5h]}`}>
                                               {u.five_hour.count}<span className="text-gray-400 dark:text-gray-500 font-normal">/{formatLimit(m.per_5hour)}</span>
                                             </span>
                                           </div>
-                                          <div className="w-full h-2 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
-                                            <div
-                                              className={`h-full rounded-full transition-all duration-500 ${
-                                                over5h
-                                                  ? 'bg-gradient-to-r from-red-500 to-rose-400'
-                                                  : r5h > 0.8
-                                                    ? 'bg-gradient-to-r from-amber-400 to-yellow-300'
-                                                    : 'bg-gradient-to-r from-indigo-500 to-violet-400'
-                                              }`}
-                                              style={{ width: m.per_5hour > 0 ? `${Math.max(over5h ? 100 : r5h * 100, 2)}%` : '0%' }}
-                                            />
-                                          </div>
+                                          <QuotaBar used={u.five_hour.count} limit={m.per_5hour} size="sm" over={over5h} />
                                         </div>
 
-                                        {/* Day / Month — compact secondary row */}
+                                        {/* Day / Month — compact secondary rows (semantic status colors) */}
                                         <div className="grid grid-cols-2 gap-2">
-                                          {/* Day */}
-                                          <div>
-                                            <div className="flex items-baseline justify-between mb-0.5">
-                                              <span className="text-[9px] text-gray-400 dark:text-gray-500">Day</span>
-                                              <span className={`text-[10px] font-mono ${overDay ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}`}>
-                                                {u.day.count}/{formatLimit(m.per_day)}
-                                              </span>
-                                            </div>
-                                            <div className="w-full h-1 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
-                                              <div
-                                                className={`h-full transition-all ${barColor(rDay, overDay)}`}
-                                                style={{ width: m.per_day > 0 ? `${rDay * 100}%` : '0%' }}
-                                              />
-                                            </div>
-                                          </div>
-
-                                          {/* Month */}
-                                          <div>
-                                            <div className="flex items-baseline justify-between mb-0.5">
-                                              <span className="text-[9px] text-gray-400 dark:text-gray-500">Mon</span>
-                                              <span className={`text-[10px] font-mono ${overMon ? 'text-red-600 dark:text-red-400 font-semibold' : 'text-gray-500 dark:text-gray-400'}`}>
-                                                {u.month.count}/{formatLimit(m.per_month)}
-                                              </span>
-                                            </div>
-                                            <div className="w-full h-1 bg-gray-200/60 dark:bg-base-300/60 rounded-full overflow-hidden">
-                                              <div
-                                                className={`h-full transition-all ${barColor(rMon, overMon)}`}
-                                                style={{ width: m.per_month > 0 ? `${rMon * 100}%` : '0%' }}
-                                              />
-                                            </div>
-                                          </div>
+                                          <QuotaBar used={u.day.count} limit={m.per_day} label="Day" size="xs" over={overDay} format={formatLimit} />
+                                          <QuotaBar used={u.month.count} limit={m.per_month} label="Mon" size="xs" over={overMon} format={formatLimit} />
                                         </div>
                                       </div>
                                     );
@@ -904,7 +924,7 @@ Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
                           </div>
                         );
                       })}
-                    </div>
+                    </div>)}
                   </div>
                 );
               })}

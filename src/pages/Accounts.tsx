@@ -5,6 +5,7 @@ import { useConfigStore } from '../stores/useConfigStore';
 import type { Model, Platform } from '../types/platform';
 import type { TestModelResult, UpstreamModelInfo } from '../services/platformService';
 import { showToast } from '../components/common/ToastContainer';
+import { QuotaBar } from '../components/common/QuotaBar';
 import ModalDialog from '../components/common/ModalDialog';
 import * as codexService from '../services/codexService';
 import { CODEX_ENABLED } from '../config/featureFlags';
@@ -330,25 +331,6 @@ function TestModelButton({ platformId, modelName, displayName, testModel: testMo
   );
 }
 
-// ---------------------------------------------------------------------------
-// Quota bar component
-// ---------------------------------------------------------------------------
-function QuotaBar({ used, limit, label }: { used: number; limit: number; label: string }) {
-  if (limit <= 0) return null;
-  const pct = Math.min(100, Math.round((used / limit) * 100));
-  const color = pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-orange-500' : 'bg-blue-500';
-  return (
-    <div className="space-y-0.5">
-      <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
-        <span>{label}</span>
-        <span>{used}/{limit}</span>
-      </div>
-      <div className="w-full h-1.5 bg-gray-100 dark:bg-base-300 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Main Accounts Page
@@ -646,9 +628,15 @@ function Accounts() {
                         {/* Quota bars */}
                         <div className="px-4 py-3 border-b border-gray-100 dark:border-base-200">
                           <div className="grid grid-cols-3 gap-3">
-                            <QuotaBar used={usage.reduce((s, u) => s + (u.five_hour?.count || 0), 0)} limit={model.per_5hour || 0} label={t('quota.per_5hour')} />
-                            <QuotaBar used={usage.reduce((s, u) => s + (u.day?.count || 0), 0)} limit={model.per_day || 0} label={t('quota.per_day')} />
-                            <QuotaBar used={usage.reduce((s, u) => s + (u.month?.count || 0), 0)} limit={model.per_month || 0} label={t('quota.per_month')} />
+                            {(model.per_5hour || 0) > 0 && (
+                              <QuotaBar used={usage.reduce((s, u) => s + (u.five_hour?.count || 0), 0)} limit={model.per_5hour} label={t('quota.per_5hour')} size="xs" />
+                            )}
+                            {(model.per_day || 0) > 0 && (
+                              <QuotaBar used={usage.reduce((s, u) => s + (u.day?.count || 0), 0)} limit={model.per_day} label={t('quota.per_day')} size="xs" />
+                            )}
+                            {(model.per_month || 0) > 0 && (
+                              <QuotaBar used={usage.reduce((s, u) => s + (u.month?.count || 0), 0)} limit={model.per_month} label={t('quota.per_month')} size="xs" />
+                            )}
                           </div>
                         </div>
 
