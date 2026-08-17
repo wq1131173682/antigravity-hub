@@ -5,11 +5,10 @@ import { usePlatformStore } from '../stores/usePlatformStore';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { QuotaBar } from '../components/common/QuotaBar';
-import { quotaStatus, STATUS_TINT, STATUS_DOT, STATUS_TEXT } from '../utils/status';
+import { ModelCard } from '../components/dashboard/ModelCard';
 import { Server, Globe, Key, Activity, AlertTriangle, RefreshCw, ArrowRight, Shield, Plus, Terminal, Power, PowerOff, Copy, Check, ArrowDownToLine, ArrowUpFromLine, Hash, RotateCcw, Pause, Play, ChevronRight } from 'lucide-react';
 import { getLanIp, getTokenStats, getTokenStatsByPlatform, resetTokenStats, TokenStats } from '../services/platformService';
 import { isTauri } from '../utils/env';
-import { MODEL_CONFIG } from '../config/modelConfig';
 
 interface KeySwitchedPayload {
   platformId: string;
@@ -774,157 +773,17 @@ function Dashboard() {
                       </span>
                       <span className="text-[10px] text-gray-400 dark:text-gray-500">{platformModels.length} models</span>
                     </button>
-                    {expanded[p.id] !== false && (<div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                      {platformModels.map(m => {
-                        const usageEntries = modelUsage[m.id] || [];
-                        const usageLoaded = usageEntries.length > 0;
-                        const availableCount = usageEntries.filter(u => u.is_available).length;
-                        const totalCount = usageEntries.length;
-                        const allExhausted = usageLoaded && availableCount === 0;
-                        const exceededCount = usageEntries.filter(u => !u.is_available).length;
-
-                        // Sort entries: available first, then exhausted/disabled
-                        const sortedEntries = [...usageEntries].sort((a, b) => {
-                          if (a.is_available && !b.is_available) return -1;
-                          if (!a.is_available && b.is_available) return 1;
-                          return 0;
-                        });
-
-                        // Get model icon from config
-                        const modelConfig = MODEL_CONFIG[m.id.toLowerCase()];
-                        const ModelIcon = modelConfig?.Icon;
-
-                        return (
-                          <div
+                    {expanded[p.id] !== false && (
+                      <div className="space-y-2">
+                        {platformModels.map(m => (
+                          <ModelCard
                             key={m.id}
-                            className="bg-gray-50 dark:bg-base-200/50 rounded-lg border border-gray-100 dark:border-base-300 overflow-hidden"
-                          >
-                            {/* Card header: icon + model name + availability badge */}
-                            <div className="px-3 py-2.5 border-b border-gray-100/60 dark:border-base-300/60 bg-white/50 dark:bg-base-100/30">
-                              <div className="flex items-center gap-2.5">
-                                {/* Model icon */}
-                                {ModelIcon ? (
-                                  <ModelIcon size={18} className="flex-shrink-0" />
-                                ) : (
-                                  <div className="w-[18px] h-[18px] flex-shrink-0 rounded bg-gray-200 dark:bg-base-300 flex items-center justify-center">
-                                    <span className="text-[9px] font-bold text-gray-500 dark:text-gray-400">M</span>
-                                  </div>
-                                )}
-                                {/* Model name */}
-                                <div className="flex-1 min-w-0">
-                                  <div className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate" title={m.model_name}>
-                                    {m.display_name || m.model_name}
-                                  </div>
-                                </div>
-                                {/* Exceeded key badge */}
-                                {usageLoaded && exceededCount > 0 && (
-                                  <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[10px] font-bold flex-shrink-0 mr-1">
-                                    <AlertTriangle className="w-3 h-3" />
-                                    {exceededCount}
-                                  </div>
-                                )}
-                                {/* Availability badge */}
-                                {usageLoaded ? (
-                                  <div
-                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full flex-shrink-0 ${
-                                      allExhausted
-                                        ? 'bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400'
-                                        : exceededCount > 0
-                                          ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400'
-                                          : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400'
-                                    }`}
-                                    title={`${availableCount} of ${totalCount} keys available`}
-                                  >
-                                    {availableCount}/{totalCount}
-                                  </div>
-                                ) : (
-                                  <div className="text-[10px] text-gray-400 dark:text-gray-500 flex-shrink-0">…</div>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Key rows */}
-                            <div className="px-3 py-2">
-                              {usageLoaded ? (
-                                <div className="space-y-2">
-                                  {sortedEntries.map(u => {
-                                    const over5h = m.per_5hour > 0 && u.five_hour.count > m.per_5hour;
-                                    const overDay = m.per_day > 0 && u.day.count > m.per_day;
-                                    const overMon = m.per_month > 0 && u.month.count > m.per_month;
-                                    const isDisabled = !u.is_available;
-                                    const overAny = over5h || overDay || overMon;
-
-                                    const rowDotCls = isDisabled
-                                      ? 'bg-red-500'
-                                      : overAny
-                                        ? 'bg-amber-500'
-                                        : 'bg-emerald-500';
-
-                                    const rowBgCls = isDisabled
-                                      ? 'bg-red-50/40 dark:bg-red-900/10'
-                                      : overAny
-                                        ? 'bg-amber-50/30 dark:bg-amber-900/10'
-                                        : 'bg-emerald-50/20 dark:bg-emerald-900/5';
-
-                                    const status5h = quotaStatus(u.five_hour.count, m.per_5hour, over5h);
-
-                                    const disabledInfo = isDisabled && u.disabled_until
-                                      ? `Disabled until ${new Date(u.disabled_until * 1000).toLocaleString()}`
-                                      : isDisabled ? 'Disabled (5xx backoff)' : '';
-
-                                    return (
-                                      <div
-                                        key={u.key_id}
-                                        className={`rounded-md px-2 py-1.5 transition-colors ${rowBgCls}`}
-                                        title={`
-Key: ${u.key_id}
-${disabledInfo ? disabledInfo + '\n' : ''}Status: ${isDisabled ? 'Disabled' : overAny ? 'Over quota' : 'Available'}
-5h: ${u.five_hour.count}/${m.per_5hour <= 0 ? '∞' : m.per_5hour}
-Day: ${u.day.count}/${m.per_day <= 0 ? '∞' : m.per_day}
-Month: ${u.month.count}/${m.per_month <= 0 ? '∞' : m.per_month}
-`.trim()}
-                                      >
-                                        {/* Key identifier row */}
-                                        <div className="flex items-center gap-1.5 mb-1">
-                                          <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${rowDotCls}`} />
-                                          <span className="text-[11px] font-mono text-gray-600 dark:text-gray-400 truncate">
-                                            {u.key_id.slice(0, 10)}…{u.key_id.slice(-4)}
-                                          </span>
-                                        </div>
-
-                                        {/* ★ 5h — primary, full-width prominent row (semantic status colors) */}
-                                        <div className={`rounded-md p-2 mb-1.5 transition-colors ${STATUS_TINT[status5h]}`}>
-                                          <div className="flex items-baseline justify-between mb-1">
-                                            <div className="flex items-center gap-1.5">
-                                              <span className={`inline-block w-1.5 h-1.5 rounded-full ${STATUS_DOT[status5h]}`} />
-                                              <span className="text-[10px] font-bold uppercase tracking-wider text-gray-600 dark:text-gray-300">5h 限额</span>
-                                            </div>
-                                            <span className={`text-xs font-mono font-bold tabular-nums ${STATUS_TEXT[status5h]}`}>
-                                              {u.five_hour.count}<span className="text-gray-400 dark:text-gray-500 font-normal">/{formatLimit(m.per_5hour)}</span>
-                                            </span>
-                                          </div>
-                                          <QuotaBar used={u.five_hour.count} limit={m.per_5hour} size="sm" over={over5h} />
-                                        </div>
-
-                                        {/* Day / Month — compact secondary rows (semantic status colors) */}
-                                        <div className="grid grid-cols-2 gap-2">
-                                          <QuotaBar used={u.day.count} limit={m.per_day} label="Day" size="xs" over={overDay} format={formatLimit} />
-                                          <QuotaBar used={u.month.count} limit={m.per_month} label="Mon" size="xs" over={overMon} format={formatLimit} />
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              ) : (
-                                <div className="text-[11px] text-gray-400 dark:text-gray-500 py-2 text-center">
-                                  {t('dashboard.no_usage_data', 'No usage data yet')}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>)}
+                            model={m}
+                            usageEntries={modelUsage[m.id] || []}
+                          />
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
