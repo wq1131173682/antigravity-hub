@@ -2260,9 +2260,12 @@ async fn sse_send(
 //   * every reasoning-ish delta field (`reasoning`, `thinking`,
 //     `thinking_content`, `reasoning_text`, `thought`, `thoughts`) is folded
 //     into `reasoning_content`;
-//   * `content` is always kept; when the delta carries reasoning text but NO
-//     content, the reasoning text is ALSO emitted as `content` so the final
-//     answer is never hidden inside a collapsed thinking block.
+//   * `content` is left untouched — it is the client's job (DSH, etc.) to
+//     render `reasoning_content` as a collapsible thinking block and
+//     `content` as the main message body, independently.
+// Do NOT mirror reasoning into content: DSH's Q&A confirmed both display
+// correctly when the field names are standardised, and mirroring would cause
+// the full chain-of-thought to appear as body text (reported as "思考内容当正文渲染").
 //
 // The stream wrapper `normalize_stream_to_unified` applies this per SSE chunk
 // while streaming, buffering partial lines across TCP boundaries (the same
@@ -2294,24 +2297,10 @@ fn normalize_chunk_to_unified(value: &mut serde_json::Value) -> bool {
             }
         }
 
-        // 2. Ensure `content` exists — if this delta only carried reasoning
-        //    text, mirror it into `content` so the answer is not trapped in a
-        //    thinking block. (Only when there is genuinely no content yet.)
-        let has_content = delta_obj
-            .get("content")
-            .and_then(|c| c.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        if !has_content {
-            if let Some(rc) = delta_obj.get("reasoning_content") {
-                if let Some(s) = rc.as_str() {
-                    if !s.is_empty() {
-                        delta_obj.insert("content".to_string(), serde_json::Value::String(s.to_string()));
-                        changed = true;
-                    }
-                }
-            }
-        }
+        // 2. `content` is left untouched — DSH/WorkBuddy renders
+        //    `reasoning_content` as a collapsible thinking block and
+        //    `content` as the main body independently. Do NOT mirror
+        //    reasoning into content.
     }
     changed
 }
