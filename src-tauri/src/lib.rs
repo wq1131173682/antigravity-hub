@@ -10,6 +10,7 @@ pub use modules::diagnostics;
 use modules::logger;
 use tracing::info;
 use tauri::{Emitter, Manager};
+use tauri_plugin_updater::UpdaterExt;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -20,11 +21,42 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             info!("App starting up...");
 
             // Initialize log bridge with app handle for debug console
             modules::log_bridge::init_log_bridge(app.handle().clone());
+
+            // Check for updates on startup (non-blocking).
+            // The updater plugin reads its config (endpoints, pubkey, dialog)
+            // from tauri.conf.json automatically. With dialog: true, the
+            // built-in native dialog is shown when a newer version is found.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let updater = match handle.updater() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            info!("Updater not available (non-fatal): {}", e);
+                            return;
+                        }
+                    };
+                    match updater.check().await {
+                        Ok(Some(update)) => {
+                            info!("Update available: {} (current: {})", update.version, update.current_version);
+                            // The built-in dialog (dialog: true) handles the
+                            // download-and-install prompt automatically.
+                        }
+                        Ok(None) => {
+                            info!("No update available (current version is up-to-date)");
+                        }
+                        Err(e) => {
+                            info!("Update check failed (non-fatal): {}", e);
+                        }
+                    }
+                });
+            }
 
             // Initialize quota window tracker
             modules::quota_window::initialize();

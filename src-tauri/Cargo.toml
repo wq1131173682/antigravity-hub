@@ -1,6 +1,6 @@
 [package]
 name = "antigravity_tools"
-version = "5.3.24"
+version = "5.3.25"
 description = "Multi-platform API Account Manager - Simplified Edition"
 authors = ["you"]
 license = "CC-BY-NC-SA-4.0"
@@ -19,6 +19,7 @@ tauri = { version = "^2.2.5", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-fs = "2.4.5"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 uuid = { version = "1.10", features = ["v4", "serde"] }
