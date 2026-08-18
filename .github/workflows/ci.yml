@@ -1,0 +1,192 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+  RUST_TOOLCHAIN: "stable"
+  # Disable incremental compilation in CI for speed
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # ── Frontend: type check + build ──────────────────────────────────────────
+  frontend:
+    name: Frontend (TypeScript + Build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
+          retention-days: 1
+
+  # ── Backend: Rust check + clippy ───────────────────────────────────────────
+  backend:
+    name: Backend (Rust check + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-index-
+
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      - name: cargo clippy (deny warnings)
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt -- --check
+
+  # ── Cross-platform Tauri builds ───────────────────────────────────────────
+  build-windows:
+    name: Build Windows (x64)
+    needs: [frontend, backend]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install WebView2 (required by Tauri v2 on Windows)
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/webview/webview2/releases/download/126.0.2592.102/WinWebview2Setup.exe" -OutFile "$env:TEMP\WebView2.exe"
+          Start-Process "$env:TEMP\WebView2.exe" -ArgumentList "/silent", "/install" -Wait
+
+      - name: Install system dependencies (Windows)
+        run: choco install llvm -y
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Tauri app (Windows)
+        run: npx tauri build
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-hub-windows-x64
+          path: src-tauri/target/release/bundle/
+          retention-days: 7
+
+  build-macos:
+    name: Build macOS (x64 + arm64)
+    needs: [frontend, backend]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Tauri app (macOS universal)
+        run: npx tauri build
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-hub-macos-universal
+          path: src-tauri/target/release/bundle/
+          retention-days: 7
+
+  build-linux:
+    name: Build Linux (x64)
+    needs: [frontend, backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev libayatana-appindicator-dev libvips-dev
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build Tauri app (Linux)
+        run: npx tauri build
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-hub-linux-x64
+          path: src-tauri/target/release/bundle/
+          retention-days: 7

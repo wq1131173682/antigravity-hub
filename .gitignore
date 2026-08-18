@@ -1,4 +1,4 @@
-﻿# Logs
+# Logs
 logs
 .logs
 *.log
@@ -56,7 +56,7 @@ docker/
 docs/*
 # 例外：Responses 双向转换字段映射文档（随版本交付）
 !docs/responses_api_mapping.md
-workflows/
+/workflows/
 scripts/
 .dockerignore
 test.rs
