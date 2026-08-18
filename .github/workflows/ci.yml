@@ -51,9 +51,16 @@ jobs:
   # ── Backend: Rust check + clippy ───────────────────────────────────────────
   backend:
     name: Backend (Rust check + clippy)
+    needs: [frontend]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
