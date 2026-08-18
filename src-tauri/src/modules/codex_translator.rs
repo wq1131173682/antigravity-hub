@@ -2239,6 +2239,187 @@ async fn sse_send(
     }
 }
 
+// ── Unified pass-through SSE normalization ────────────────────────────────
+// Different upstream providers shape reasoning/thinking content differently
+// in their Chat Completions SSE streams:
+//
+//   * DeepSeek / Qwen / Kimi:  `reasoning_content`  +  `content`
+//   * sensenova:               `reasoning`          +  `content` (but often
+//                              dumps the whole answer into `reasoning` and
+//                              leaves `content` nearly empty or absent)
+//   * Agnes & friends:         `thinking` / `thinking_content` / `reasoning_text`
+//
+// Chat clients (DSH, ChatGPT-style renderers, etc.) usually only look for a
+// fixed field name — commonly `reasoning_content` — and render everything
+// else as the message body. When a provider puts the entire answer into
+// `reasoning` (sensenova-6.8 observed doing exactly this), the client shows
+// a giant "thinking" block and the real content is lost at the tail.
+//
+// `normalize_chunk_to_unified` rewrites a single Chat Completions SSE chunk to
+// a uniform shape the client can render correctly:
+//   * every reasoning-ish delta field (`reasoning`, `thinking`,
+//     `thinking_content`, `reasoning_text`, `thought`, `thoughts`) is folded
+//     into `reasoning_content`;
+//   * `content` is always kept; when the delta carries reasoning text but NO
+//     content, the reasoning text is ALSO emitted as `content` so the final
+//     answer is never hidden inside a collapsed thinking block.
+//
+// The stream wrapper `normalize_stream_to_unified` applies this per SSE chunk
+// while streaming, buffering partial lines across TCP boundaries (the same
+// hardening the Responses-API translator uses).
+
+/// Normalize one Chat Completions SSE chunk JSON in place to the unified
+/// field shape (`reasoning_content` + `content`). Returns the original doc if
+/// nothing changed, so callers can tell "rewritten" from "as-is".
+fn normalize_chunk_to_unified(value: &mut serde_json::Value) -> bool {
+    let Some(choices) = value.get_mut("choices").and_then(|c| c.as_array_mut()) else {
+        return false;
+    };
+    let mut changed = false;
+    for choice in choices {
+        let Some(delta) = choice.get_mut("delta") else { continue };
+        let Some(delta_obj) = delta.as_object_mut() else { continue };
+
+        // 1. Fold every reasoning-ish field into `reasoning_content`.
+        for key in [
+            "reasoning", "thinking", "thinking_content", "reasoning_text",
+            "thought", "thoughts",
+        ] {
+            if let Some(v) = delta_obj.remove(key) {
+                if !v.is_null() {
+                    delta_obj.insert("reasoning_content".to_string(), v);
+                    changed = true;
+                }
+                break; // only the first non-null alternative wins
+            }
+        }
+
+        // 2. Ensure `content` exists — if this delta only carried reasoning
+        //    text, mirror it into `content` so the answer is not trapped in a
+        //    thinking block. (Only when there is genuinely no content yet.)
+        let has_content = delta_obj
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !has_content {
+            if let Some(rc) = delta_obj.get("reasoning_content") {
+                if let Some(s) = rc.as_str() {
+                    if !s.is_empty() {
+                        delta_obj.insert("content".to_string(), serde_json::Value::String(s.to_string()));
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// SSE keepalive / comment frames and non-JSON tail markers (`[DONE]`) that
+/// must be forwarded verbatim.
+fn is_sse_meta_line(line: &str) -> bool {
+    line.is_empty()
+        || line.starts_with(':')
+        || line.starts_with("data: [DONE]")
+        || line.starts_with("event:")
+        || line.starts_with("id:")
+        || line.starts_with("retry:")
+}
+
+/// Normalize an upstream Chat Completions SSE byte stream into the unified
+/// field shape, streaming. Non-JSON frames (comments, `[DONE]`, keepalives)
+/// pass through untouched; only real `data: {...}` chunks are rewritten.
+pub fn normalize_stream_to_unified(
+    upstream_stream: impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures::stream::Stream<Item = Result<axum::body::Bytes, reqwest::Error>> + Send + 'static {
+    use futures::StreamExt;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(64);
+
+    tokio::spawn(async move {
+        // Raw byte buffer for reassembling SSE *lines* across upstream chunk
+        // boundaries (TCP can split a chunk at ANY byte offset).
+        let mut line_buf: Vec<u8> = Vec::new();
+        futures::pin_mut!(upstream_stream);
+
+        loop {
+            let chunk = match upstream_stream.next().await {
+                Some(Ok(c)) => c,
+                Some(Err(e)) => {
+                    // End the stream on upstream error (pass through).
+                    warn!("normalize_stream_to_unified: upstream error: {}", e);
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+                None => break,
+            };
+
+            line_buf.extend_from_slice(&chunk);
+
+            // Hand *newline-terminated* lines to the parser; keep the tail.
+            let mut consumed = 0usize;
+            let mut start = 0usize;
+            for i in 0..line_buf.len() {
+                if line_buf[i] == b'\n' {
+                    let line = String::from_utf8_lossy(&line_buf[start..=i]).into_owned();
+                    consumed = i + 1;
+                    start = consumed;
+                    if is_sse_meta_line(line.trim_end()) {
+                        let _ = tx.send(Ok(axum::body::Bytes::from(line))).await;
+                        continue;
+                    }
+                    if let Some(payload) = line.strip_prefix("data:") {
+                        let payload = payload.trim();
+                        let mut doc: serde_json::Value = match serde_json::from_str(payload) {
+                            Ok(j) => j,
+                            Err(_) => {
+                                // Not JSON — forward verbatim (e.g. `data: [DONE]`
+                                // handled above, or relayed partial fragments).
+                                let _ = tx.send(Ok(axum::body::Bytes::from(line))).await;
+                                continue;
+                            }
+                        };
+                        if normalize_chunk_to_unified(&mut doc) {
+                            let rewritten = format!(
+                                "data: {}\n",
+                                serde_json::to_string(&doc).unwrap_or_else(|_| payload.to_string())
+                            );
+                            let _ = tx.send(Ok(axum::body::Bytes::from(rewritten))).await;
+                        } else {
+                            let _ = tx.send(Ok(axum::body::Bytes::from(line))).await;
+                        }
+                    } else {
+                        let _ = tx.send(Ok(axum::body::Bytes::from(line))).await;
+                    }
+                }
+            }
+            if consumed > 0 {
+                line_buf.drain(..consumed);
+            }
+            if line_buf.len() > SSE_LINE_BUFFER_LIMIT {
+                warn!("normalize_stream_to_unified: line buffer exceeded limit, flushing");
+                let flush = std::mem::take(&mut line_buf);
+                if !flush.is_empty() {
+                    let _ = tx.send(Ok(axum::body::Bytes::from(flush))).await;
+                }
+            }
+        }
+
+        // Flush any trailing partial line.
+        if !line_buf.is_empty() {
+            let tail = std::mem::take(&mut line_buf);
+            let _ = tx.send(Ok(axum::body::Bytes::from(tail))).await;
+        }
+    });
+
+    // Convert the mpsc receiver into a futures::Stream so the return type
+    // matches `impl Stream<Item = Result<Bytes, reqwest::Error>>`.
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

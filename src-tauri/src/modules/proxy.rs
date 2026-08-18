@@ -1,4 +1,4 @@
-﻿use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::watch;
 use serde::Serialize;
@@ -1925,6 +1925,14 @@ async fn forward_with_retry(
                 // truncate the response mid-stream — surfacing as "the assistant's
                 // reply cut off after a tool call".
                 let upstream = resp.bytes_stream();
+                // Normalize reasoning/thinking field names to a unified format
+                // (`reasoning_content` + always-present `content`) so every
+                // upstream model renders correctly regardless of which field
+                // name it uses for chain-of-thought output.
+                // (sensenova-6.8-flash-lite observed putting its entire answer
+                // into `reasoning` — without this normalization the client shows
+                // a giant collapsed thinking block and the real content is lost.)
+                let upstream = Box::pin(crate::modules::codex_translator::normalize_stream_to_unified(upstream));
                 // Early-flush mode (sensenova / WorkBuddy): prepend an immediate
                 // SSE comment so the client's reader never sees an idle socket and
                 // abandons the first send. This branch is reached only AFTER a 2xx
