@@ -54,7 +54,10 @@ jobs:
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: bundle-${{ matrix.target }}
+          # Include run_id in the artifact name to ensure each workflow run has
+          # unique artifacts. Without this, rerunning the workflow would download
+          # stale artifacts from the previous run (with wrong version numbers).
+          name: bundle-${{ matrix.target }}-r${{ github.run_id }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle/**/*
           if-no-files-found: error
 
