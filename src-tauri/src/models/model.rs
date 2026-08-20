@@ -27,6 +27,10 @@ pub struct Model {
     /// Maximum input tokens (context window size), e.g. 1048576 for 1M
     #[serde(default)]
     pub max_input_tokens: Option<u64>,
+    /// Maximum output tokens (generation limit), e.g. 65536.
+    /// When None the upstream's own default is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 fn default_5hour() -> u32 { 3000 }
@@ -46,6 +50,7 @@ impl Model {
             sort_order: 0,
             created_at: chrono::Utc::now().timestamp(),
             max_input_tokens: None,
+            max_output_tokens: None,
         }
     }
 }

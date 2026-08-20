@@ -28,10 +28,11 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
   const [limitDay, setLimitDay] = useState('50000');
   const [limitMonth, setLimitMonth] = useState('1000000');
   const [maxInputTokens, setMaxInputTokens] = useState('1048576');
+  const [maxOutputTokens, setMaxOutputTokens] = useState('65536');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (open) { setModelName(''); setDisplayName(''); setLimit5h('10000'); setLimitDay('50000'); setLimitMonth('1000000'); setMaxInputTokens('1048576'); }
+    if (open) { setModelName(''); setDisplayName(''); setLimit5h('10000'); setLimitDay('50000'); setLimitMonth('1000000'); setMaxInputTokens('1048576'); setMaxOutputTokens('65536'); }
   }, [open]);
 
   const handleSave = async () => {
@@ -40,7 +41,8 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
     try {
       await addModel(platformId, modelName.trim(), displayName.trim() || modelName.trim(),
         Number(limit5h), Number(limitDay), Number(limitMonth),
-        maxInputTokens.trim() ? Number(maxInputTokens) : null);
+        maxInputTokens.trim() ? Number(maxInputTokens) : null,
+        maxOutputTokens.trim() ? Number(maxOutputTokens) : null);
       showToast(t('common.success'), 'success');
       onClose();
     } catch (e) {
@@ -79,11 +81,19 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
               <input type="number" min="0" className="w-full px-2 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={limitMonth} onChange={e => setLimitMonth(e.target.value)} />
             </div>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
-              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens, 留空不设置)</span>
-            </label>
-            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                上下文大小 / Context <span className="text-gray-400 font-normal">(max_input_tokens)</span>
+              </label>
+              <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                输出上限 / Output <span className="text-gray-400 font-normal">(max_output_tokens)</span>
+              </label>
+              <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxOutputTokens} onChange={e => setMaxOutputTokens(e.target.value)} placeholder="65536" />
+            </div>
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
@@ -105,6 +115,7 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
   const [limitDay, setLimitDay] = useState('0');
   const [limitMonth, setLimitMonth] = useState('0');
   const [maxInputTokens, setMaxInputTokens] = useState('');
+  const [maxOutputTokens, setMaxOutputTokens] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -113,6 +124,7 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
       setLimitDay(String(model.per_day ?? 0));
       setLimitMonth(String(model.per_month ?? 0));
       setMaxInputTokens(model.max_input_tokens ? String(model.max_input_tokens) : '');
+      setMaxOutputTokens(model.max_output_tokens ? String(model.max_output_tokens) : '');
     }
   }, [open, model]);
 
@@ -121,7 +133,8 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
     setSaving(true);
     try {
       await updateModelLimits(model.id, Number(limit5h), Number(limitDay), Number(limitMonth),
-        maxInputTokens.trim() ? Number(maxInputTokens) : null);
+        maxInputTokens.trim() ? Number(maxInputTokens) : null,
+        maxOutputTokens.trim() ? Number(maxOutputTokens) : null);
       showToast(t('common.success'), 'success');
       onClose();
     } catch (e) {
@@ -152,11 +165,19 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
               <input type="number" min="0" className="w-full px-2 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={limitMonth} onChange={e => setLimitMonth(e.target.value)} />
             </div>
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
-              上下文大小 / Context Size <span className="text-gray-400 font-normal">(max_input_tokens, 留空不设置)</span>
-            </label>
-            <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                上下文大小 / Context <span className="text-gray-400 font-normal">(max_input_tokens)</span>
+              </label>
+              <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxInputTokens} onChange={e => setMaxInputTokens(e.target.value)} placeholder="1048576" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                输出上限 / Output <span className="text-gray-400 font-normal">(max_output_tokens)</span>
+              </label>
+              <input type="number" min="0" step="1" className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none font-mono" value={maxOutputTokens} onChange={e => setMaxOutputTokens(e.target.value)} placeholder="65536" />
+            </div>
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-5">

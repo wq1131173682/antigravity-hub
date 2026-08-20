@@ -547,48 +547,38 @@ where
     }
 }
 
-/// Parse JSON body once and return both the model_name and the modified body bytes
-/// with max_tokens injected if needed. Returns (model_name_opt, modified_body_bytes).
+/// Parse JSON body once, extract model_name, and inject a sensible default
+/// `max_tokens` when the client omits it. We no longer hard-codon 4096 —
+/// modern reasoning models (DeepSeek-R1, Qwen3-Thinking, etc.) typically
+/// support 32K–131K output tokens, so we default to 65536. The upstream
+/// provider's own default is used when the field is present.
 fn parse_and_prepare_body(
     body_bytes: &[u8],
     target_path: &str,
 ) -> (Option<String>, Vec<u8>) {
-    // Only inject for completion/message endpoints
     let needs_max_tokens = target_path.contains("/chat/completions")
-        || target_path.contains("/v1/messages")
         || target_path.contains("/completions");
 
     if !needs_max_tokens {
-        // Still try to extract model name (single parse)
         let model_name = serde_json::from_slice::<serde_json::Value>(body_bytes).ok()
             .and_then(|v| v.get("model")?.as_str().map(String::from));
         return (model_name, body_bytes.to_vec());
     }
 
-    // Parse once and extract both model_name and potentially inject max_tokens
     match serde_json::from_slice::<serde_json::Value>(body_bytes) {
         Ok(mut json) => {
             let model_name = json.get("model").and_then(|v| v.as_str().map(String::from));
-
-            let needs_fix = match json.get("max_tokens") {
-                None => true,
-                Some(val) if val.is_null() => true,
-                Some(val) => {
-                    val.as_u64().map_or(true, |n| n == 0 || n > 65536)
-                }
-            };
-            if needs_fix {
+            if json.get("max_tokens").is_none() {
                 if let Some(obj) = json.as_object_mut() {
                     obj.insert(
                         "max_tokens".to_string(),
-                        serde_json::Value::Number(4096.into()),
+                        serde_json::Value::Number(65536.into()),
                     );
                 }
-                info!("Injected default max_tokens=4096 into request body (was missing or invalid)");
+                info!("Injected default max_tokens=65536 into request body (was missing)");
                 let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
                 return (model_name, modified);
             }
-
             (model_name, body_bytes.to_vec())
         }
         Err(_) => (None, body_bytes.to_vec()),
@@ -730,6 +720,9 @@ fn handle_models_request(platform_filter: Option<&str>) -> axum::response::Respo
                             if let Some(ctx) = model.max_input_tokens {
                                 entry["max_input_tokens"] = serde_json::json!(ctx);
                             }
+                            if let Some(out) = model.max_output_tokens {
+                                entry["max_output_tokens"] = serde_json::json!(out);
+                            }
                             data.push(entry);
                         }
                     }
@@ -782,6 +775,7 @@ pub struct UpstreamModelInfo {
     pub model_name: String,
     pub display_name: String,
     pub max_input_tokens: Option<u64>,
+    pub max_output_tokens: Option<u64>,
     /// Whether a local model with this name already exists for the platform.
     pub already_imported: bool,
 }
@@ -798,7 +792,7 @@ pub struct ImportModelsResult {
 /// Returns (model_name, display_name, max_input_tokens) tuples — nothing is
 /// written to local storage. Shared by the full-sync and selective-import
 /// flows. Handles Gemini's `/v1beta/openai` root via deduplicate_url_path.
-async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, String, Option<u64>)>, String> {
+async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, String, Option<u64>, Option<u64>)>, String> {
     use crate::modules::config;
     use crate::modules::keystore;
 
@@ -897,14 +891,28 @@ async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, Str
             .unwrap_or(model_id)
             .to_string();
 
-        // Try to extract context window from various field names
+        // Try to extract context window (input) from various field names.
+        // sensenova uses `context_length`; OpenAI-compat uses
+        // `max_input_tokens` / `max_input_length` / `context_window`.
         let max_input_tokens = upstream_model.get("max_input_tokens")
             .or_else(|| upstream_model.get("max_input_length"))
             .or_else(|| upstream_model.get("context_window"))
             .or_else(|| upstream_model.get("max_context_length"))
+            .or_else(|| upstream_model.get("context_length"))
             .and_then(|v| v.as_u64());
 
-        result.push((model_id.to_string(), display_name, max_input_tokens));
+        // Try to extract max output tokens. sensenova uses `max_output_length`;
+        // OpenAI-compat usually does not expose it in /v1/models.
+        let max_output_tokens = upstream_model.get("max_output_tokens")
+            .or_else(|| upstream_model.get("max_output_length"))
+            .and_then(|v| v.as_u64());
+
+        result.push((
+            model_id.to_string(),
+            display_name,
+            max_input_tokens,
+            max_output_tokens,
+        ));
     }
     Ok(result)
 }
@@ -916,12 +924,13 @@ pub async fn list_upstream_models(platform_id: &str) -> Result<Vec<UpstreamModel
     let upstream = fetch_upstream_model_list(platform_id).await?;
     let local_models = crate::modules::model_manager::list_models(platform_id)?;
     let mut result = Vec::with_capacity(upstream.len());
-    for (model_name, display_name, ctx) in upstream {
+    for (model_name, display_name, ctx, out) in upstream {
         let already_imported = local_models.iter().any(|m| m.model_name == model_name);
         result.push(UpstreamModelInfo {
             model_name,
             display_name,
             max_input_tokens: ctx,
+            max_output_tokens: out,
             already_imported,
         });
     }
@@ -941,11 +950,11 @@ pub async fn import_models(platform_id: &str, model_names: Vec<String>) -> Resul
     let mut skipped = Vec::new();
 
     for model_name in &model_names {
-        let (display_name, max_input_tokens) = upstream
+        let (display_name, max_input_tokens, max_output_tokens) = upstream
             .iter()
-            .find(|(name, _, _)| name == model_name)
-            .map(|(_, dn, ctx)| (dn.clone(), *ctx))
-            .unwrap_or_else(|| (model_name.clone(), None));
+            .find(|(name, _, _, _)| name == model_name)
+            .map(|(_, dn, ctx, out)| (dn.clone(), *ctx, *out))
+            .unwrap_or_else(|| (model_name.clone(), None, None));
 
         if local_models.iter().any(|m| &m.model_name == model_name) {
             skipped.push(model_name.clone());
@@ -960,6 +969,7 @@ pub async fn import_models(platform_id: &str, model_names: Vec<String>) -> Resul
             Some(50000),  // per_day: default
             Some(100000), // per_month: default
             max_input_tokens,
+            max_output_tokens,
         )?;
         imported.push(model_name.clone());
     }
@@ -991,23 +1001,34 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
     let local_models = model_manager::list_models(platform_id)?;
     let total_local_before = local_models.len();
 
-    for (model_id, display_name, max_input_tokens) in upstream {
+    for (model_id, display_name, max_input_tokens, max_output_tokens) in upstream {
         // Find matching local model by model_name
         if let Some(local) = local_models.iter().find(|m| m.model_name == model_id) {
-            // Update context size if it changed
+            let mut needs_update = false;
+            let mut updates = Vec::new();
             if let Some(ctx) = max_input_tokens {
                 if local.max_input_tokens != Some(ctx) {
-                    model_manager::update_model(
-                        &local.id, None, None, None, None, None,
-                        Some(Some(ctx)),
-                    )?;
-                    updated.push(local.model_name.clone());
-                    info!("Updated model '{}' max_input_tokens: {} → {}",
-                        local.model_name,
-                        local.max_input_tokens.map_or("none".to_string(), |v| v.to_string()),
-                        ctx
-                    );
+                    updates.push(("max_input_tokens", ctx));
+                    needs_update = true;
                 }
+            }
+            if let Some(out) = max_output_tokens {
+                if local.max_output_tokens != Some(out) {
+                    updates.push(("max_output_tokens", out));
+                    needs_update = true;
+                }
+            }
+            if needs_update {
+                let new_input = updates.iter().find(|(f, _)| f == &"max_input_tokens").map(|(_, v)| Some(*v));
+                let new_output = updates.iter().find(|(f, _)| f == &"max_output_tokens").map(|(_, v)| Some(*v));
+                model_manager::update_model(
+                    &local.id, None, None, None, None, None,
+                    new_input, new_output,
+                )?;
+                for (field, val) in &updates {
+                    updated.push(format!("{}:{}={}", local.model_name, field, val));
+                }
+                info!("Updated model '{}': {:?}", local.model_name, updates);
             }
         } else {
             // Auto-create new model from upstream with reasonable defaults
@@ -1019,6 +1040,7 @@ pub async fn refresh_models_from_upstream(platform_id: &str) -> Result<RefreshMo
                 Some(50000),  // per_day: default
                 Some(100000), // per_month: default
                 max_input_tokens,
+                max_output_tokens,
             );
             created.push(model_id.clone());
             info!("Auto-created model '{}' from upstream (context: {:?})", model_id, max_input_tokens);

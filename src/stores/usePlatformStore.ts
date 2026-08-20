@@ -27,8 +27,8 @@ interface PlatformState {
 
   // Models
   fetchModels: (platformId: string) => Promise<Model[]>;
-  addModel: (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null) => Promise<void>;
-  updateModelLimits: (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null) => Promise<void>;
+  addModel: (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null, maxOutputTokens?: number | null) => Promise<void>;
+  updateModelLimits: (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null, maxOutputTokens?: number | null) => Promise<void>;
   deleteModel: (platformId: string, modelId: string) => Promise<void>;
   deleteModels: (platformId: string, modelIds: string[]) => Promise<void>;
   refreshModelsFromUpstream: (platformId: string) => Promise<platformService.RefreshModelsResult>;
@@ -181,10 +181,10 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     }
   },
 
-  addModel: async (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null) => {
+  addModel: async (platformId: string, modelName: string, displayName: string, per5hour?: number, perDay?: number, perMonth?: number, maxInputTokens?: number | null, maxOutputTokens?: number | null) => {
     set({ loading: true, error: null });
     try {
-      await platformService.addModel(platformId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens);
+      await platformService.addModel(platformId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens, maxOutputTokens);
       await get().fetchModels(platformId);
       set({ loading: false });
     } catch (e) {
@@ -193,9 +193,9 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
     }
   },
 
-  updateModelLimits: async (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null) => {
+  updateModelLimits: async (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null, maxOutputTokens?: number | null) => {
     try {
-      await platformService.updateModel(modelId, undefined, undefined, per5hour, perDay, perMonth, maxInputTokens);
+      await platformService.updateModel(modelId, undefined, undefined, per5hour, perDay, perMonth, maxInputTokens, maxOutputTokens);
       // Refresh all platforms' models to get updated state
       const { platforms, models } = get();
       for (const p of platforms) {

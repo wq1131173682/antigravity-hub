@@ -47,8 +47,9 @@ export async function addModel(
   perDay?: number,
   perMonth?: number,
   maxInputTokens?: number | null,
+  maxOutputTokens?: number | null,
 ): Promise<Model> {
-  return await invoke('add_model', { platformId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens });
+  return await invoke('add_model', { platformId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens, maxOutputTokens });
 }
 
 export async function updateModel(
@@ -59,8 +60,9 @@ export async function updateModel(
   perDay?: number,
   perMonth?: number,
   maxInputTokens?: number | null,
+  maxOutputTokens?: number | null,
 ): Promise<Model> {
-  return await invoke('update_model', { modelId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens });
+  return await invoke('update_model', { modelId, modelName, displayName, per5hour, perDay, perMonth, maxInputTokens, maxOutputTokens });
 }
 
 export async function deleteModel(modelId: string): Promise<void> {
@@ -79,6 +81,7 @@ export interface UpstreamModelInfo {
   model_name: string;
   display_name: string;
   max_input_tokens?: number | null;
+  max_output_tokens?: number | null;
   already_imported: boolean;
 }
 

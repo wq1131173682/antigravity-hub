@@ -25,6 +25,7 @@ export interface Model {
   sort_order: number;
   created_at: number;
   max_input_tokens?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export interface ApiKey {

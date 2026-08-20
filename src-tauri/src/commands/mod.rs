@@ -78,8 +78,9 @@ pub async fn add_model(
     per_day: Option<u32>,
     per_month: Option<u32>,
     max_input_tokens: Option<u64>,
+    max_output_tokens: Option<u64>,
 ) -> Result<Model, String> {
-    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens)
+    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens, max_output_tokens)
 }
 
 /// Update a model
@@ -92,8 +93,9 @@ pub async fn update_model(
     per_day: Option<u32>,
     per_month: Option<u32>,
     max_input_tokens: Option<Option<u64>>,
+    max_output_tokens: Option<Option<u64>>,
 ) -> Result<Model, String> {
-    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens)
+    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens, max_output_tokens)
 }
 
 /// Delete a model
