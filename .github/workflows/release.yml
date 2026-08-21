@@ -76,35 +76,31 @@ jobs:
         run: pip install pynacl
 
       - name: Download all bundle artifacts
-        # IMPORTANT: Use run-id filtered download to ensure we always get
-        # freshly-built artifacts from the CURRENT workflow run, not cached
-        # artifacts from previous runs with different version numbers.
+        # Use run-id filtered download to ensure we always get freshly-built
+        # artifacts from the CURRENT workflow run.
         uses: actions/download-artifact@v4
         with:
           path: bundles
-          # Only download artifacts from the current run by filtering with the run ID
-          # This prevents stale artifacts from previous runs being used
-          pattern: "bundle-*-${{ github.run_id }}"
+          # Only download artifacts from the current run by filtering with the run ID.
+          # This prevents stale artifacts from previous runs being used.
+          # NOTE: the upload step names artifacts "bundle-<target>-r<run_id>",
+          # so the pattern MUST include the "r" prefix to match.
+          pattern: "bundle-*-r${{ github.run_id }}"
           merge-multiple: true
         continue-on-error: true
 
-      - name: Fallback download all bundle artifacts
-        # If the filtered download fails (e.g., artifact name mismatch),
-        # fall back to downloading all artifacts from the current run
-        uses: actions/download-artifact@v4
-        with:
-          path: bundles-temp
-          merge-multiple: true
-        continue-on-error: true
-
-      - name: Merge bundle artifacts
-        # Move artifacts from temp directory if fallback was used
+      - name: Verify artifacts were downloaded
+        # Ensure bundles directory has actual files before proceeding.
+        # The version verification step below catches stale artifacts, so a
+        # failed filtered download must NOT silently lead to "no bundles found".
         run: |
-          if [ -d "bundles-temp" ] && [ -z "$(ls -A bundles 2>/dev/null)" ]; then
-            mv bundles-temp/* bundles/ 2>/dev/null || true
+          if [ ! -d "bundles" ] || [ -z "$(ls -A bundles 2>/dev/null)" ]; then
+            echo "ERROR: No bundle artifacts found!"
+            echo "Available artifacts:"
+            find . -type f 2>/dev/null | grep -i bundle || echo "  (none found)"
+            exit 1
           fi
-          rm -rf bundles-temp
-          echo "Bundles directory contents:"
+          echo "✓ Found bundle artifacts:"
           find bundles -type f | head -20
 
       - name: Verify bundle versions match tag
