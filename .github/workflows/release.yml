@@ -53,14 +53,15 @@ jobs:
 
       - name: Clean up old artifacts with same prefix
         # Delete any existing artifacts from previous runs to ensure fresh builds
+        # This step is best-effort - failures are non-fatal
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "Cleaning up old artifacts..."
-          gh artifact list --repo ${{ github.repository }} --branch ${{ github.ref_name }} --json name --jq '.[].name' | grep "^bundle-${{ matrix.target }}" | while read -r name; do
+          echo "Cleaning up old artifacts (best-effort)..."
+          gh artifact list --repo ${{ github.repository }} --branch ${{ github.ref_name }} --json name --jq '.[].name' 2>/dev/null | grep "^bundle-${{ matrix.target }}" | while read -r name; do
             echo "Deleting artifact: $name"
             gh artifact delete "$name" --repo ${{ github.repository }} --purge 2>/dev/null || true
-          done
+          done || echo "No old artifacts to clean up"
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
