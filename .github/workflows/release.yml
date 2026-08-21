@@ -51,18 +51,6 @@ jobs:
         # separately by scripts/sign_updater.py so we do NOT pass a key here.
         run: npm run tauri build -- --target ${{ matrix.target }}
 
-      - name: Clean up old artifacts with same prefix
-        # Delete any existing artifacts from previous runs to ensure fresh builds
-        # This step is best-effort - failures are non-fatal
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Cleaning up old artifacts (best-effort)..."
-          gh artifact list --repo ${{ github.repository }} --branch ${{ github.ref_name }} --json name --jq '.[].name' 2>/dev/null | grep "^bundle-${{ matrix.target }}" | while read -r name; do
-            echo "Deleting artifact: $name"
-            gh artifact delete "$name" --repo ${{ github.repository }} --purge 2>/dev/null || true
-          done || echo "No old artifacts to clean up"
-
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
