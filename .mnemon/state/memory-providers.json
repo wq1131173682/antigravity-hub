@@ -1,0 +1,10 @@
+{
+  "version": 4,
+  "services": {
+    "holographic": {}
+  },
+  "enabled": {
+    "holographic": false
+  },
+  "bodies": []
+}

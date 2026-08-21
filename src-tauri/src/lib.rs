@@ -215,6 +215,9 @@ pub fn run() {
             commands::set_window_theme,
             // Utility
             commands::get_lan_ip,
+            // Update checks
+            commands::check_for_updates,
+            commands::get_app_version,
             // Codex CLI integration
             commands::check_codex_status,
             commands::apply_codex_config,

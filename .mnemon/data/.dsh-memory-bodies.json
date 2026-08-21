@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "bodies": [
+    {
+      "id": "default",
+      "name": "antigravity",
+      "description": "",
+      "active": true,
+      "createdAt": "2026-08-19T09:55:48.628Z",
+      "updatedAt": "2026-08-19T09:58:17.859Z"
+    }
+  ]
+}

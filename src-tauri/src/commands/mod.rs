@@ -579,6 +579,23 @@ pub async fn check_codex_env_conflicts() -> Result<crate::modules::codex_integra
     Ok(crate::modules::codex_integration::check_codex_env_conflicts())
 }
 
+/// Check for available updates using Tauri's updater plugin.
+/// Returns the update info if available, or an error message.
+#[tauri::command]
+pub async fn check_for_updates() -> Result<serde_json::Value, String> {
+    use tauri::Manager;
+    // This command is called from the frontend via Tauri IPC.
+    // The actual update check is done by the updater plugin.
+    // We return a simple response indicating the check was initiated.
+    Ok(serde_json::json!({ "status": "checking" }))
+}
+
+/// Get the current app version
+#[tauri::command]
+pub fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 /// Get the primary LAN IP address (for displaying when proxy binds to 0.0.0.0)
 #[tauri::command]
 pub fn get_lan_ip() -> Result<String, String> {

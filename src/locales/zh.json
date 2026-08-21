@@ -587,6 +587,15 @@
             "selected_items_note": "被选中的项目将显示在顶部菜单栏中。",
             "required": "必选"
         },
+        "update": {
+            "title": "更新",
+            "description": "检查是否有新版本可用",
+            "check": "检测更新",
+            "checking": "检测中...",
+            "check_completed": "检测完成",
+            "check_failed": "检测失败",
+            "auto_desc": "应用启动时会自动检查更新"
+        },
         "about": {
             "title": "关于",
             "version": "应用版本",

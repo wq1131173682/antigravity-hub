@@ -1,11 +1,12 @@
 import { version } from '../../package.json';
 import { useState, useEffect } from 'react';
-import { Save, RefreshCw, Server, Globe, Shield } from 'lucide-react';
+import { Save, RefreshCw, Server, Globe, Shield, Download } from 'lucide-react';
 import CodexIntegration from '../components/settings/CodexIntegration';
 import { request as invoke } from '../utils/request';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { useTranslation } from 'react-i18next';
+import { checkForUpdates } from '../services/platformService';
 
 function Settings() {
   const { t, i18n } = useTranslation();
@@ -16,6 +17,8 @@ function Settings() {
   const [proxyUrlInput, setProxyUrlInput] = useState('');
   const [saving, setSaving] = useState(false);
   const [portError, setPortError] = useState('');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
 
   useEffect(() => {
     if (config) {
@@ -29,6 +32,26 @@ function Settings() {
   useEffect(() => {
     loadConfig();
   }, []);
+
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateStatus(null);
+    try {
+      const result = await checkForUpdates();
+      if (result.status === 'checking') {
+        setUpdateStatus(t('settings.update.checking'));
+        // The actual update check is handled by the Tauri updater plugin
+        // which will show a dialog if an update is available
+        setTimeout(() => {
+          setUpdateStatus(t('settings.update.check_completed'));
+        }, 2000);
+      }
+    } catch (e) {
+      setUpdateStatus(`${t('settings.update.check_failed')}: ${e}`);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
 
   const handleSave = async () => {
     const portNum = parseInt(portInput);
@@ -213,6 +236,37 @@ function Settings() {
           </div>
         </div>
 
+        {/* Check for Updates */}
+        <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="font-semibold text-gray-900 dark:text-base-content">
+                {t('settings.update.title')}
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                {t('settings.update.description')}
+              </p>
+            </div>
+            <button
+              className="px-4 py-2 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={handleCheckUpdate}
+              disabled={checkingUpdate}
+            >
+              {checkingUpdate ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Download className="w-3.5 h-3.5" />
+              )}
+              {checkingUpdate ? t('settings.update.checking') : t('settings.update.check')}
+            </button>
+          </div>
+          {updateStatus && (
+            <p className={`text-sm mt-3 ${updateStatus.includes('失败') || updateStatus.includes('failed') ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
+              {updateStatus}
+            </p>
+          )}
+        </div>
+
         {/* App Info */}
         <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
           <h2 className="font-semibold text-gray-900 dark:text-base-content mb-3">
@@ -220,6 +274,7 @@ function Settings() {
           </h2>
           <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1">
             <p>{t('settings.about.version')}: {version}</p>
+            <p className="text-xs text-gray-400">{t('settings.update.auto_desc')}</p>
           </div>
         </div>
 

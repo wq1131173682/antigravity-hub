@@ -1,0 +1,15 @@
+﻿{
+    "version": "5.3.27",
+    "notes": "Release v5.3.27",
+    "pub_date": "2026-08-20T08:23:00Z",
+    "platforms": {
+        "linux-x86_64": {
+            "signature": "untrusted comment: signature from tauri secret key\nRUT84Pmb/g0mz3YakrHmMn8Je9blHm53A/fzRUCiSPNiGe2LJtbJiGNYzfYB+KqMVEeVKrVe6qytNiNytLEWgOzTYIT9nsX4rg8=\ntrusted comment: timestamp:1787208770 file:Antigravity.Hub_5.3.27_amd64.AppImage\n0RbX2M/smy2ycHLF/rSwaVnff19yyEj2BxboaPnSWoX1MozOCwcbQjivYRZmmtbLDjFhASLKTm9S6GduJBklDA==\n",
+            "url": "https://github.com/wq1131173682/antigravity-hub/releases/download/v5.3.27/Antigravity.Hub_5.3.27_amd64.AppImage"
+        },
+        "windows-x86_64": {
+            "signature": "untrusted comment: signature from tauri secret key\nRUT84Pmb/g0mz+UhJTzwhV1pGywfHp2hczDAq4hAmP9tnD2QMgIwr8Nb0XMSWHKi/Aaefs0NFryHZFbHcXXOtRXOxrwYrPwN2Q0=\ntrusted comment: timestamp:1787208770 file:Antigravity.Hub_5.3.27_x64_en-US.msi\ngvXM8c0y07Yq7iZMz+Uc1pWqCaXMQyBPx+hHJ0n511GtlDo1Kigww68t8PeMrmpRwlCJQItWo/ou3gbMWcpzCw==\n",
+            "url": "https://github.com/wq1131173682/antigravity-hub/releases/download/v5.3.27/Antigravity.Hub_5.3.27_x64_en-US.msi"
+        }
+    }
+}

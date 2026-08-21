@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": "55d6d91f-adf4-418c-bf40-048a6a087138",
+      "title": "Antigravity Hub — Project Knowledge Base",
+      "description": "Complete project knowledge extracted from codebase and git history: purpose, architecture, conventions, data models, and historical decisions.",
+      "status": "active",
+      "filename": "antigravity-hub-project-knowledge-base-55d6d91f.md",
+      "relativePath": "documents/active/antigravity-hub-project-knowledge-base-55d6d91f.md",
+      "sourcePaths": [
+        "README.md",
+        "README_EN.md",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "package.json",
+        "src-tauri/Cargo.toml",
+        "src-tauri/tauri.conf.json",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/main.rs",
+        "src-tauri/src/modules/mod.rs",
+        "src-tauri/src/models/mod.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/modules/feature_flags.rs",
+        "src-tauri/src/modules/proxy.rs",
+        "src-tauri/src/modules/quota_window.rs",
+        "src-tauri/src/modules/keystore.rs",
+        "src-tauri/src/modules/scheduler.rs",
+        "src-tauri/src/modules/platform_manager.rs",
+        "src-tauri/src/modules/token_stats.rs",
+        "src-tauri/src/modules/config.rs",
+        "src-tauri/src/models/apikey.rs",
+        "src-tauri/src/models/platform.rs",
+        "src-tauri/src/models/model.rs",
+        "src-tauri/src/models/config.rs",
+        "src/App.tsx",
+        "src/main.tsx",
+        "vite.config.ts",
+        ".gitignore",
+        ".github/workflows/ci.yml",
+        ".github/workflows/release.yml"
+      ],
+      "sessionIds": [
+        "session-0317c75f-a5c3-4037-9a2d-b56ff875cd2f",
+        "d42d30a0-9a61-42a7-9314-525370e2ba22",
+        "22017bd2-718c-4ea3-9c45-14f2bb1dec9b",
+        "faa99c5b-3bdd-42bb-a869-c7e86ba2365b",
+        "0cfe61f2-cce4-4d90-a568-df678c3d40b0",
+        "30a7a32b-efc3-4470-905b-06275dd0c630"
+      ],
+      "createdAt": "2026-08-19T10:17:34.590Z",
+      "updatedAt": "2026-08-21T05:58:16.308Z",
+      "lastAccessedAt": "2026-08-21T05:58:16.308Z",
+      "revision": 6,
+      "contentHash": "7c2a2fb87f9d128f30554030333326871d94b2b9a714e70f02e76bb97e834f47",
+      "sizeBytes": 15629,
+      "memoryBodyIds": []
+    }
+  ]
+}

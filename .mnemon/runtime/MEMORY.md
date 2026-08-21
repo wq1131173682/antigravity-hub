@@ -1,0 +1,13 @@
+Antigravity Hub is a multi-platform API Key rotation proxy desktop app (Tauri v2 + React 19 + Rust). GitHub: wq1131173682/antigravity-hub. Local proxy on 127.0.0.1:8045. Single author: 王千. License: CC BY-NC-SA 4.0. Current version: 5.3.26. Single branch: master.
+§
+Backend modules: proxy.rs (Axum, SSE streaming, key rotation), quota_window.rs (sliding-window 5h/daily/monthly), keystore.rs (API key CRUD), platform_manager.rs, model_manager.rs, key_model_map.rs (key-model associations), token_stats.rs (persistent token stats), codex_translator.rs (archived), scheduler.rs (30s cleanup), feature_flags.rs (CODEX_ENABLED=false).
+§
+Frontend: React 19 + TypeScript + Ant Design + Tailwind CSS + daisyUI + Zustand + i18next (12 languages). Pages: Dashboard, Accounts, Settings. Stores: useAccountStore, useConfigStore, usePlatformStore, useViewStore, useDebugConsole. Vite port 1420, proxy /api/ → 127.0.0.1:8045.
+§
+Commit convention: Conventional Commits type(scope): description. feat/fix/refactor/chore/docs/style/i18n. Version bump: chore(release): bump app version to X.Y.Z. CI: ci.yml (frontend type-check+build → Rust check/clippy/fmt → cross-platform build). Release: release.yml (tag-triggered, minisign signing, GitHub release, updater.json).
+§
+v5.3.10 milestone: Codex integration archived (CODEX_ENABLED=false), responses API translation stopped. Code retained, UI greyed. Core proxy now only does OpenAI Chat Completions pass-through + key rotation. Previous versions: v5.3.0 (multi-turn tool call fixes), v5.2.23 (Responses API relay), v5.2.10 (token stats), v5.2.0 (model sync).
+§
+Proxy max_tokens injection changed from 4096 to 65536 default. Removed old logic that forced max_tokens; now only injects when missing. Reasoning models (DeepSeek, Qwen, etc.) no longer truncated by undersized max_tokens.
+§
+Antigravity Hub proxy: Compatible key rotation implemented (v5.3.27). On 429/5xx, retry same key N times (exponential backoff + jitter) before rotating. N = number of available keys. Prevents account-level rate limits from "blitzing" all keys. Default max_tokens injection: 65536 (was 4096). Model struct has max_output_tokens field.

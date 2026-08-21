@@ -276,3 +276,13 @@ export async function resetTokenStats(): Promise<void> {
 export async function getLanIp(): Promise<string> {
   return await invoke('get_lan_ip');
 }
+
+/** Check for available updates */
+export async function checkForUpdates(): Promise<{ status: string; message?: string }> {
+  return await invoke('check_for_updates');
+}
+
+/** Get current app version */
+export async function getAppVersion(): Promise<string> {
+  return await invoke('get_app_version');
+}
