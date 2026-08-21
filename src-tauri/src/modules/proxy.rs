@@ -1599,6 +1599,13 @@ async fn forward_with_retry(
     };
     let mut last_error = String::new();
     let mut attempt: u32 = 0;
+    // How many consecutive errors we've had on the CURRENT key before rotating.
+    // Incremented on each 429/5xx from the active key; reset to 0 on success or
+    // when we switch to a different key. Rotation only happens after this count
+    // reaches the number of available keys, so we exhaust retries on one key
+    // before moving to the next — this avoids "blitzing" every key in rapid
+    // succession, which is exactly what triggers account-level rate limits.
+    let mut current_key_errors: u32 = 0;
 
     // Resolve model_id from model_name (done once outside the loop)
     let model_id: Option<String> = model_name.as_ref().and_then(|name| {
@@ -1663,6 +1670,13 @@ async fn forward_with_retry(
         // refreshed each iteration, so rotating by attempt spreads load).
         let key_idx = ((attempt as usize) - 1) % keys_to_try.len();
         let key_id = &keys_to_try[key_idx];
+        // Reset per-key error counter whenever we switch to a different key.
+        if keys_to_try.len() > 1 && attempt > 1 {
+            let prev_idx = ((attempt as usize) - 2) % keys_to_try.len();
+            if key_idx != prev_idx {
+                current_key_errors = 0;
+            }
+        }
 
         // Look up key value from pre-loaded map (avoids file I/O per retry)
         let api_key_value = match key_value_map.get(key_id) {
@@ -1734,31 +1748,32 @@ async fn forward_with_retry(
         let status = resp.status();
         info!("[req {}] upstream responded status={} (key[{}]={})", req_id, status, key_idx, key_id);
 
-        // 429: rate limited. Rotate to a *different* (ideally healthy) key
-        // instead of waiting out the same throttled key.
-        //
-        // Old behaviour retried the SAME key with exponential backoff
-        // (2/4/8/16/32s, up to 62s per request). When only one key in the pool
-        // is rate-limited while others are fine, the client waited ~62s and then
-        // timed out / aborted — surfacing as "conversation interrupted / no
-        // response" during tool-call loops. Now we try the next key immediately
-        // and only fall back to backoff when no alternative key remains.
+        // 429: rate limited. Use compatible rotation: retry the same key with
+        // exponential backoff + jitter first; only rotate to the next key after
+        // the per-key error budget is exhausted. This prevents "blitzing" every
+        // key in rapid succession, which is exactly what triggers account-level
+        // rate limits on providers like SenseNova.
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             if let Some(mid) = &model_id {
                 let _ = crate::modules::quota_window::record_429_error(key_id, mid, platform_id);
             }
-            warn!("429 from {}, key[{}]={}, model={}", target_url, key_idx, key_id, model_identifier);
+            current_key_errors += 1;
+            warn!("429 from {}, key[{}]={}, model={} (consecutive errors on this key: {})",
+                target_url, key_idx, key_id, model_identifier, current_key_errors);
             last_error = "Rate limited (429)".to_string();
             let budget_left =
                 retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
-            // Budget exhausted (or single-attempt mode): stop retrying.
+            // Budget exhausted: stop retrying.
             if budget_left <= 0 {
                 break;
             }
-            let has_multiple_keys = keys_to_try.len() > 1;
-            // Emit a key-switched event so the frontend can refresh its view.
-            if has_multiple_keys {
-                if let Some(next_key_id) = keys_to_try.get((key_idx + 1) % keys_to_try.len()) {
+            let num_keys = keys_to_try.len();
+            // If we've hit the rotation threshold (errors >= number of keys),
+            // switch to the next key. Otherwise, retry the same key with
+            // exponential backoff + jitter.
+            if current_key_errors >= num_keys as u32 {
+                // Rotation: emit event and move to next key.
+                if let Some(next_key_id) = keys_to_try.get((key_idx + 1) % num_keys) {
                     let platform_name = crate::modules::config::load_app_config()
                         .ok()
                         .and_then(|c| c.platforms.into_iter().find(|p| p.id == platform_id))
@@ -1771,31 +1786,30 @@ async fn forward_with_retry(
                             model_name: model_identifier.clone(),
                             disabled_key_id: key_id.clone(),
                             next_key_id: next_key_id.clone(),
-                            reason: "Rate limited (429) - switching key".to_string(),
+                            reason: format!("Rate limited (429) - exhausted {} retries on key, rotating", num_keys),
                             disabled_until: 0,
                         },
                     );
                 }
                 info!(
-                    "429 from key[{}]={}, rotating to next key (attempt {})",
-                    key_idx, key_id, attempt
+                    "429 from key[{}]={}, rotating to next key after {} consecutive errors (attempt {})",
+                    key_idx, key_id, current_key_errors, attempt
                 );
-                // Brief backoff before hitting the next key so we don't blitz
-                // every key within the same millisecond — that burst is exactly
-                // what tripped sensenova's account-level limit in the first place.
-                // Bounded by the remaining retry budget.
+                current_key_errors = 0;
+                // Brief backoff before hitting the next key.
                 let backoff = std::cmp::min(budget_left as u64, 1);
                 if backoff > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                 }
                 continue;
             }
-            // Single key (or only one left): exponential backoff, retry same key.
-            let backoff_secs = std::cmp::min(
-                budget_left as u64,
-                2_u64.pow(std::cmp::min(attempt + 1, 5)),
-            );
-            info!("429 from single key, waiting {}s before retry...", backoff_secs);
+            // Retry same key with exponential backoff + jitter.
+            let base_backoff = 2_u64.pow(std::cmp::min(current_key_errors, 5));
+            // Add jitter: random 0~50% of base_backoff to avoid synchronized retries.
+            let jitter = rand::random::<u64>() % (base_backoff.max(1));
+            let backoff_secs = std::cmp::min(budget_left as u64, base_backoff + jitter);
+            info!("429 from key[{}]={}, retrying same key in {}s (error #{}, attempt {})",
+                key_idx, key_id, backoff_secs, current_key_errors, attempt);
             tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
             continue;
         }
@@ -1811,64 +1825,68 @@ async fn forward_with_retry(
             // Keys are a precious resource; disabling them on transient server
             // errors would leave the proxy unable to serve requests until the
             // user manually re-enables them.
+            //
+            // Compatible rotation: retry same key with backoff + jitter first,
+            // only rotate after exhausting per-key retry budget.
+            current_key_errors += 1;
             let budget_left =
                 retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
-            let has_multiple_keys = keys_to_try.len() > 1;
+            let num_keys = keys_to_try.len();
 
-            // Emit key-switched event so frontend can refresh quota display
-            if has_multiple_keys && budget_left > 0 {
-                let next_key_id = keys_to_try
-                    .get((key_idx + 1) % keys_to_try.len())
-                    .cloned()
-                    .unwrap_or_default();
-                let platform_name = crate::modules::config::load_app_config()
-                    .ok()
-                    .and_then(|c| c.platforms.into_iter().find(|p| p.id == platform_id))
-                    .map(|p| p.name)
-                    .unwrap_or_else(|| platform_prefix.to_string());
-                crate::modules::log_bridge::emit_key_switched(
-                    crate::modules::log_bridge::KeySwitchedPayload {
-                        platform_id: platform_id.to_string(),
-                        platform_name,
-                        model_name: model_identifier.clone(),
-                        disabled_key_id: key_id.clone(),
-                        next_key_id,
-                        reason: format!("Server error {} - switching key", status.as_u16()),
-                        disabled_until: 0, // 0 = not disabled, just rotated
-                    }
+            // Emit key-switched event only when actually rotating.
+            if current_key_errors >= num_keys as u32 && budget_left > 0 {
+                if let Some(next_key_id) = keys_to_try.get((key_idx + 1) % num_keys) {
+                    let platform_name = crate::modules::config::load_app_config()
+                        .ok()
+                        .and_then(|c| c.platforms.into_iter().find(|p| p.id == platform_id))
+                        .map(|p| p.name)
+                        .unwrap_or_else(|| platform_prefix.to_string());
+                    crate::modules::log_bridge::emit_key_switched(
+                        crate::modules::log_bridge::KeySwitchedPayload {
+                            platform_id: platform_id.to_string(),
+                            platform_name,
+                            model_name: model_identifier.clone(),
+                            disabled_key_id: key_id.clone(),
+                            next_key_id: next_key_id.clone(),
+                            reason: format!("Server error {} - exhausted {} retries, rotating", status.as_u16(), num_keys),
+                            disabled_until: 0,
+                        }
+                    );
+                }
+                info!(
+                    "{} from key[{}]={}, rotating to next key after {} consecutive errors (attempt {})",
+                    status, key_idx, key_id, current_key_errors, attempt
                 );
-            }
-
-            last_error = format!("HTTP {} from upstream", status);
-            if budget_left <= 0 {
-                break;
-            }
-            if has_multiple_keys {
-                // Multiple keys: rotate to next key (with a brief backoff).
-                info!("Rotating to next key (attempt {})", attempt);
+                current_key_errors = 0;
                 let backoff = std::cmp::min(budget_left as u64, 1);
                 if backoff > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
                 }
                 continue;
             }
-            // Single key (or only one left): exponential backoff, retry same key.
-            let backoff_secs = std::cmp::min(
-                budget_left as u64,
-                2_u64.pow(std::cmp::min(attempt + 1, 5)),
-            );
-            info!("Waiting {}s before retrying same key (single key mode)...", backoff_secs);
+
+            last_error = format!("HTTP {} from upstream", status);
+            if budget_left <= 0 {
+                break;
+            }
+            // Retry same key with exponential backoff + jitter.
+            let base_backoff = 2_u64.pow(std::cmp::min(current_key_errors, 5));
+            let jitter = rand::random::<u64>() % (base_backoff.max(1));
+            let backoff_secs = std::cmp::min(budget_left as u64, base_backoff + jitter);
+            info!("{} from key[{}]={}, retrying same key in {}s (error #{}, attempt {})",
+                status, key_idx, key_id, backoff_secs, current_key_errors, attempt);
             tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
             continue;
         }
 
-        // Success case - record the API call.
+        // Success case - record the API call and reset per-key error counter.
         // IMPORTANT: only 2xx responses count toward the quota windows.
         // 4xx errors (401/403/404 etc.) must NOT be counted — doing so would
         // inflate usage and eventually make filter_available_keys exclude the
         // key, causing conversations to fail with "No active API keys" for no
         // apparent reason (a key hitting repeated 404s would be "used up").
         if status.is_success() {
+            current_key_errors = 0;
             if let Some(mid) = &model_id {
                 let _ = crate::modules::quota_window::record_api_call(key_id, mid, platform_id);
             }
