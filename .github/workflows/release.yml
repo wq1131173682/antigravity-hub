@@ -51,6 +51,17 @@ jobs:
         # separately by scripts/sign_updater.py so we do NOT pass a key here.
         run: npm run tauri build -- --target ${{ matrix.target }}
 
+      - name: Clean up old artifacts with same prefix
+        # Delete any existing artifacts from previous runs to ensure fresh builds
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Cleaning up old artifacts..."
+          gh artifact list --repo ${{ github.repository }} --branch ${{ github.ref_name }} --json name --jq '.[].name' | grep "^bundle-${{ matrix.target }}" | while read -r name; do
+            echo "Deleting artifact: $name"
+            gh artifact delete "$name" --repo ${{ github.repository }} --purge 2>/dev/null || true
+          done
+
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -76,10 +87,52 @@ jobs:
         run: pip install pynacl
 
       - name: Download all bundle artifacts
+        # IMPORTANT: Use run-id filtered download to ensure we always get
+        # freshly-built artifacts from the CURRENT workflow run, not cached
+        # artifacts from previous runs with different version numbers.
         uses: actions/download-artifact@v4
         with:
           path: bundles
+          # Only download artifacts from the current run by filtering with the run ID
+          # This prevents stale artifacts from previous runs being used
+          pattern: "bundle-*-${{ github.run_id }}"
           merge-multiple: true
+        continue-on-error: true
+
+      - name: Fallback download all bundle artifacts
+        # If the filtered download fails (e.g., artifact name mismatch),
+        # fall back to downloading all artifacts from the current run
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles-temp
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Merge bundle artifacts
+        # Move artifacts from temp directory if fallback was used
+        run: |
+          if [ -d "bundles-temp" ] && [ -z "$(ls -A bundles 2>/dev/null)" ]; then
+            mv bundles-temp/* bundles/ 2>/dev/null || true
+          fi
+          rm -rf bundles-temp
+          echo "Bundles directory contents:"
+          find bundles -type f | head -20
+
+      - name: Verify bundle versions match tag
+        # Ensure the downloaded artifacts match the expected version from the tag.
+        # This prevents signing stale artifacts with wrong version numbers.
+        run: |
+          echo "Checking bundle versions..."
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Expected version: $TAG_VERSION"
+          find bundles -type f \( -name "*.msi" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.deb" \) | while read -r f; do
+            basename=$(basename "$f")
+            if [[ "$basename" != *"$TAG_VERSION"* ]]; then
+              echo "ERROR: Artifact '$basename' does not match expected version '$TAG_VERSION'"
+              exit 1
+            fi
+            echo "OK: $basename matches version $TAG_VERSION"
+          done
 
       - name: Sanitize bundle filenames (spaces -> dots)
         # tauri.conf.json productName is "Antigravity Hub" (with a space), so Tauri
