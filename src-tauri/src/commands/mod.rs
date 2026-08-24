@@ -627,28 +627,41 @@ pub async fn check_for_updates(app: tauri::AppHandle) {
     }
 }
 
-/// Trigger the native update install flow by invoking the plugin's built-in
-/// download_and_install command through the plugin's own invoke handler.
-/// This command is registered by the tauri_plugin_updater plugin and requires
-/// a Webview context (provided automatically by Tauri when called from frontend).
-/// We expose it here as a passthrough so the frontend can trigger install from
-/// the Settings page after a successful check.
+/// Trigger the native update install flow with progress reporting.
+/// Emits events: update:download_started, update:download_progress,
+/// update:download_finished, update:install_started, update:install_completed/failed.
 #[tauri::command]
 pub async fn install_update(app: tauri::AppHandle, rid: u32) -> Result<(), String> {
-    use tauri::{Manager, Resource, ResourceId};
+    use tauri::{Emitter, Manager, Resource, ResourceId};
     use tauri_plugin_updater::Update;
 
-    // The check_for_updates command stored the Update in the app's resource table.
-    // Retrieve it here using the RID and trigger the native install flow.
     let update = app.resources_table().get::<Update>(ResourceId::from(rid))
         .map_err(|e| format!("Failed to retrieve update: {}", e))?;
-
     let update = (*update).clone();
+
+    // Emit download start event with content length
     tauri::async_runtime::spawn(async move {
-        match update.download_and_install(|_chunk_len, _total| {}, || {}).await {
-            Ok(_) => {}
+        let result = update.download_and_install(
+            |chunk_len: usize, total: Option<u64>| {
+                let _ = app.emit("update:download_progress", serde_json::json!({
+                    "chunk": chunk_len,
+                    "total": total
+                }));
+            },
+            || {
+                let _ = app.emit("update:download_finished", serde_json::json!({}));
+            },
+        ).await;
+
+        match result {
+            Ok(_) => {
+                let _ = app.emit("update:install_completed", serde_json::json!({}));
+            }
             Err(e) => {
                 tracing::error!("Update download/install failed: {}", e);
+                let _ = app.emit("update:install_failed", serde_json::json!({
+                    "message": e.to_string()
+                }));
             }
         }
     });

@@ -18,8 +18,10 @@ Antigravity Hub proxy: Compatible key rotation implemented (v5.3.27). On 429/5xx
 §
 此机器直连 github.com 常失败（git push 超时）；需先设置 git 代理 http://127.0.0.1:7890 再推送。测试 7890 端口连通后，用 git config --global http.proxy http://127.0.0.1:7890 和 https.proxy 设置代理。如果代理不行则去掉代理（git config --global --unset http.proxy）并停止。
 §
-check_for_updates uses event-driven architecture: backend emits `update:check_result` event (status: available/up_to_date/error with version, current_version, rid); frontend Settings.tsx listens with `listen('update:check_result', ...)` and shows status + install button. Install button calls `download_and_install` via `tauriInvoke` with a Channel.
+check_for_updates emits `update:check_result` event (status: available/up_to_date/error with version, current_version, rid as u32); frontend Settings.tsx listens with `listen('update:check_result', ...)`. Install button calls `install_update` Rust command (takes app handle + rid u32), which retrieves Update from resource table and calls download_and_install async.
 §
-Proxy models endpoint behavior: `/v1/models` at platform level is intercepted by handle_models_request (returns locally configured models). `/models` (without v1) at platform level passes through to upstream API — clients like DSH use this to discover upstream models. Global-level (no prefix) `/v1/models` and `/models` both return ALL platforms' local models.
+Proxy models endpoint behavior: All /models variants at platform level are intercepted by handle_models_request (returns locally configured models): /v1/models, /models, /v1/v1/models (duplicate v1 deduped). Uses normalize_models_path() helper. Global-level (no prefix) /v1/models and /models both return ALL platforms' local models.
 §
-Release workflow: just bump version → push master → tag → push tag. CI auto-runs Release workflow and publishes. No need to wait for completion. If version doesn't match tag, CI fails fast at the "Verify tag version matches Cargo.toml" step.
+Release workflow: bump version (Cargo.toml/tauri.conf.json/updater.json) → commit → push master → tag → push tag. CI auto-runs Release workflow. Do NOT wait for completion — just verify workflow is "in_progress" then end conversation. If version doesn't match tag, CI fails fast at "Verify tag version matches Cargo.toml" step.
+§
+update install flow: check_for_updates emits update:check_result event with rid (u32); frontend install button calls install_update Rust command (takes app handle + rid u32); backend retrieves Update from resource table and calls download_and_install async, showing native installer dialog.

@@ -25,6 +25,7 @@ function Settings() {
   const [installing, setInstalling] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{ version: string; current: string } | null>(null);
   const [updateRid, setUpdateRid] = useState<number | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<{ chunk: number; total: number } | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -92,12 +93,53 @@ function Settings() {
     };
   }, [t]);
 
+  // Listen for download progress events
+  useEffect(() => {
+    let cancelled = false;
+    const setupListeners = async () => {
+      const unlistenProgress = await listen<{ chunk: number; total: number }>(
+        'update:download_progress',
+        (event) => {
+          if (cancelled) return;
+          setDownloadProgress({ chunk: event.payload.chunk, total: event.payload.total ?? 0 });
+        },
+      );
+      const unlistenFinished = await listen('update:download_finished', () => {
+        if (cancelled) return;
+        setUpdateStatus(t('update_notification.downloading'));
+      });
+      const unlistenCompleted = await listen('update:install_completed', () => {
+        if (cancelled) return;
+        setInstalling(false);
+        setUpdateStatus(t('update_notification.restarting'));
+      });
+      const unlistenFailed = await listen<{ message?: string }>('update:install_failed', (event) => {
+        if (cancelled) return;
+        setInstalling(false);
+        setUpdateStatus(`${t('settings.update.check_failed')}: ${event.payload.message ?? ''}`);
+      });
+      unlistenRef.current = () => {
+        unlistenProgress();
+        unlistenFinished();
+        unlistenCompleted();
+        unlistenFailed();
+      };
+    };
+    setupListeners();
+    return () => {
+      cancelled = true;
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
+    };
+  }, [t]);
+
   const handleInstallUpdate = async () => {
     if (updateRid === null) return;
     setInstalling(true);
     setUpdateStatus(null);
     try {
-      // Call our backend wrapper which handles the install flow
       await tauriInvoke('install_update', { rid: updateRid });
       setUpdateStatus(t('update_notification.downloading'));
     } catch (e) {
@@ -332,6 +374,20 @@ function Settings() {
             <p className={`text-sm mt-3 ${updateStatus.includes('失败') || updateStatus.includes('failed') ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
               {updateStatus}
             </p>
+          )}
+          {installing && downloadProgress && downloadProgress.total > 0 && (
+            <div className="mt-3">
+              <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400 mb-1">
+                <span>{t('update_notification.downloading')}</span>
+                <span>{Math.round((downloadProgress.chunk / downloadProgress.total) * 100)}%</span>
+              </div>
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                <div
+                  className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${(downloadProgress.chunk / downloadProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
           )}
         </div>
 

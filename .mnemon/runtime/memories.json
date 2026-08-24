@@ -79,23 +79,30 @@
       "importance": "critical"
     },
     {
-      "content": "check_for_updates uses event-driven architecture: backend emits `update:check_result` event (status: available/up_to_date/error with version, current_version, rid); frontend Settings.tsx listens with `listen('update:check_result', ...)` and shows status + install button. Install button calls `download_and_install` via `tauriInvoke` with a Channel.",
+      "content": "check_for_updates emits `update:check_result` event (status: available/up_to_date/error with version, current_version, rid as u32); frontend Settings.tsx listens with `listen('update:check_result', ...)`. Install button calls `install_update` Rust command (takes app handle + rid u32), which retrieves Update from resource table and calls download_and_install async.",
       "created_at": "2026-08-24T07:41:23.852Z",
-      "updated_at": "2026-08-24T07:41:23.852Z",
+      "updated_at": "2026-08-24T09:59:30.528Z",
       "target": "memory",
       "importance": "normal"
     },
     {
-      "content": "Proxy models endpoint behavior: `/v1/models` at platform level is intercepted by handle_models_request (returns locally configured models). `/models` (without v1) at platform level passes through to upstream API — clients like DSH use this to discover upstream models. Global-level (no prefix) `/v1/models` and `/models` both return ALL platforms' local models.",
+      "content": "Proxy models endpoint behavior: All /models variants at platform level are intercepted by handle_models_request (returns locally configured models): /v1/models, /models, /v1/v1/models (duplicate v1 deduped). Uses normalize_models_path() helper. Global-level (no prefix) /v1/models and /models both return ALL platforms' local models.",
       "created_at": "2026-08-24T07:41:23.859Z",
-      "updated_at": "2026-08-24T07:41:23.859Z",
+      "updated_at": "2026-08-24T09:59:30.519Z",
       "target": "memory",
       "importance": "normal"
     },
     {
-      "content": "Release workflow: just bump version → push master → tag → push tag. CI auto-runs Release workflow and publishes. No need to wait for completion. If version doesn't match tag, CI fails fast at the \"Verify tag version matches Cargo.toml\" step.",
+      "content": "Release workflow: bump version (Cargo.toml/tauri.conf.json/updater.json) → commit → push master → tag → push tag. CI auto-runs Release workflow. Do NOT wait for completion — just verify workflow is \"in_progress\" then end conversation. If version doesn't match tag, CI fails fast at \"Verify tag version matches Cargo.toml\" step.",
       "created_at": "2026-08-24T07:41:23.865Z",
-      "updated_at": "2026-08-24T07:41:23.865Z",
+      "updated_at": "2026-08-24T09:59:30.511Z",
+      "target": "memory",
+      "importance": "normal"
+    },
+    {
+      "content": "update install flow: check_for_updates emits update:check_result event with rid (u32); frontend install button calls install_update Rust command (takes app handle + rid u32); backend retrieves Update from resource table and calls download_and_install async, showing native installer dialog.",
+      "created_at": "2026-08-24T07:56:49.323Z",
+      "updated_at": "2026-08-24T09:59:52.148Z",
       "target": "memory",
       "importance": "normal"
     }

@@ -51,7 +51,7 @@
       ],
       "createdAt": "2026-08-19T10:17:34.590Z",
       "updatedAt": "2026-08-21T09:18:42.202Z",
-      "lastAccessedAt": "2026-08-24T07:41:07.989Z",
+      "lastAccessedAt": "2026-08-24T10:05:00.183Z",
       "revision": 7,
       "contentHash": "93a0da40f186011280ecc7e4eb318f0988ffc1291220e34dae5d88a780ff9388",
       "sizeBytes": 13664,
@@ -59,8 +59,8 @@
     },
     {
       "id": "7b9ac838-cdba-484c-aee7-15455f96ef49",
-      "title": "Antigravity Hub — Release Engineering Handoff (v5.3.28–v5.3.32)",
-      "description": "Release engineering: compatible key rotation, Release workflow fixes (artifact pattern, shell:bash), event-driven check-for-updates, install button, version display fix, /models pass-through behavior.",
+      "title": "Antigravity Hub — Release Engineering Handoff (v5.3.28–v5.3.33)",
+      "description": "Release engineering: compatible key rotation, Release workflow fixes (artifact pattern, shell:bash), event-driven check-for-updates, install_update backend command, version display fix, /models pass-through behavior.",
       "status": "active",
       "filename": "antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
       "relativePath": "documents/active/antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
@@ -81,14 +81,15 @@
       "sessionIds": [
         "ca2969f8-2e05-4b7e-bfcd-29649103fcd3",
         "14d27755-33d7-45f3-adf8-f68b8b94e10e",
-        "e4f35a12-8ed5-45cf-8b58-4fb294211c29"
+        "e4f35a12-8ed5-45cf-8b58-4fb294211c29",
+        "00cdccae-b129-4413-a821-f5b74d07c55a"
       ],
       "createdAt": "2026-08-21T09:11:49.288Z",
-      "updatedAt": "2026-08-24T07:42:21.228Z",
-      "lastAccessedAt": "2026-08-24T07:42:21.228Z",
-      "revision": 3,
-      "contentHash": "812c19909e7d9c20fbd62c6cf53e377ca26648945deaaa11e710d1d498ee9b72",
-      "sizeBytes": 8354,
+      "updatedAt": "2026-08-24T08:11:12.283Z",
+      "lastAccessedAt": "2026-08-24T10:05:00.183Z",
+      "revision": 4,
+      "contentHash": "511740737caf423f9a8bae0d76c65ec0b16950d5702d56a8a47b1f266dcc7ef5",
+      "sizeBytes": 9390,
       "memoryBodyIds": []
     }
   ]
