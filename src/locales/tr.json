@@ -1,4 +1,4 @@
-﻿{
+{
     "common": {
         "empty": "Boş",
         "loading": "Yükleniyor...",
@@ -449,7 +449,17 @@
             "selected_items_note": "Seçili öğeler üst menü çubuğunda görüntülenecektir.",
             "required": "Zorunlu"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "Hakkında",
             "version": "Uygulama Sürümü",
             "tech_stack": "Teknoloji Yığını",

@@ -1,5 +1,5 @@
 import { version } from '../../package.json';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Save, RefreshCw, Server, Globe, Shield, Download } from 'lucide-react';
 import CodexIntegration from '../components/settings/CodexIntegration';
 import { request as invoke } from '../utils/request';
@@ -7,6 +7,7 @@ import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { useTranslation } from 'react-i18next';
 import { checkForUpdates } from '../services/platformService';
+import { listen } from '@tauri-apps/api/event';
 
 function Settings() {
   const { t, i18n } = useTranslation();
@@ -19,6 +20,7 @@ function Settings() {
   const [portError, setPortError] = useState('');
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (config) {
@@ -37,21 +39,47 @@ function Settings() {
     setCheckingUpdate(true);
     setUpdateStatus(null);
     try {
-      const result = await checkForUpdates();
-      if (result.status === 'checking') {
-        setUpdateStatus(t('settings.update.checking'));
-        // The actual update check is handled by the Tauri updater plugin
-        // which will show a dialog if an update is available
-        setTimeout(() => {
-          setUpdateStatus(t('settings.update.check_completed'));
-        }, 2000);
-      }
+      await checkForUpdates();
+      setUpdateStatus(t('settings.update.checking'));
     } catch (e) {
-      setUpdateStatus(`${t('settings.update.check_failed')}: ${e}`);
-    } finally {
       setCheckingUpdate(false);
+      setUpdateStatus(`${t('settings.update.check_failed')}: ${e}`);
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    const setupListener = async () => {
+      const unlisten = await listen<{ status: string; version?: string; current_version?: string; message?: string }>(
+        'update:check_result',
+        (event) => {
+          if (cancelled) return;
+          const data = event.payload;
+          if (data.status === 'available') {
+            const v = data.version ?? '?';
+            const cv = data.current_version ?? '?';
+            setUpdateStatus(`${t('settings.update.new_version')}: ${v} (${cv})`);
+          } else if (data.status === 'up_to_date') {
+            setUpdateStatus(t('settings.update.current'));
+          } else if (data.status === 'error') {
+            setUpdateStatus(`${t('settings.update.check_failed')}: ${data.message ?? ''}`);
+          } else {
+            setUpdateStatus(t('settings.update.check_completed'));
+          }
+          setCheckingUpdate(false);
+        },
+      );
+      unlistenRef.current = unlisten;
+    };
+    setupListener();
+    return () => {
+      cancelled = true;
+      if (unlistenRef.current) {
+        unlistenRef.current();
+        unlistenRef.current = null;
+      }
+    };
+  }, [t]);
 
   const handleSave = async () => {
     const portNum = parseInt(portInput);

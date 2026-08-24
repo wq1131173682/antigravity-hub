@@ -1,4 +1,4 @@
-﻿{
+{
     "common": {
         "empty": "Trống",
         "loading": "Đang tải...",
@@ -483,7 +483,17 @@
             "selected_items_note": "Các mục được chọn sẽ hiển thị trên thanh menu phía trên.",
             "required": "Bắt buộc"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "Giới thiệu",
             "version": "Phiên bản",
             "tech_stack": "Công nghệ",

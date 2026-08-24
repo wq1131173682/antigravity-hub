@@ -486,7 +486,17 @@
             "selected_items_note": "ستظهر العناصر المحددة في شريط القائمة العلوي.",
             "required": "مطلوب"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "حول",
             "version": "إصدار التطبيق",
             "tech_stack": "التقنيات",

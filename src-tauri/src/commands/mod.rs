@@ -580,14 +580,44 @@ pub async fn check_codex_env_conflicts() -> Result<crate::modules::codex_integra
 }
 
 /// Check for available updates using Tauri's updater plugin.
-/// Returns the update info if available, or an error message.
+/// Emits a `update:check_result` event with the result.
 #[tauri::command]
-pub async fn check_for_updates() -> Result<serde_json::Value, String> {
-    use tauri::Manager;
-    // This command is called from the frontend via Tauri IPC.
-    // The actual update check is done by the updater plugin.
-    // We return a simple response indicating the check was initiated.
-    Ok(serde_json::json!({ "status": "checking" }))
+pub async fn check_for_updates(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    use tauri_plugin_updater::UpdaterExt;
+    match app.updater() {
+        Ok(updater) => {
+            tauri::async_runtime::spawn(async move {
+                match updater.check().await {
+                    Ok(Some(update)) => {
+                        let _ = app.emit(
+                            "update:check_result",
+                            serde_json::json!({
+                                "status": "available",
+                                "version": update.version,
+                                "current_version": update.current_version
+                            }),
+                        );
+                    }
+                    Ok(None) => {
+                        let _ = app.emit("update:check_result", serde_json::json!({ "status": "up_to_date" }));
+                    }
+                    Err(e) => {
+                        let _ = app.emit(
+                            "update:check_result",
+                            serde_json::json!({ "status": "error", "message": e.to_string() }),
+                        );
+                    }
+                }
+            });
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "update:check_result",
+                serde_json::json!({ "status": "error", "message": e.to_string() }),
+            );
+        }
+    }
 }
 
 /// Get the current app version

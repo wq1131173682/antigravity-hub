@@ -1,4 +1,4 @@
-﻿{
+{
     "common": {
         "loading": "Memuatkan...",
         "load_more": "Muat Lagi",
@@ -484,7 +484,17 @@
             "selected_items_note": "Item yang dipilih akan dipaparkan di bar menu atas.",
             "required": "Wajib"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "Perihal",
             "version": "Versi Aplikasi",
             "tech_stack": "Tumpukan Teknologi",

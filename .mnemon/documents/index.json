@@ -4,7 +4,7 @@
     {
       "id": "55d6d91f-adf4-418c-bf40-048a6a087138",
       "title": "Antigravity Hub — Project Knowledge Base",
-      "description": "Complete project knowledge extracted from codebase and git history: purpose, architecture, conventions, data models, and historical decisions.",
+      "description": "Project knowledge base update: v5.3.28 release, compatible key rotation, check-for-updates, workflow fixes",
       "status": "active",
       "filename": "antigravity-hub-project-knowledge-base-55d6d91f.md",
       "relativePath": "documents/active/antigravity-hub-project-knowledge-base-55d6d91f.md",
@@ -46,14 +46,45 @@
         "22017bd2-718c-4ea3-9c45-14f2bb1dec9b",
         "faa99c5b-3bdd-42bb-a869-c7e86ba2365b",
         "0cfe61f2-cce4-4d90-a568-df678c3d40b0",
-        "30a7a32b-efc3-4470-905b-06275dd0c630"
+        "30a7a32b-efc3-4470-905b-06275dd0c630",
+        "604c5c81-8426-401d-8501-61ef91b99d4b"
       ],
       "createdAt": "2026-08-19T10:17:34.590Z",
-      "updatedAt": "2026-08-21T05:58:16.308Z",
-      "lastAccessedAt": "2026-08-21T05:58:16.308Z",
-      "revision": 6,
-      "contentHash": "7c2a2fb87f9d128f30554030333326871d94b2b9a714e70f02e76bb97e834f47",
-      "sizeBytes": 15629,
+      "updatedAt": "2026-08-21T09:18:42.202Z",
+      "lastAccessedAt": "2026-08-21T09:18:42.202Z",
+      "revision": 7,
+      "contentHash": "93a0da40f186011280ecc7e4eb318f0988ffc1291220e34dae5d88a780ff9388",
+      "sizeBytes": 13664,
+      "memoryBodyIds": []
+    },
+    {
+      "id": "7b9ac838-cdba-484c-aee7-15455f96ef49",
+      "title": "Antigravity Hub — v5.3.28 Release & Proxy Rotation Handoff",
+      "description": "v5.3.28 release engineering: compatible key rotation (per-key retry budget + jitter), Release workflow artifact pattern fix, check-for-updates button, and updater.json signing pipeline notes.",
+      "status": "active",
+      "filename": "antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
+      "relativePath": "documents/active/antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
+      "sourcePaths": [
+        ".github/workflows/release.yml",
+        "scripts/sign_updater.py",
+        "src-tauri/src/modules/proxy.rs",
+        "src-tauri/src/modules/quota_window.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/lib.rs",
+        "src/pages/Settings.tsx",
+        "src/services/platformService.ts",
+        "src-tauri/tauri.conf.json",
+        "src-tauri/Cargo.toml"
+      ],
+      "sessionIds": [
+        "ca2969f8-2e05-4b7e-bfcd-29649103fcd3"
+      ],
+      "createdAt": "2026-08-21T09:11:49.288Z",
+      "updatedAt": "2026-08-21T09:11:49.288Z",
+      "lastAccessedAt": "2026-08-21T09:17:37.139Z",
+      "revision": 1,
+      "contentHash": "1e32a2fd7585de64c10a88a4aacd5a4de9d968f5fbd26bed49743ca129d80c63",
+      "sizeBytes": 6533,
       "memoryBodyIds": []
     }
   ]

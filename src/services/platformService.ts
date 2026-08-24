@@ -277,8 +277,8 @@ export async function getLanIp(): Promise<string> {
   return await invoke('get_lan_ip');
 }
 
-/** Check for available updates */
-export async function checkForUpdates(): Promise<{ status: string; message?: string }> {
+/** Check for available updates — emits 'update:check_result' event on completion */
+export async function checkForUpdates(): Promise<void> {
   return await invoke('check_for_updates');
 }
 

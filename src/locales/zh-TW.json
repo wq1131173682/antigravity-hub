@@ -1,4 +1,4 @@
-﻿{
+{
     "common": {
         "empty": "空",
         "loading": "載入中...",
@@ -478,7 +478,17 @@
             "http_api_settings_saved": "HTTP API 設定已儲存,重啟應用後生效",
             "http_api_restart_required": "⚠️ 需要重啟應用後生效"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "關於",
             "version": "應用版本",
             "tech_stack": "技術堆疊",

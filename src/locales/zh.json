@@ -594,6 +594,8 @@
             "checking": "检测中...",
             "check_completed": "检测完成",
             "check_failed": "检测失败",
+            "new_version": "发现新版本",
+            "current": "当前已是最新版本",
             "auto_desc": "应用启动时会自动检查更新"
         },
         "about": {

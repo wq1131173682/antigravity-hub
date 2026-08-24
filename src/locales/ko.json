@@ -1,4 +1,4 @@
-﻿{
+{
     "common": {
         "loading": "로딩 중...",
         "load_more": "더 보기",
@@ -487,7 +487,17 @@
             "selected_items_note": "선택된 항목이 상단 메뉴 바에 표시됩니다.",
             "required": "필수"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "정보",
             "version": "앱 버전",
             "tech_stack": "기술 스택",

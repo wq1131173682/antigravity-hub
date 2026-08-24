@@ -1,4 +1,4 @@
-﻿{
+{
     "common": {
         "loading": "Carregando...",
         "load_more": "Carregar mais",
@@ -480,7 +480,17 @@
             "selected_items_note": "Os itens selecionados serão exibidos na barra de menu superior.",
             "required": "Obrigatório"
         },
-        "about": {
+                "update": {
+            "title": "Update",
+            "description": "Check for new versions",
+            "check": "Check Updates",
+            "checking": "Checking...",
+            "check_completed": "Check completed",
+            "check_failed": "Check failed",
+            "new_version": "New version available",
+            "current": "Already up to date",
+            "auto_desc": "Automatically check for updates on startup"
+        },"about": {
             "title": "Sobre",
             "version": "Versão do Aplicativo",
             "tech_stack": "Stack Tecnológico",

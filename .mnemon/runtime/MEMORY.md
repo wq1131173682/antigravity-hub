@@ -11,3 +11,9 @@ v5.3.10 milestone: Codex integration archived (CODEX_ENABLED=false), responses A
 Proxy max_tokens injection changed from 4096 to 65536 default. Removed old logic that forced max_tokens; now only injects when missing. Reasoning models (DeepSeek, Qwen, etc.) no longer truncated by undersized max_tokens.
 §
 Antigravity Hub proxy: Compatible key rotation implemented (v5.3.27). On 429/5xx, retry same key N times (exponential backoff + jitter) before rotating. N = number of available keys. Prevents account-level rate limits from "blitzing" all keys. Default max_tokens injection: 65536 (was 4096). Model struct has max_output_tokens field.
+§
+此机器直连 github.com 常失败（git push 超时）；需先设置 git 代理 http://127.0.0.1:7890（测试 7890 端口连通）再推送。用户明确指示：网络不通先走代理，代理不通则去掉代理并停止。github.com:443 的 Test-NetConnection 可能返回 True 但 git push 仍失败，以实际 push 结果为准。
+§
+发版前必须先更新 tauri.conf.json 和 Cargo.toml 的版本号，再提交推送和打 tag。版本号必须与 tag 一致（如 v5.3.29 → 5.3.29），否则 Release workflow 的版本检查会失败。
+§
+此机器直连 github.com 常失败（git push 超时）；需先设置 git 代理 http://127.0.0.1:7890 再推送。测试 7890 端口连通后，用 git config --global http.proxy http://127.0.0.1:7890 和 https.proxy 设置代理。如果代理不行则去掉代理（git config --global --unset http.proxy）并停止。
