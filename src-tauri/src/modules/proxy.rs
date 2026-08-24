@@ -1268,14 +1268,15 @@ async fn proxy_handler(
         target_path.clone()
     };
 
-    // ── Model list (/v1/models, /models) ──
+    // ── Model list (/v1/models) ──
     // Codex CLI calls /v1/models to discover available models. Instead of
     // forwarding to the upstream provider (which may not return the configured
     // models), we intercept and return the models configured in Antigravity Hub.
-    if target_path == "/v1/models" || target_path == "/v1/models/"
-        || target_path == "/models" || target_path == "/models/"
-    {
-        info!("Intercepting model list request ({:?}), returning configured models", target_path);
+    // Note: /models (without v1) is NOT intercepted here — it passes through to
+    // the upstream so clients like DSH that expect raw upstream model lists can
+    // still discover models.
+    if target_path == "/v1/models" || target_path == "/v1/models/" {
+        info!("Intercepting /v1/models request, returning configured models");
         return handle_models_request(Some(&platform_prefix));
     }
 
