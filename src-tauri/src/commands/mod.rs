@@ -595,14 +595,14 @@ pub async fn check_for_updates(app: tauri::AppHandle) {
                         use tauri::Manager;
                         let version = update.version.clone();
                         let current_version = update.current_version.clone();
-                        let rid = app.resources_table().add(update);
+                        let rid: u32 = app.resources_table().add(update);
                         let _ = app.emit(
                             "update:check_result",
                             serde_json::json!({
                                 "status": "available",
                                 "version": version,
                                 "current_version": current_version,
-                                "rid": rid as u64
+                                "rid": rid
                             }),
                         );
                     }
@@ -625,6 +625,35 @@ pub async fn check_for_updates(app: tauri::AppHandle) {
             );
         }
     }
+}
+
+/// Trigger the native update install flow by invoking the plugin's built-in
+/// download_and_install command through the plugin's own invoke handler.
+/// This command is registered by the tauri_plugin_updater plugin and requires
+/// a Webview context (provided automatically by Tauri when called from frontend).
+/// We expose it here as a passthrough so the frontend can trigger install from
+/// the Settings page after a successful check.
+#[tauri::command]
+pub async fn install_update(app: tauri::AppHandle, rid: u32) -> Result<(), String> {
+    use tauri::{Manager, Resource, ResourceId};
+    use tauri_plugin_updater::Update;
+
+    // The check_for_updates command stored the Update in the app's resource table.
+    // Retrieve it here using the RID and trigger the native install flow.
+    let update = app.resources_table().get::<Update>(ResourceId::from(rid))
+        .map_err(|e| format!("Failed to retrieve update: {}", e))?;
+
+    let update = (*update).clone();
+    tauri::async_runtime::spawn(async move {
+        match update.download_and_install(|_chunk_len, _total| {}, || {}).await {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Update download/install failed: {}", e);
+            }
+        }
+    });
+
+    Ok(())
 }
 
 /// Get the current app version

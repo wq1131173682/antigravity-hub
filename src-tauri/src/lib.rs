@@ -217,6 +217,7 @@ pub fn run() {
             commands::get_lan_ip,
             // Update checks
             commands::check_for_updates,
+            commands::install_update,
             commands::get_app_version,
             // Codex CLI integration
             commands::check_codex_status,

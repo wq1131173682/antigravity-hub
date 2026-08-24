@@ -17,3 +17,9 @@ Antigravity Hub proxy: Compatible key rotation implemented (v5.3.27). On 429/5xx
 发版前必须先更新 tauri.conf.json 和 Cargo.toml 的版本号，再提交推送和打 tag。版本号必须与 tag 一致（如 v5.3.29 → 5.3.29），否则 Release workflow 的版本检查会失败。
 §
 此机器直连 github.com 常失败（git push 超时）；需先设置 git 代理 http://127.0.0.1:7890 再推送。测试 7890 端口连通后，用 git config --global http.proxy http://127.0.0.1:7890 和 https.proxy 设置代理。如果代理不行则去掉代理（git config --global --unset http.proxy）并停止。
+§
+check_for_updates uses event-driven architecture: backend emits `update:check_result` event (status: available/up_to_date/error with version, current_version, rid); frontend Settings.tsx listens with `listen('update:check_result', ...)` and shows status + install button. Install button calls `download_and_install` via `tauriInvoke` with a Channel.
+§
+Proxy models endpoint behavior: `/v1/models` at platform level is intercepted by handle_models_request (returns locally configured models). `/models` (without v1) at platform level passes through to upstream API — clients like DSH use this to discover upstream models. Global-level (no prefix) `/v1/models` and `/models` both return ALL platforms' local models.
+§
+Release workflow: just bump version → push master → tag → push tag. CI auto-runs Release workflow and publishes. No need to wait for completion. If version doesn't match tag, CI fails fast at the "Verify tag version matches Cargo.toml" step.

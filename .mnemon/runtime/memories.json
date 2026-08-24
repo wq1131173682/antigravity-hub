@@ -77,6 +77,27 @@
       "updated_at": "2026-08-21T09:17:58.495Z",
       "target": "user",
       "importance": "critical"
+    },
+    {
+      "content": "check_for_updates uses event-driven architecture: backend emits `update:check_result` event (status: available/up_to_date/error with version, current_version, rid); frontend Settings.tsx listens with `listen('update:check_result', ...)` and shows status + install button. Install button calls `download_and_install` via `tauriInvoke` with a Channel.",
+      "created_at": "2026-08-24T07:41:23.852Z",
+      "updated_at": "2026-08-24T07:41:23.852Z",
+      "target": "memory",
+      "importance": "normal"
+    },
+    {
+      "content": "Proxy models endpoint behavior: `/v1/models` at platform level is intercepted by handle_models_request (returns locally configured models). `/models` (without v1) at platform level passes through to upstream API — clients like DSH use this to discover upstream models. Global-level (no prefix) `/v1/models` and `/models` both return ALL platforms' local models.",
+      "created_at": "2026-08-24T07:41:23.859Z",
+      "updated_at": "2026-08-24T07:41:23.859Z",
+      "target": "memory",
+      "importance": "normal"
+    },
+    {
+      "content": "Release workflow: just bump version → push master → tag → push tag. CI auto-runs Release workflow and publishes. No need to wait for completion. If version doesn't match tag, CI fails fast at the \"Verify tag version matches Cargo.toml\" step.",
+      "created_at": "2026-08-24T07:41:23.865Z",
+      "updated_at": "2026-08-24T07:41:23.865Z",
+      "target": "memory",
+      "importance": "normal"
     }
   ]
 }

@@ -7,7 +7,7 @@ import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
-import { invoke as tauriInvoke, Channel } from '@tauri-apps/api/core';
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { checkForUpdates } from '../services/platformService';
 
 function Settings() {
@@ -97,13 +97,11 @@ function Settings() {
     setInstalling(true);
     setUpdateStatus(null);
     try {
-      // Call plugin's built-in download_and_install — shows native install dialog
-      const progressChannel = new Channel<{ event: string; data: unknown }>(() => {});
-      await tauriInvoke('download_and_install', { rid: updateRid, onEvent: progressChannel });
-      setUpdateStatus(t('settings.update.check_completed'));
+      // Call our backend wrapper which handles the install flow
+      await tauriInvoke('install_update', { rid: updateRid });
+      setUpdateStatus(t('update_notification.downloading'));
     } catch (e) {
       setUpdateStatus(`${t('settings.update.check_failed')}: ${e}`);
-    } finally {
       setInstalling(false);
     }
   };

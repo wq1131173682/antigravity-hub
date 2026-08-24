@@ -51,7 +51,7 @@
       ],
       "createdAt": "2026-08-19T10:17:34.590Z",
       "updatedAt": "2026-08-21T09:18:42.202Z",
-      "lastAccessedAt": "2026-08-24T06:05:54.540Z",
+      "lastAccessedAt": "2026-08-24T07:41:07.989Z",
       "revision": 7,
       "contentHash": "93a0da40f186011280ecc7e4eb318f0988ffc1291220e34dae5d88a780ff9388",
       "sizeBytes": 13664,
@@ -59,8 +59,8 @@
     },
     {
       "id": "7b9ac838-cdba-484c-aee7-15455f96ef49",
-      "title": "Antigravity Hub — Release & Proxy Rotation Handoff (v5.3.28 & v5.3.29)",
-      "description": "v5.3.28–v5.3.29 release engineering: compatible key rotation, Release workflow fixes (artifact pattern, shell:bash on Windows runners), real event-driven check-for-updates fix, updater.json signing pipeline.",
+      "title": "Antigravity Hub — Release Engineering Handoff (v5.3.28–v5.3.32)",
+      "description": "Release engineering: compatible key rotation, Release workflow fixes (artifact pattern, shell:bash), event-driven check-for-updates, install button, version display fix, /models pass-through behavior.",
       "status": "active",
       "filename": "antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
       "relativePath": "documents/active/antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
@@ -68,25 +68,27 @@
         ".github/workflows/release.yml",
         "scripts/sign_updater.py",
         "src-tauri/src/modules/proxy.rs",
-        "src-tauri/src/modules/quota_window.rs",
         "src-tauri/src/commands/mod.rs",
         "src-tauri/src/lib.rs",
         "src/pages/Settings.tsx",
         "src/services/platformService.ts",
-        "src/locales/zh.json",
+        "src/locales",
         "src-tauri/tauri.conf.json",
-        "src-tauri/Cargo.toml"
+        "src-tauri/Cargo.toml",
+        "package.json",
+        "updater.json"
       ],
       "sessionIds": [
         "ca2969f8-2e05-4b7e-bfcd-29649103fcd3",
-        "14d27755-33d7-45f3-adf8-f68b8b94e10e"
+        "14d27755-33d7-45f3-adf8-f68b8b94e10e",
+        "e4f35a12-8ed5-45cf-8b58-4fb294211c29"
       ],
       "createdAt": "2026-08-21T09:11:49.288Z",
-      "updatedAt": "2026-08-24T06:07:26.279Z",
-      "lastAccessedAt": "2026-08-24T06:07:26.279Z",
-      "revision": 2,
-      "contentHash": "88e70a537f07c08d7fafc8f12a96d305a4ca8b43e35cd9e1bbb35f8dec3211b6",
-      "sizeBytes": 9802,
+      "updatedAt": "2026-08-24T07:42:21.228Z",
+      "lastAccessedAt": "2026-08-24T07:42:21.228Z",
+      "revision": 3,
+      "contentHash": "812c19909e7d9c20fbd62c6cf53e377ca26648945deaaa11e710d1d498ee9b72",
+      "sizeBytes": 8354,
       "memoryBodyIds": []
     }
   ]
