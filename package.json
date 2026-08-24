@@ -1,5 +1,5 @@
 {
-  "version": "5.3.26",
+  "version": "5.3.29",
   "name": "antigravity-tools",
   "description": "Antigravity Hub - \u591a\u5e73\u53f0 API Key \u8f6e\u8be2\u4ee3\u7406\u5de5\u5177\uff08Tauri v2 \u684c\u9762\u5e94\u7528\uff09\u3002Multi-platform API key rotation proxy with Codex CLI integration.",
   "homepage": "https://github.com/wq1131173682/antigravity-hub",

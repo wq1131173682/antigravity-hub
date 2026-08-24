@@ -1,4 +1,4 @@
-import { version } from '../../package.json';
+import { getAppVersion } from '../services/platformService';
 import { useState, useEffect, useRef } from 'react';
 import { Save, RefreshCw, Server, Globe, Shield, Download } from 'lucide-react';
 import CodexIntegration from '../components/settings/CodexIntegration';
@@ -20,6 +20,7 @@ function Settings() {
   const [portError, setPortError] = useState('');
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>('');
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -33,6 +34,7 @@ function Settings() {
 
   useEffect(() => {
     loadConfig();
+    getAppVersion().then(setAppVersion).catch(() => {});
   }, []);
 
   const handleCheckUpdate = async () => {
@@ -301,7 +303,7 @@ function Settings() {
             {t('settings.about.title')}
           </h2>
           <div className="text-sm text-gray-500 dark:text-gray-400 space-y-1">
-            <p>{t('settings.about.version')}: {version}</p>
+            <p>{t('settings.about.version')}: {appVersion || '?'}</p>
             <p className="text-xs text-gray-400">{t('settings.update.auto_desc')}</p>
           </div>
         </div>
