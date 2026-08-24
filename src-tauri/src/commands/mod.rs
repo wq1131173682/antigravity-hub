@@ -590,12 +590,19 @@ pub async fn check_for_updates(app: tauri::AppHandle) {
             tauri::async_runtime::spawn(async move {
                 match updater.check().await {
                     Ok(Some(update)) => {
+                        // Store the update in the app's resource table so the
+                        // frontend can retrieve it later via the install command.
+                        use tauri::Manager;
+                        let version = update.version.clone();
+                        let current_version = update.current_version.clone();
+                        let rid = app.resources_table().add(update);
                         let _ = app.emit(
                             "update:check_result",
                             serde_json::json!({
                                 "status": "available",
-                                "version": update.version,
-                                "current_version": update.current_version
+                                "version": version,
+                                "current_version": current_version,
+                                "rid": rid as u64
                             }),
                         );
                     }

@@ -6,8 +6,9 @@ import { request as invoke } from '../utils/request';
 import { useConfigStore } from '../stores/useConfigStore';
 import { showToast } from '../components/common/ToastContainer';
 import { useTranslation } from 'react-i18next';
-import { checkForUpdates } from '../services/platformService';
 import { listen } from '@tauri-apps/api/event';
+import { invoke as tauriInvoke, Channel } from '@tauri-apps/api/core';
+import { checkForUpdates } from '../services/platformService';
 
 function Settings() {
   const { t, i18n } = useTranslation();
@@ -21,6 +22,9 @@ function Settings() {
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string>('');
+  const [installing, setInstalling] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ version: string; current: string } | null>(null);
+  const [updateRid, setUpdateRid] = useState<number | null>(null);
   const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -52,25 +56,30 @@ function Settings() {
   useEffect(() => {
     let cancelled = false;
     const setupListener = async () => {
-      const unlisten = await listen<{ status: string; version?: string; current_version?: string; message?: string }>(
-        'update:check_result',
-        (event) => {
-          if (cancelled) return;
-          const data = event.payload;
-          if (data.status === 'available') {
-            const v = data.version ?? '?';
-            const cv = data.current_version ?? '?';
-            setUpdateStatus(`${t('settings.update.new_version')}: ${v} (${cv})`);
-          } else if (data.status === 'up_to_date') {
-            setUpdateStatus(t('settings.update.current'));
-          } else if (data.status === 'error') {
-            setUpdateStatus(`${t('settings.update.check_failed')}: ${data.message ?? ''}`);
-          } else {
-            setUpdateStatus(t('settings.update.check_completed'));
-          }
-          setCheckingUpdate(false);
-        },
-      );
+      const unlisten = await listen<{
+        status: string;
+        version?: string;
+        current_version?: string;
+        message?: string;
+        rid?: number;
+      }>('update:check_result', (event) => {
+        if (cancelled) return;
+        const data = event.payload;
+        if (data.status === 'available') {
+          const v = data.version ?? '?';
+          const cv = data.current_version ?? '?';
+          setUpdateInfo({ version: v, current: cv });
+          if (data.rid !== undefined) setUpdateRid(data.rid);
+          setUpdateStatus(`${t('settings.update.new_version')}: ${v} (${cv})`);
+        } else if (data.status === 'up_to_date') {
+          setUpdateStatus(t('settings.update.current'));
+        } else if (data.status === 'error') {
+          setUpdateStatus(`${t('settings.update.check_failed')}: ${data.message ?? ''}`);
+        } else {
+          setUpdateStatus(t('settings.update.check_completed'));
+        }
+        setCheckingUpdate(false);
+      });
       unlistenRef.current = unlisten;
     };
     setupListener();
@@ -82,6 +91,22 @@ function Settings() {
       }
     };
   }, [t]);
+
+  const handleInstallUpdate = async () => {
+    if (updateRid === null) return;
+    setInstalling(true);
+    setUpdateStatus(null);
+    try {
+      // Call plugin's built-in download_and_install — shows native install dialog
+      const progressChannel = new Channel<{ event: string; data: unknown }>(() => {});
+      await tauriInvoke('download_and_install', { rid: updateRid, onEvent: progressChannel });
+      setUpdateStatus(t('settings.update.check_completed'));
+    } catch (e) {
+      setUpdateStatus(`${t('settings.update.check_failed')}: ${e}`);
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   const handleSave = async () => {
     const portNum = parseInt(portInput);
@@ -277,18 +302,33 @@ function Settings() {
                 {t('settings.update.description')}
               </p>
             </div>
-            <button
-              className="px-4 py-2 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              onClick={handleCheckUpdate}
-              disabled={checkingUpdate}
-            >
-              {checkingUpdate ? (
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Download className="w-3.5 h-3.5" />
+            <div className="flex gap-2">
+              <button
+                className="px-4 py-2 bg-blue-500 text-white text-sm font-medium rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={handleCheckUpdate}
+                disabled={checkingUpdate || installing}
+              >
+                {checkingUpdate ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                {checkingUpdate ? t('settings.update.checking') : t('settings.update.check')}
+              </button>
+              {updateInfo && !installing && (
+                <button
+                  className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors flex items-center gap-1.5 shadow-sm"
+                  onClick={handleInstallUpdate}
+                >
+                  {t('settings.about.check_update')}
+                </button>
               )}
-              {checkingUpdate ? t('settings.update.checking') : t('settings.update.check')}
-            </button>
+              {installing && (
+                <span className="px-4 py-2 text-sm text-green-600 dark:text-green-400">
+                  {t('settings.update.checking')}
+                </span>
+              )}
+            </div>
           </div>
           {updateStatus && (
             <p className={`text-sm mt-3 ${updateStatus.includes('失败') || updateStatus.includes('failed') ? 'text-red-500' : 'text-green-600 dark:text-green-400'}`}>
