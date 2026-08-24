@@ -1268,15 +1268,17 @@ async fn proxy_handler(
         target_path.clone()
     };
 
-    // ── Model list (/v1/models) ──
-    // Codex CLI calls /v1/models to discover available models. Instead of
-    // forwarding to the upstream provider (which may not return the configured
-    // models), we intercept and return the models configured in Antigravity Hub.
-    // Note: /models (without v1) is NOT intercepted here — it passes through to
-    // the upstream so clients like DSH that expect raw upstream model lists can
-    // still discover models.
-    if target_path == "/v1/models" || target_path == "/v1/models/" {
-        info!("Intercepting /v1/models request, returning configured models");
+    // ── Model list interception ──
+    // Intercept all variants of /models requests and return locally configured
+    // models. This includes:
+    // - /v1/models (standard OpenAI format)
+    // - /models (some providers use this directly)
+    // - /v1/v1/models (duplicate v1 prefix, clients like DSH send this)
+    // All are normalized to return the proxy's configured model list.
+    let normalized_path = normalize_models_path(&target_path);
+    if normalized_path.is_some() {
+        let desc = normalized_path.as_ref().unwrap();
+        info!("Intercepting model list request ({:?}), returning configured models", desc);
         return handle_models_request(Some(&platform_prefix));
     }
 
@@ -1462,6 +1464,25 @@ fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str
 // configured platform, which caused silent cross-platform key-pool misrouting.
 
 /// Deduplicate overlapping version-like path segments between base_url and target_path.
+/// Normalize a path to check if it's a models endpoint, handling variants:
+/// - "/v1/models" → Some("v1/models")
+/// - "/models" → Some("models")
+/// - "/v1/v1/models" → Some("v1/models") (deduplicated)
+/// - "/v1/models/" → Some("v1/models")
+/// Returns None for non-models paths.
+fn normalize_models_path(path: &str) -> Option<&str> {
+    let p = path.trim_end_matches('/');
+    // Exact matches
+    if p == "/v1/models" || p == "/models" {
+        return Some(p);
+    }
+    // Handle duplicate v1 prefix: /v1/v1/models → treat as /v1/models
+    if p == "/v1/v1/models" {
+        return Some("/v1/models");
+    }
+    None
+}
+
 /// e.g., base_url="https://api.sensenova.com/v1", target_path="/v1/chat/completions"
 ///       → "https://api.sensenova.com/v1/chat/completions" (not /v1/v1/...)
 /// If target_path does not start with a version prefix, or the prefixes differ,
