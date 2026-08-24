@@ -27,6 +27,7 @@ jobs:
         # Fail early if the tag version doesn't match the code version.
         # Without this check, the build finishes but the post-build version
         # verification would fail, wasting ~10 minutes of CI time.
+        shell: bash
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           CARGO_VERSION="$(grep '^version = ' src-tauri/Cargo.toml | head -1 | sed 's/version = "//;s/"//')"
@@ -133,6 +134,7 @@ jobs:
       - name: Verify bundle versions match tag
         # Ensure the downloaded artifacts match the expected version from the tag.
         # This prevents signing stale artifacts with wrong version numbers.
+        shell: bash
         run: |
           echo "Checking bundle versions..."
           TAG_VERSION="${GITHUB_REF_NAME#v}"
