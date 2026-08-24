@@ -51,7 +51,7 @@
       ],
       "createdAt": "2026-08-19T10:17:34.590Z",
       "updatedAt": "2026-08-21T09:18:42.202Z",
-      "lastAccessedAt": "2026-08-21T09:18:42.202Z",
+      "lastAccessedAt": "2026-08-24T06:05:54.540Z",
       "revision": 7,
       "contentHash": "93a0da40f186011280ecc7e4eb318f0988ffc1291220e34dae5d88a780ff9388",
       "sizeBytes": 13664,
@@ -59,8 +59,8 @@
     },
     {
       "id": "7b9ac838-cdba-484c-aee7-15455f96ef49",
-      "title": "Antigravity Hub — v5.3.28 Release & Proxy Rotation Handoff",
-      "description": "v5.3.28 release engineering: compatible key rotation (per-key retry budget + jitter), Release workflow artifact pattern fix, check-for-updates button, and updater.json signing pipeline notes.",
+      "title": "Antigravity Hub — Release & Proxy Rotation Handoff (v5.3.28 & v5.3.29)",
+      "description": "v5.3.28–v5.3.29 release engineering: compatible key rotation, Release workflow fixes (artifact pattern, shell:bash on Windows runners), real event-driven check-for-updates fix, updater.json signing pipeline.",
       "status": "active",
       "filename": "antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
       "relativePath": "documents/active/antigravity-hub-v5-3-28-release-proxy-rotation-h-7b9ac838.md",
@@ -73,18 +73,20 @@
         "src-tauri/src/lib.rs",
         "src/pages/Settings.tsx",
         "src/services/platformService.ts",
+        "src/locales/zh.json",
         "src-tauri/tauri.conf.json",
         "src-tauri/Cargo.toml"
       ],
       "sessionIds": [
-        "ca2969f8-2e05-4b7e-bfcd-29649103fcd3"
+        "ca2969f8-2e05-4b7e-bfcd-29649103fcd3",
+        "14d27755-33d7-45f3-adf8-f68b8b94e10e"
       ],
       "createdAt": "2026-08-21T09:11:49.288Z",
-      "updatedAt": "2026-08-21T09:11:49.288Z",
-      "lastAccessedAt": "2026-08-21T09:17:37.139Z",
-      "revision": 1,
-      "contentHash": "1e32a2fd7585de64c10a88a4aacd5a4de9d968f5fbd26bed49743ca129d80c63",
-      "sizeBytes": 6533,
+      "updatedAt": "2026-08-24T06:07:26.279Z",
+      "lastAccessedAt": "2026-08-24T06:07:26.279Z",
+      "revision": 2,
+      "contentHash": "88e70a537f07c08d7fafc8f12a96d305a4ca8b43e35cd9e1bbb35f8dec3211b6",
+      "sizeBytes": 9802,
       "memoryBodyIds": []
     }
   ]
