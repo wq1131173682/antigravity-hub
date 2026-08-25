@@ -703,7 +703,7 @@ fn handle_models_request(platform_filter: Option<&str>) -> axum::response::Respo
                 // When a platform prefix is supplied (e.g. /sensenova/v1/models),
                 // return only that platform's models. Otherwise return all.
                 if let Some(filter) = platform_filter {
-                    if platform.id != filter {
+                    if platform.path_prefix != filter {
                         continue;
                     }
                 }
