@@ -77,3 +77,11 @@ src-tauri/minisign/minisign.key
 src/pages/test.txt
 nul
 # Tauri bundle signing key
+
+# Build artifacts
+*.AppImage
+*.msi
+*.exe
+# AI assistant dirs
+.dsh-vision-toolkit/
+.workbuddy/
