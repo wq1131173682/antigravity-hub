@@ -43,6 +43,15 @@ pub struct Platform {
     /// models like gpt-5.6-luna).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Whether the upstream for this platform natively supports the OpenAI
+    /// `developer` message role. When false (the default, safest for
+    /// self-hosted / third-party gateways such as vLLM, Sensenova, Agnes),
+    /// the proxy rewrites any `role: "developer"` messages to `role: "system"`
+    /// before forwarding, since those upstreams reject `developer` with
+    /// HTTP 400 "Unexpected message role". Set true only for upstreams that
+    /// explicitly accept the `developer` role (e.g. OpenAI official).
+    #[serde(default)]
+    pub supports_developer_role: bool,
 }
 
 impl Platform {
@@ -57,6 +66,7 @@ impl Platform {
             created_at: chrono::Utc::now().timestamp(),
             base_url_overrides: Vec::new(),
             default_model: None,
+            supports_developer_role: false,
         }
     }
 }

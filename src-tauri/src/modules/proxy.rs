@@ -585,6 +585,59 @@ fn parse_and_prepare_body(
     }
 }
 
+/// Rewrite every `"role": "developer"` message in a Chat Completions request
+/// body to `"role": "system"`.
+///
+/// Some clients (e.g. DSH) send system-level instructions under the OpenAI
+/// `developer` role. Upstreams that don't implement it (vLLM, Sensenova, Agnes,
+/// …) reject the request with HTTP 400 "Unexpected message role". Since
+/// `developer` is semantically a system-level instruction, mapping it to
+/// `system` preserves intent and keeps those clients working.
+///
+/// Only mutates the `messages` array; everything else passes through unchanged.
+/// Non-JSON or JSON-without-messages bodies are returned untouched.
+fn normalize_developer_role(body_bytes: &[u8]) -> Vec<u8> {
+    let json = match serde_json::from_slice::<serde_json::Value>(body_bytes) {
+        Ok(v) => v,
+        Err(_) => return body_bytes.to_vec(),
+    };
+
+    let messages = match json.get("messages").and_then(|m| m.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => return body_bytes.to_vec(), // no messages to normalize
+    };
+
+    // Fast path: skip if no message uses the developer role.
+    let has_developer = messages.iter().any(
+        |m| m.get("role").and_then(|r| r.as_str()) == Some("developer")
+    );
+    if !has_developer {
+        return body_bytes.to_vec();
+    }
+
+    let mut json = json;
+    if let Some(arr) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for msg in arr.iter_mut() {
+            if let Some(obj) = msg.as_object_mut() {
+                if obj.get("role").and_then(|r| r.as_str()) == Some("developer") {
+                    obj.insert(
+                        "role".to_string(),
+                        serde_json::Value::String("system".to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    match serde_json::to_vec(&json) {
+        Ok(bytes) => {
+            info!("Normalized 'developer' role → 'system' (upstream does not support developer role)");
+            bytes
+        }
+        Err(_) => body_bytes.to_vec(),
+    }
+}
+
 /// Rewrite the request body's `model` field to the platform's default_model when
 /// the requested model is NOT one of the platform's configured models.
 ///
@@ -1218,10 +1271,10 @@ async fn proxy_handler(
     let platform_lookup = get_platform_info(&platform_prefix);
 
     // Determine the effective base_url, platform_id, auto_switch, and target_path
-    let (base_url, platform_id, auto_switch, target_path) = match platform_lookup {
-        Some((base, id, auto)) => {
+    let (base_url, platform_id, auto_switch, supports_developer_role, target_path) = match platform_lookup {
+        Some((base, id, auto, dev_role)) => {
             // Normal: platform prefix matched, use the split remaining path
-            (base, id, auto, remaining_path)
+            (base, id, auto, dev_role, remaining_path)
         }
         None => {
             // No platform matches this path prefix. Previously this silently
@@ -1372,6 +1425,20 @@ async fn proxy_handler(
     let (model_name, body_bytes) =
         apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref(), is_responses_api);
 
+    // ── Developer role compatibility normalization ──
+    // The OpenAI `developer` message role is rejected by many upstreams
+    // (vLLM, Sensenova, Agnes, etc.) with HTTP 400 "Unexpected message role".
+    // When the platform does NOT advertise `supports_developer_role`, rewrite
+    // every `role: "developer"` message to `role: "system"` (semantically
+    // equivalent system-level instruction) so clients like DSH that emit
+    // `developer` roles keep working. Platforms that explicitly support the
+    // role pass through untouched.
+    let body_bytes = if supports_developer_role {
+        body_bytes
+    } else {
+        normalize_developer_role(&body_bytes)
+    };
+
     // ── Reasoning effort sanitization ──
     // Mistral family models (codestral, mistral-small, open-mistral-nemo,
     // pixtral, etc.) and Google Gemini do NOT support `reasoning_effort` at
@@ -1423,12 +1490,17 @@ async fn proxy_handler(
 }
 
 /// Get platform info by path prefix
-fn get_platform_info(prefix: &str) -> Option<(String, String, bool)> {
+fn get_platform_info(prefix: &str) -> Option<(String, String, bool, bool)> {
     use crate::modules::config;
     let config = config::load_app_config().ok()?;
     let platform = config.platforms.iter().find(|p| p.path_prefix == prefix)?;
     let auto_switch = config.auto_switch;
-    Some((platform.base_url.clone(), platform.id.clone(), auto_switch))
+    Some((
+        platform.base_url.clone(),
+        platform.id.clone(),
+        auto_switch,
+        platform.supports_developer_role,
+    ))
 }
 
 /// Resolve the effective base URL for a given target path, taking into account
