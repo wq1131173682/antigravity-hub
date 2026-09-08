@@ -1,20 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 /// Status of an API key
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum KeyStatus {
     /// Key is active and ready for use
     #[serde(rename = "active")]
+    #[default]
     Active,
     /// Key is temporarily disabled (rate limited or server error)
     #[serde(rename = "disabled")]
     Disabled,
-}
-
-impl Default for KeyStatus {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 /// An API key for a platform

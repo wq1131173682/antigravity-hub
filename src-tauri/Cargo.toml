@@ -1,6 +1,6 @@
 [package]
 name = "antigravity_tools"
-version = "5.3.38"
+version = "5.3.39"
 description = "Multi-platform API Account Manager - Simplified Edition"
 authors = ["you"]
 license = "CC-BY-NC-SA-4.0"
@@ -40,8 +40,6 @@ once_cell = "1.19"
 regex = "1.12.2"
 anyhow = "1.0"
 axum = "0.7"
-toml = "0.8"
-clap = { version = "4", features = ["derive", "env"] }
 bytes = "1"
 
 [features]

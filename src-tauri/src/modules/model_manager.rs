@@ -51,6 +51,7 @@ pub fn list_models(platform_id: &str) -> Result<Vec<Model>, String> {
 }
 
 /// Add a new model
+#[allow(clippy::too_many_arguments)]
 pub fn add_model(
     platform_id: String,
     model_name: String,
@@ -75,6 +76,7 @@ pub fn add_model(
 }
 
 /// Update a model
+#[allow(clippy::too_many_arguments)]
 pub fn update_model(
     model_id: &str,
     model_name: Option<String>,

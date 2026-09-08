@@ -1,18 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { usePlatformStore } from '../stores/usePlatformStore';
-import { useConfigStore } from '../stores/useConfigStore';
 import type { Model, Platform } from '../types/platform';
 import type { TestModelResult, UpstreamModelInfo } from '../services/platformService';
 import { showToast } from '../components/common/ToastContainer';
 import { QuotaBar } from '../components/common/QuotaBar';
 import ModalDialog from '../components/common/ModalDialog';
-import * as codexService from '../services/codexService';
-import { CODEX_ENABLED } from '../config/featureFlags';
 import {
   Plus, Trash2, Edit3, Key, Server, Layers,
   Eye, EyeOff, Power, PowerOff, Link2, Unlink,
-  Terminal, X, Wifi, Loader2,
+  X, Wifi, Loader2,
   CheckSquare, Square, Search, Download
 } from 'lucide-react';
 
@@ -375,7 +372,7 @@ function Accounts() {
   const [showEditQuota, setShowEditQuota] = useState(false);
   const [editingModel, setEditingModel] = useState<Model | null>(null);
   const [assigningModelId, setAssigningModelId] = useState<string | null>(null);
-  const [applyingModelToCodex, setApplyingModelToCodex] = useState<string | null>(null);
+
   const [showKeyValues, setShowKeyValues] = useState<Set<string>>(new Set());
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
   const [showBatchDeleteConfirm, setShowBatchDeleteConfirm] = useState(false);
@@ -588,46 +585,6 @@ function Accounts() {
                             <span className="text-xs text-gray-400 font-mono">{model.model_name}</span>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              className={`p-1.5 rounded-lg transition-colors ${
-                                !CODEX_ENABLED
-                                  ? 'text-gray-300 dark:text-gray-600 cursor-not-allowed'
-                                  : applyingModelToCodex === model.id
-                                  ? 'text-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 animate-pulse'
-                                  : 'text-gray-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20'
-                              }`}
-                              disabled={!CODEX_ENABLED}
-                              title={CODEX_ENABLED ? t('codex.apply_to_codex') : 'Codex 集成已停用（功能已封存）'}
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                if (applyingModelToCodex || !selectedPlatform) return;
-                                const appConfig = useConfigStore.getState().config;
-                                if (!appConfig) {
-                                  showToast(t('codex.config_not_loaded'), 'warning');
-                                  return;
-                                }
-                                setApplyingModelToCodex(model.id);
-                                try {
-                                  await codexService.applyCodexConfig({
-                                    proxyHost: appConfig.proxy_host || '127.0.0.1',
-                                    proxyPort: appConfig.proxy_port || 8045,
-                                    pathPrefix: selectedPlatform.path_prefix,
-                                    modelName: model.model_name,
-                                  });
-                                  showToast(t('codex.apply_success'), 'success');
-                                } catch (e) {
-                                  showToast(`${t('common.error')}: ${e}`, 'error');
-                                } finally {
-                                  setApplyingModelToCodex(null);
-                                }
-                              }}
-                            >
-                              {applyingModelToCodex === model.id ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Terminal className="w-3.5 h-3.5" />
-                              )}
-                            </button>
                             <TestModelButton
                               platformId={selectedPlatformId}
                               modelName={model.model_name}

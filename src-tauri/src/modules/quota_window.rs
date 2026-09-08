@@ -51,19 +51,9 @@ impl UsageWindow {
         }
     }
 
-    /// Remove expired AND return the count of remaining (mutable helper).
-    pub fn count_active(&mut self, now: i64, duration_secs: i64) -> u32 {
-        self.clean_expired(now, duration_secs);
-        self.timestamps.len() as u32
-    }
-
     /// Number of entries in the buffer (may include stale entries between records).
     pub fn len(&self) -> u32 {
         self.timestamps.len() as u32
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.timestamps.is_empty()
     }
 
     /// Earliest timestamp in the buffer (for display purposes).
@@ -147,14 +137,6 @@ impl ModelKeyTracker {
         self.five_hour.record(now, Self::FIVE_HOUR_SECS);
         self.day.record(now, Self::DAY_SECS);
         self.month.record(now, Self::MONTH_SECS);
-    }
-
-    /// Clean expired entries in all windows using the current time.
-    pub fn clean_all_windows(&mut self) {
-        let now = chrono::Utc::now().timestamp();
-        self.five_hour.clean_expired(now, Self::FIVE_HOUR_SECS);
-        self.day.clean_expired(now, Self::DAY_SECS);
-        self.month.clean_expired(now, Self::MONTH_SECS);
     }
 
     /// Get which windows are exceeded (based on model limits).
@@ -248,13 +230,6 @@ impl Default for QuotaWindowState {
 }
 
 impl QuotaWindowState {
-    /// Get the best available key for a specific model (lowest total usage).
-    pub fn get_best_available_key_for_model(&self, model_id: &str) -> Option<&ModelKeyTracker> {
-        self.trackers.iter()
-            .filter(|t| t.model_id == model_id && t.is_available())
-            .min_by_key(|t| t.five_hour.len() + t.day.len() + t.month.len())
-    }
-
     pub fn get_tracker_mut(&mut self, key_id: &str, model_id: &str) -> Option<&mut ModelKeyTracker> {
         self.trackers.iter_mut().find(|t| t.key_id == key_id && t.model_id == model_id)
     }
@@ -268,10 +243,6 @@ impl QuotaWindowState {
             ));
         }
         self.get_tracker_mut(key_id, model_id).unwrap()
-    }
-
-    pub fn remove_tracker(&mut self, key_id: &str, model_id: &str) {
-        self.trackers.retain(|t| !(t.key_id == key_id && t.model_id == model_id));
     }
 
     pub fn remove_key_trackers(&mut self, key_id: &str) {
@@ -351,10 +322,6 @@ fn load_quota_state() -> Result<QuotaWindowState, String> {
     }
     let content = fs::read_to_string(&path).map_err(|e| format!("read quota windows failed: {}", e))?;
     serde_json::from_str(&content).map_err(|e| format!("parse quota windows failed: {}", e))
-}
-
-pub fn load_quota_state_internal() -> Result<QuotaWindowState, String> {
-    load_quota_state()
 }
 
 fn save_quota_state_inner(state: &QuotaWindowState) -> Result<(), String> {
@@ -474,11 +441,6 @@ pub fn earliest_cooldown_expiry(candidates: &[String], model_id: &str) -> Option
                 .filter(|until| *until > now)
         })
         .min()
-}
-
-pub fn get_best_available_key_for_model(model_id: &str) -> Result<Option<String>, String> {
-    let state = QUOTA_STATE.lock().map_err(|e| e.to_string())?;
-    Ok(state.get_best_available_key_for_model(model_id).map(|t| t.key_id.clone()))
 }
 
 fn build_window_json(window: &UsageWindow, max: u32) -> serde_json::Value {

@@ -16,6 +16,12 @@ pub struct PathOverride {
 }
 
 /// A third-party API platform (e.g. OpenAI, Anthropic, etc.)
+///
+/// The proxy is a pure pass-through: it routes by `path_prefix`, injects a
+/// rotated API key, and relays request/response bodies untouched. Any
+/// protocol- or model-specific configuration (reasoning effort, developer
+/// role support, model rewriting, ...) is the client's and upstream's
+/// business, not the proxy's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Platform {
     pub id: String,
@@ -36,22 +42,6 @@ pub struct Platform {
     /// Path-specific base URL overrides (e.g., for endpoints at a different API root)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub base_url_overrides: Vec<PathOverride>,
-    /// Default model name to force for this platform (e.g., set when applying
-    /// Codex config). When a request body's `model` is not in the platform's
-    /// configured model list, the proxy rewrites it to this model so upstream
-    /// never sees unknown model names (e.g., Codex's internal memory agent
-    /// models like gpt-5.6-luna).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_model: Option<String>,
-    /// Whether the upstream for this platform natively supports the OpenAI
-    /// `developer` message role. When false (the default, safest for
-    /// self-hosted / third-party gateways such as vLLM, Sensenova, Agnes),
-    /// the proxy rewrites any `role: "developer"` messages to `role: "system"`
-    /// before forwarding, since those upstreams reject `developer` with
-    /// HTTP 400 "Unexpected message role". Set true only for upstreams that
-    /// explicitly accept the `developer` role (e.g. OpenAI official).
-    #[serde(default)]
-    pub supports_developer_role: bool,
 }
 
 impl Platform {
@@ -65,8 +55,6 @@ impl Platform {
             sort_order: 0,
             created_at: chrono::Utc::now().timestamp(),
             base_url_overrides: Vec::new(),
-            default_model: None,
-            supports_developer_role: false,
         }
     }
 }

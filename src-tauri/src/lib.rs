@@ -4,8 +4,6 @@ mod commands;
 mod utils;
 pub mod error;
 pub mod constants;
-/// 流式终止诊断模块（区分 A 类截断 / B 类主动结束，定位故障层）。
-pub use modules::diagnostics;
 
 use modules::logger;
 use tracing::info;
@@ -219,12 +217,6 @@ pub fn run() {
             commands::check_for_updates,
             commands::install_update,
             commands::get_app_version,
-            // Codex CLI integration
-            commands::check_codex_status,
-            commands::apply_codex_config,
-            commands::restore_codex_config,
-            commands::clear_codex_auth,
-            commands::check_codex_env_conflicts,
             // Debug console
             modules::log_bridge::enable_debug_console,
             modules::log_bridge::disable_debug_console,

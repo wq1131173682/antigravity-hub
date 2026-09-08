@@ -48,7 +48,6 @@ fn compare_semver(v1: &str, v2: &str) -> std::cmp::Ordering {
 /// Version source for logging
 #[derive(Debug, PartialEq)]
 enum VersionSource {
-    LocalInstallation,
     KnownStableFallback,
     RemoteAPI,
     #[allow(dead_code)]

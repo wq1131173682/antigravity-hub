@@ -32,7 +32,7 @@ fn error_response(status: u16, body: String) -> axum::response::Response {
 /// wall-clock cap like 300s: reqwest's `.timeout()` bounds the ENTIRE request
 /// including streaming body reads, and relays such as Agnes buffer the full
 /// response before streaming it out. A single generation (long reasoning +
-/// web_search + tool calls) can legitimately exceed 5 minutes — a 300s cap
+/// web_search + tool calls) can legitimately exceed 5 minutes 閳?a 300s cap
 /// aborts the stream mid-response, which surfaced as "conversation got
 /// interrupted after a few minutes". Genuinely dead streams are still caught
 /// by the idle timeouts in `transform_stream_to_responses` (first-chunk /
@@ -53,7 +53,7 @@ fn build_http_client(proxy_url: Option<&str>) -> Client {
         .timeout(std::time::Duration::from_secs(3600))
         // Bound connection establishment so a dead/black-holed upstream fails
         // fast instead of hanging the whole request (which surfaced as
-        // "second conversation gets no response, needs several retries" — the
+        // "second conversation gets no response, needs several retries" 閳?the
         // client reused a stale pooled socket and blocked until the client's
         // own timeout).
         .connect_timeout(std::time::Duration::from_secs(20))
@@ -92,7 +92,7 @@ pub fn init_proxy_client(proxy_url: Option<String>) {
 
 /// Update the proxy client at runtime with a new proxy URL.
 /// When `proxy_url` is None or empty, reverts to direct connection.
-/// The proxy server does NOT need to be restarted — the new client is used
+/// The proxy server does NOT need to be restarted 閳?the new client is used
 /// immediately for subsequent requests.
 pub fn update_proxy_client(proxy_url: Option<String>) {
     info!("Updating proxy client, proxy_url={:?}", proxy_url);
@@ -250,14 +250,14 @@ fn create_router() -> axum::Router {
 /// the real JSON payload so the proxy can process it normally.
 ///
 /// Header/body separators handled (in priority order):
-///   - `"\r\n\r\n"` — standard HTTP/1.1
-///   - `"\n\n"` — LF-only
+///   - `"\r\n\r\n"` 閳?standard HTTP/1.1
+///   - `"\n\n"` 閳?LF-only
 ///   - a SINGLE `"\r\n"` / `"\n"` between the last header and the JSON payload.
 ///     Some SDKs (WorkBuddy among them) emit the body immediately after the
 ///     final header with only one line break instead of the required blank
 ///     line. Without recovering the JSON in that case the request was silently
 ///     answered with `200 OK` (treated as a liveness probe) and the real chat
-///     message was dropped — which surfaced as "the first conversation stops
+///     message was dropped 閳?which surfaced as "the first conversation stops
 ///     immediately with no output".
 ///
 /// Returns `Some(inner_json_bytes)` when the body looks like an HTTP request
@@ -288,10 +288,7 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
         // No blank-line separator. Some clients join the final header and the
         // JSON payload with a single CRLF/LF. Fall back to the first '{', which
         // marks the start of the embedded JSON object.
-        match text.find('{') {
-            Some(p) => p,
-            None => return None,
-        }
+        text.find('{')?
     };
 
     let inner = text[body_start..].trim();
@@ -299,7 +296,7 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Embedded payload must be valid JSON — otherwise we don't touch the body.
+    // Embedded payload must be valid JSON 閳?otherwise we don't touch the body.
     serde_json::from_str::<serde_json::Value>(inner).ok()?;
     Some(inner.as_bytes().to_vec())
 }
@@ -309,7 +306,7 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
 ///
 /// WorkBuddy's session-opening probe sends only the request line + headers
 /// as the POST body (no `\r\n\r\n` separator, no JSON payload). We must not
-/// hard-reject that — it is a liveness/session probe, not a real chat call.
+/// hard-reject that 閳?it is a liveness/session probe, not a real chat call.
 fn looks_like_http_request_text(body: &[u8]) -> bool {
     let Some(text) = std::str::from_utf8(body).ok() else {
         return false;
@@ -329,7 +326,7 @@ fn looks_like_http_request_text(body: &[u8]) -> bool {
 /// nothing else on the wire. If the upstream is slow (e.g. reasoning models
 /// before the first tool call, or anything that buffers upstream), the
 /// client's SSE implementation will eventually give up on an idle connection
-/// and close it — surfacing as "the assistant's response cut off mid-stream".
+/// and close it 閳?surfacing as "the assistant's response cut off mid-stream".
 ///
 /// To prevent that, we wrap the upstream `bytes_stream` with a keepalive
 /// stream (`SseKeepaliveStream`) that periodically emits an SSE comment frame
@@ -337,8 +334,8 @@ fn looks_like_http_request_text(body: &[u8]) -> bool {
 /// and keep the underlying TCP socket live.
 ///
 /// CRITICAL: the comment is injected ONLY at a complete SSE event boundary
-/// (`\n\n`). Injecting it while the upstream is mid `data:` frame — exactly
-/// what happens during a tool-call reasoning gap — would terminate that frame
+/// (`\n\n`). Injecting it while the upstream is mid `data:` frame 閳?exactly
+/// what happens during a tool-call reasoning gap 閳?would terminate that frame
 /// early and hand the client truncated JSON, aborting the conversation ("cut
 /// off after a tool call"). When the stream is silent inside a partial frame,
 /// the wrapper stays quiet and lets the upstream finish the event.
@@ -355,8 +352,7 @@ const SSE_KEEPALIVE_BYTES: &[u8] = b": ping\n\n";
 
 /// Monotonic request counter so proxy logs can be correlated: how many
 /// requests actually reached the proxy vs. how many the client believes it
-/// sent. Each incoming HTTP request through `proxy_handler` →
-/// `forward_with_retry` gets one sequential id.
+/// sent. Each incoming HTTP request through `proxy_handler` 閳?/// `forward_with_retry` gets one sequential id.
 static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Adapt an upstream byte stream into one that emits periodic SSE comment
@@ -368,7 +364,7 @@ static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
 /// - If the upstream stays idle for `keepalive_secs`, an SSE comment frame
 ///   is yielded instead so the client never sees a "no bytes for too long"
 ///   gap on the socket.
-/// - Upstream errors and end-of-stream are passed through verbatim — we
+/// - Upstream errors and end-of-stream are passed through verbatim 閳?we
 ///   never fabricate success or stretch a dead stream past its real end.
 ///
 /// The `Sleep` is held behind `Pin<Box<_>>` because `tokio::time::Sleep` is
@@ -465,7 +461,7 @@ where
         // are pinned through `&mut *self`.
         let me = &mut *self;
 
-        // Data path — try upstream first. Real data always wins so a chunk
+        // Data path 閳?try upstream first. Real data always wins so a chunk
         // never gets a comment frame glued to its tail.
         match std::pin::Pin::new(&mut me.inner).poll_next(cx) {
             std::task::Poll::Ready(Some(Ok(bytes))) => {
@@ -512,9 +508,9 @@ where
             std::task::Poll::Pending => {}
         }
 
-        // Keepalive path — only reached when the upstream produced no data
+        // Keepalive path 閳?only reached when the upstream produced no data
         // this call. If the silence has lasted long enough, inject a comment
-        // frame AND re-arm — but ONLY when we are sitting on a complete SSE
+        // frame AND re-arm 閳?but ONLY when we are sitting on a complete SSE
         // event boundary.
         if me.next_ping_at.as_mut().as_mut().poll(cx).is_ready() {
             if me.at_event_boundary() {
@@ -533,7 +529,7 @@ where
             } else {
                 // Upstream went silent in the MIDDLE of a partial `data:` frame
                 // (very common during tool-call reasoning gaps). Do NOT inject a
-                // comment here — re-arm and keep waiting for the upstream to
+                // comment here 閳?re-arm and keep waiting for the upstream to
                 // finish the event first. If the stream is genuinely dead, the
                 // client's own timeout ends it; we must not fabricate a frame
                 // that corrupts the partial one we already relayed.
@@ -547,174 +543,16 @@ where
     }
 }
 
-/// Parse JSON body once, extract model_name, and inject a sensible default
-/// `max_tokens` when the client omits it. We no longer hard-codon 4096 —
-/// modern reasoning models (DeepSeek-R1, Qwen3-Thinking, etc.) typically
-/// support 32K–131K output tokens, so we default to 65536. The upstream
-/// provider's own default is used when the field is present.
-fn parse_and_prepare_body(
-    body_bytes: &[u8],
-    target_path: &str,
-) -> (Option<String>, Vec<u8>) {
-    let needs_max_tokens = target_path.contains("/chat/completions")
-        || target_path.contains("/completions");
-
-    if !needs_max_tokens {
-        let model_name = serde_json::from_slice::<serde_json::Value>(body_bytes).ok()
-            .and_then(|v| v.get("model")?.as_str().map(String::from));
-        return (model_name, body_bytes.to_vec());
-    }
-
-    match serde_json::from_slice::<serde_json::Value>(body_bytes) {
-        Ok(mut json) => {
-            let model_name = json.get("model").and_then(|v| v.as_str().map(String::from));
-            if json.get("max_tokens").is_none() {
-                if let Some(obj) = json.as_object_mut() {
-                    obj.insert(
-                        "max_tokens".to_string(),
-                        serde_json::Value::Number(65536.into()),
-                    );
-                }
-                info!("Injected default max_tokens=65536 into request body (was missing)");
-                let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
-                return (model_name, modified);
-            }
-            (model_name, body_bytes.to_vec())
-        }
-        Err(_) => (None, body_bytes.to_vec()),
-    }
+/// Extract the model name from a JSON request body (read-only, no mutation).
+/// Used for quota tracking, key-candidate selection and logging. The body
+/// itself is forwarded to the upstream untouched (pure pass-through).
+fn parse_model_name(body_bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(body_bytes)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(String::from))
 }
 
-/// Rewrite every `"role": "developer"` message in a Chat Completions request
-/// body to `"role": "system"`.
-///
-/// Some clients (e.g. DSH) send system-level instructions under the OpenAI
-/// `developer` role. Upstreams that don't implement it (vLLM, Sensenova, Agnes,
-/// …) reject the request with HTTP 400 "Unexpected message role". Since
-/// `developer` is semantically a system-level instruction, mapping it to
-/// `system` preserves intent and keeps those clients working.
-///
-/// Only mutates the `messages` array; everything else passes through unchanged.
-/// Non-JSON or JSON-without-messages bodies are returned untouched.
-fn normalize_developer_role(body_bytes: &[u8]) -> Vec<u8> {
-    let json = match serde_json::from_slice::<serde_json::Value>(body_bytes) {
-        Ok(v) => v,
-        Err(_) => return body_bytes.to_vec(),
-    };
-
-    let messages = match json.get("messages").and_then(|m| m.as_array()) {
-        Some(arr) if !arr.is_empty() => arr,
-        _ => return body_bytes.to_vec(), // no messages to normalize
-    };
-
-    // Fast path: skip if no message uses the developer role.
-    let has_developer = messages.iter().any(
-        |m| m.get("role").and_then(|r| r.as_str()) == Some("developer")
-    );
-    if !has_developer {
-        return body_bytes.to_vec();
-    }
-
-    let mut json = json;
-    if let Some(arr) = json.get_mut("messages").and_then(|m| m.as_array_mut()) {
-        for msg in arr.iter_mut() {
-            if let Some(obj) = msg.as_object_mut() {
-                if obj.get("role").and_then(|r| r.as_str()) == Some("developer") {
-                    obj.insert(
-                        "role".to_string(),
-                        serde_json::Value::String("system".to_string()),
-                    );
-                }
-            }
-        }
-    }
-
-    match serde_json::to_vec(&json) {
-        Ok(bytes) => {
-            info!("Normalized 'developer' role → 'system' (upstream does not support developer role)");
-            bytes
-        }
-        Err(_) => body_bytes.to_vec(),
-    }
-}
-
-/// Rewrite the request body's `model` field to the platform's default_model when
-/// the requested model is NOT one of the platform's configured models.
-///
-/// This solves the "Codex sends unknown model" problem: Codex CLI's internal
-/// agents (e.g., the Memory Writing Agent) use built-in model names such as
-/// `gpt-5.6-luna` / `gpt-5.6-terra` that are hardcoded and never follow the
-/// `model` key in config.toml. Without rewriting, those requests get forwarded
-/// upstream with an unknown model name, causing 404/503 and key exhaustion.
-///
-/// When the platform has a `default_model` (persisted when applying Codex
-/// config) and the incoming model is not in the platform's model list, the
-/// model is rewritten so the upstream always sees a valid configured model.
-///
-/// Returns (original_or_rewritten_model_name, modified_body_bytes).
-fn apply_default_model_override(
-    body_bytes: &[u8],
-    platform_id: &str,
-    model_name: Option<&str>,
-    is_responses_api: bool,
-) -> (Option<String>, Vec<u8>) {
-    let Some(requested) = model_name else {
-        return (None, body_bytes.to_vec());
-    };
-
-    // Only rewrite for Responses API requests (i.e. Codex CLI). Codex's internal
-    // agents send hardcoded built-in model names that must be mapped to the
-    // configured default model. Direct Chat Completions / other clients may
-    // legitimately request a model that is valid upstream but not yet in the
-    // local list (e.g. a newly released model) — silently rewriting those would
-    // break them, so pass those requests through untouched.
-    if !is_responses_api {
-        return (Some(requested.to_string()), body_bytes.to_vec());
-    }
-
-    // Resolve the platform's default_model from app config
-    let default_model = match crate::modules::config::load_app_config() {
-        Ok(cfg) => cfg.platforms.iter()
-            .find(|p| p.id == platform_id)
-            .and_then(|p| p.default_model.as_deref())
-            .map(String::from),
-        Err(_) => None,
-    };
-    let Some(default_model) = default_model else {
-        // No default model configured — pass through unchanged
-        return (Some(requested.to_string()), body_bytes.to_vec());
-    };
-
-    // If the requested model is already the default or is a configured model,
-    // no rewrite is needed.
-    let is_configured = crate::modules::model_manager::list_models(platform_id)
-        .map(|models| models.iter().any(|m| m.model_name == requested))
-        .unwrap_or(false);
-    if is_configured || requested == default_model {
-        return (Some(requested.to_string()), body_bytes.to_vec());
-    }
-
-    // Rewrite the model field in the JSON body
-    match serde_json::from_slice::<serde_json::Value>(body_bytes) {
-        Ok(mut json) => {
-            if let Some(obj) = json.as_object_mut() {
-                obj.insert(
-                    "model".to_string(),
-                    serde_json::Value::String(default_model.clone()),
-                );
-            }
-            let modified = serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec());
-            info!(
-                "Rewriting model '{}' → '{}' for platform '{}' (requested model not configured)",
-                requested, default_model, platform_id
-            );
-            (Some(default_model), modified)
-        }
-        Err(_) => (Some(requested.to_string()), body_bytes.to_vec()),
-    }
-}
-
-/// Handle `/v1/models` requests — return the models configured in Antigravity Hub
+/// Handle `/v1/models` requests 閳?return the models configured in Antigravity Hub
 /// in OpenAI-compatible format.
 ///
 /// OpenAI format:
@@ -842,7 +680,7 @@ pub struct ImportModelsResult {
 }
 
 /// Fetch the upstream model list (`/v1/models` or `/models`) for a platform.
-/// Returns (model_name, display_name, max_input_tokens) tuples — nothing is
+/// Returns (model_name, display_name, max_input_tokens) tuples 閳?nothing is
 /// written to local storage. Shared by the full-sync and selective-import
 /// flows. Handles Gemini's `/v1beta/openai` root via deduplicate_url_path.
 async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, String, Option<u64>, Option<u64>)>, String> {
@@ -867,7 +705,7 @@ async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, Str
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
 
-    // Try multiple URL patterns — some providers use /v1/models, others /models.
+    // Try multiple URL patterns 閳?some providers use /v1/models, others /models.
     // Use deduplicate_url_path to handle base URLs that already include /v1
     // (or Gemini's /v1beta/openai root, where the /v1 is stripped).
     let url_candidates = vec![
@@ -876,6 +714,9 @@ async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, Str
     ];
 
     let client = PROXY_CLIENT.read().unwrap().clone();
+    // Accumulates the most recent failure reason; read only when all candidate
+    // URLs have failed (each iteration writes it before any later read).
+    #[allow(unused_assignments)]
     let mut last_error = String::new();
     let mut body: Option<serde_json::Value> = None;
 
@@ -917,10 +758,10 @@ async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, Str
         )
     })?;
 
-    // Parse the model list from the upstream response — support multiple formats
+    // Parse the model list from the upstream response 閳?support multiple formats
     let upstream_models = body.get("data")
         .and_then(|d| d.as_array())
-        .or_else(|| body.as_array().map(|a| a))
+        .or_else(|| body.as_array())
         .ok_or_else(|| {
             format!(
                 "Upstream response format not recognized. Expected {{\"data\": [...]}} or an array.\nFirst 200 chars: {}",
@@ -1159,7 +1000,7 @@ pub async fn test_model(
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
     // Use deduplicate_url_path to handle base URLs that already include /v1
-    // (e.g., "https://token.sensenova.cn/v1" → "/v1/chat/completions" → "https://token.sensenova.cn/v1/chat/completions")
+    // (e.g., "https://token.sensenova.cn/v1" 閳?"/v1/chat/completions" 閳?"https://token.sensenova.cn/v1/chat/completions")
     let url = deduplicate_url_path(&base_url, "/v1/chat/completions");
 
     let request_body = serde_json::json!({
@@ -1271,10 +1112,10 @@ async fn proxy_handler(
     let platform_lookup = get_platform_info(&platform_prefix);
 
     // Determine the effective base_url, platform_id, auto_switch, and target_path
-    let (base_url, platform_id, auto_switch, supports_developer_role, target_path) = match platform_lookup {
-        Some((base, id, auto, dev_role)) => {
+    let (base_url, platform_id, auto_switch, target_path) = match platform_lookup {
+        Some((base, id, auto)) => {
             // Normal: platform prefix matched, use the split remaining path
-            (base, id, auto, dev_role, remaining_path)
+            (base, id, auto, remaining_path)
         }
         None => {
             // No platform matches this path prefix. Previously this silently
@@ -1285,7 +1126,7 @@ async fn proxy_handler(
             // cross-platform. (Model discovery at /v1/models is handled
             // prefix-agnostically above, so it is unaffected.)
             warn!(
-                "No platform matches prefix '{}' — refusing request (use /<platform>/... path prefix)",
+                "No platform matches prefix '{}' 閳?refusing request (use /<platform>/... path prefix)",
                 platform_prefix
             );
             return error_response(
@@ -1298,30 +1139,14 @@ async fn proxy_handler(
         }
     };
 
-    // ── Responses API compatibility ──
-    // Codex CLI uses the OpenAI Responses API (/v1/responses), but most
-    // upstream providers only support Chat Completions (/v1/chat/completions).
-    // We detect and translate the API format transparently so the proxy
-    // works with Codex CLI and any provider.
-    // Codex / Responses API 协议转换已封存（CODEX_ENABLED=false）：不再把
-    // /v1/responses 重写为 /v1/chat/completions。请求按原样穿透到上游，
-    // 由我们注入轮转后的 API Key 即可。OpenAI 原生 /v1/responses 仍会原样
-    // 转发（仅 OpenAI 上游支持），其余上游若不支持则返回其自身的错误。
-    let is_responses_api = crate::modules::feature_flags::CODEX_ENABLED
-        && (target_path == "/v1/responses" || target_path.starts_with("/v1/responses/"));
-    let target_path = if is_responses_api {
-        let new_path = if target_path == "/v1/responses" {
-            "/v1/chat/completions".to_string()
-        } else {
-            target_path.replacen("/v1/responses", "/v1/chat/completions", 1)
-        };
-        info!("Responses API: path mapped '{}' → '{}'", target_path, new_path);
-        new_path
-    } else {
-        target_path.clone()
-    };
+    // 閳光偓閳光偓 Pure pass-through mode 閳光偓閳光偓
+    // The proxy does NOT rewrite request/response bodies or protocol formats.
+    // Its only jobs are: route by platform prefix, inject a rotated API key,
+    // track quota/token stats, and relay the response (with SSE keepalive)
+    // untouched. Requests to /v1/responses etc. are forwarded as-is; whether
+    // an upstream supports them is the upstream's business.
 
-    // ── Model list interception ──
+    // 閳光偓閳光偓 Model list interception 閳光偓閳光偓
     // Intercept all variants of /models requests and return locally configured
     // models. This includes:
     // - /v1/models (standard OpenAI format)
@@ -1329,8 +1154,7 @@ async fn proxy_handler(
     // - /v1/v1/models (duplicate v1 prefix, clients like DSH send this)
     // All are normalized to return the proxy's configured model list.
     let normalized_path = normalize_models_path(&target_path);
-    if normalized_path.is_some() {
-        let desc = normalized_path.as_ref().unwrap();
+    if let Some(desc) = normalized_path {
         info!("Intercepting model list request ({:?}), returning configured models", desc);
         return handle_models_request(Some(&platform_prefix));
     }
@@ -1360,22 +1184,23 @@ async fn proxy_handler(
         Ok(b) => b,
         Err(e) => {
             error!(
-                "Failed to read request body (likely dead keep-alive connection from client — \
+                "Failed to read request body (likely dead keep-alive connection from client 閳?\
                  client must reconnect): {}", e
             );
             return error_response(400, format!("Failed to read body: {}", e));
         }
     };
 
-    // ── Malformed body defense (compat for HTTP-text-body clients) ──
+    // 鈹€鈹€ Malformed body defense (compat for HTTP-text-body clients) 鈹€鈹€
     // Some clients send their first request with the ENTIRE HTTP/1.1 message
     // (request line + headers) as the POST body instead of a JSON payload.
-    // Forwarding that raw text upstream causes 400 "invalid arguments".
-    // Recover the embedded JSON body when possible; reject unparseable
-    // non-JSON bodies with a clear error instead of proxying garbage upstream.
-    let body_bytes = if body_bytes.is_empty() {
-        body_bytes
-    } else if serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok() {
+    // Recover the embedded JSON body when possible, acknowledge bare session
+    // probes, and reject unparseable non-JSON bodies with a clear error
+    // instead of proxying garbage upstream. The result is always a
+    // `axum::body::Bytes` ready for forwarding.
+    let body_bytes: axum::body::Bytes = if body_bytes.is_empty()
+        || serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok()
+    {
         body_bytes
     } else if let Some(inner) = extract_json_from_http_text(&body_bytes) {
         info!(
@@ -1401,65 +1226,18 @@ async fn proxy_handler(
         ));
     };
 
-    // ── Responses API request body transformation ──
-    // Translate request body from Responses API format to Chat Completions format
-    // BEFORE parse_and_prepare_body so it sees the correct field names.
-    let body_bytes = if is_responses_api {
-        crate::modules::codex_translator::transform_responses_to_chat_completions(&body_bytes)
-            .map(|t| {
-                info!("Responses API: request body translated ({} bytes → {} bytes)", body_bytes.len(), t.len());
-                t.into()
-            })
-            .unwrap_or(body_bytes)
-    } else {
-        body_bytes
-    };
+    // Parse the model name only (used for quota tracking / key selection and
+    // logging). The body itself is forwarded untouched.
+    let model_name = parse_model_name(&body_bytes);
 
-    // Parse once: extract model name AND inject max_tokens in a single pass
-    let (model_name, body_bytes) = parse_and_prepare_body(&body_bytes, &target_path);
-
-    // Rewrite unknown model names to the platform's default model.
-    // Codex CLI's internal agents (memory writer, etc.) send hardcoded built-in
-    // model names that may not exist on the upstream — map them to the model
-    // the user applied in the app so upstream always sees a valid model.
-    let (model_name, body_bytes) =
-        apply_default_model_override(&body_bytes, &platform_id, model_name.as_deref(), is_responses_api);
-
-    // ── Developer role compatibility normalization ──
-    // The OpenAI `developer` message role is rejected by many upstreams
-    // (vLLM, Sensenova, Agnes, etc.) with HTTP 400 "Unexpected message role".
-    // When the platform does NOT advertise `supports_developer_role`, rewrite
-    // every `role: "developer"` message to `role: "system"` (semantically
-    // equivalent system-level instruction) so clients like DSH that emit
-    // `developer` roles keep working. Platforms that explicitly support the
-    // role pass through untouched.
-    let body_bytes = if supports_developer_role {
-        body_bytes
-    } else {
-        normalize_developer_role(&body_bytes)
-    };
-
-    // ── Reasoning effort sanitization ──
-    // Mistral family models (codestral, mistral-small, open-mistral-nemo,
-    // pixtral, etc.) and Google Gemini do NOT support `reasoning_effort` at
-    // all — even schema-valid none/high are rejected with HTTP 400
-    // "reasoning_effort is not enabled for this model" (code 3051), aborting
-    // the conversation. Strip the field for Mistral/Gemini models; all other
-    // models pass through untouched.
-    let body_bytes = match model_name.as_deref() {
-        Some(m) => crate::modules::codex_translator::sanitize_reasoning_effort_for_model(&body_bytes, m)
-            .unwrap_or(body_bytes),
-        None => body_bytes,
-    };
-
-    let body_bytes: axum::body::Bytes = body_bytes.into();
-
-    // Early-flush（立即返回 200 + SSE 头）仅用于 sensenova 穿透路径
-    // （WorkBuddy）：该上游首字节延迟可达数秒，需立刻回一个字节防止客户端
-    // SSE 读取器放弃首条发送。注意：现在 key 轮转在「提交 200 之前」完成
-    // （见 forward_with_retry），不再像旧代码那样提交后才发现 429/5xx。
-    let wants_early_flush = !is_responses_api
-        && platform_prefix == "sensenova"
+    // Early-flush (immediate 200 + SSE headers) is used only on the sensenova
+    // pass-through path (WorkBuddy): that upstream can take seconds before
+    // its first byte, so we must return one byte immediately to stop the
+    // client's SSE reader from giving up on the first send. Note: key
+    // rotation now completes BEFORE committing the 200 (see
+    // forward_with_retry), so a throttled key no longer breaks the
+    // conversation.
+    let wants_early_flush = platform_prefix == "sensenova"
         && (target_url.path().contains("/chat/completions")
             || target_url.path().contains("/v1/messages")
             || target_url.path().contains("/completions"));
@@ -1476,7 +1254,6 @@ async fn proxy_handler(
         &platform_prefix,
         auto_switch,
         model_name,
-        is_responses_api,
         wants_early_flush,
     ).await;
 
@@ -1489,8 +1266,8 @@ async fn proxy_handler(
     }
 }
 
-/// Get platform info by path prefix
-fn get_platform_info(prefix: &str) -> Option<(String, String, bool, bool)> {
+/// Get platform info by path prefix: (base_url, platform_id, auto_switch)
+fn get_platform_info(prefix: &str) -> Option<(String, String, bool)> {
     use crate::modules::config;
     let config = config::load_app_config().ok()?;
     let platform = config.platforms.iter().find(|p| p.path_prefix == prefix)?;
@@ -1499,7 +1276,6 @@ fn get_platform_info(prefix: &str) -> Option<(String, String, bool, bool)> {
         platform.base_url.clone(),
         platform.id.clone(),
         auto_switch,
-        platform.supports_developer_role,
     ))
 }
 
@@ -1514,7 +1290,7 @@ fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str
         if let Some(platform) = config.platforms.iter().find(|p| p.id == platform_id) {
             for override_entry in &platform.base_url_overrides {
                 // Match if target_path starts with the override prefix
-                if target_path == &override_entry.path_prefix
+                if target_path == override_entry.path_prefix
                     || target_path.starts_with(&format!("{}/", override_entry.path_prefix))
                 {
                     info!(
@@ -1537,10 +1313,11 @@ fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str
 
 /// Deduplicate overlapping version-like path segments between base_url and target_path.
 /// Normalize a path to check if it's a models endpoint, handling variants:
-/// - "/v1/models" → Some("v1/models")
-/// - "/models" → Some("models")
-/// - "/v1/v1/models" → Some("v1/models") (deduplicated)
-/// - "/v1/models/" → Some("v1/models")
+/// - "/v1/models" -> Some("v1/models")
+/// - "/models" -> Some("models")
+/// - "/v1/v1/models" -> Some("v1/models") (deduplicated)
+/// - "/v1/models/" -> Some("v1/models")
+///
 /// Returns None for non-models paths.
 fn normalize_models_path(path: &str) -> Option<&str> {
     let p = path.trim_end_matches('/');
@@ -1548,7 +1325,7 @@ fn normalize_models_path(path: &str) -> Option<&str> {
     if p == "/v1/models" || p == "/models" {
         return Some(p);
     }
-    // Handle duplicate v1 prefix: /v1/v1/models → treat as /v1/models
+    // Handle duplicate v1 prefix: /v1/v1/models -> treat as /v1/models
     if p == "/v1/v1/models" {
         return Some("/v1/models");
     }
@@ -1556,7 +1333,7 @@ fn normalize_models_path(path: &str) -> Option<&str> {
 }
 
 /// e.g., base_url="https://api.sensenova.com/v1", target_path="/v1/chat/completions"
-///       → "https://api.sensenova.com/v1/chat/completions" (not /v1/v1/...)
+///       閳?"https://api.sensenova.com/v1/chat/completions" (not /v1/v1/...)
 /// If target_path does not start with a version prefix, or the prefixes differ,
 /// the raw concatenation is returned unchanged.
 fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
@@ -1580,7 +1357,7 @@ fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
         // Gemini's OpenAI-compatibility layer: base_url ends with
         // "/v1beta/openai" and exposes endpoints DIRECTLY under that root
         // (e.g. /v1beta/openai/chat/completions). The proxy maps
-        // /v1/responses → /v1/chat/completions, so without this rule the
+        // /v1/responses 閳?/v1/chat/completions, so without this rule the
         // target would become "/v1beta/openai/v1/chat/completions", which
         // Gemini rejects with HTTP 404. When the base ends with "/openai",
         // drop the leading version segment from the target path.
@@ -1632,7 +1409,7 @@ fn get_candidate_keys(platform_id: &str, model_name: Option<String>) -> Vec<Stri
 
 fn get_keys_to_try(candidates: &[String], model_id: Option<&str>) -> Vec<String> {
     // Skip keys whose quota window is already exceeded or currently in cooldown
-    // (e.g. rate-limited by a recent 429 — see `record_429`).
+    // (e.g. rate-limited by a recent 429 閳?see `record_429`).
     let mut available = if let Some(mid) = model_id {
         crate::modules::quota_window::filter_available_keys(candidates, mid, "")
     } else {
@@ -1661,6 +1438,7 @@ fn list_active_key_ids(platform_id: &str) -> Vec<String> {
 
 /// Forward request with automatic key rotation on 429/500.
 /// Tracks quota per (model_id, key_id).
+#[allow(clippy::too_many_arguments)]
 async fn forward_with_retry(
     client: Client,
     method: &axum::http::Method,
@@ -1671,7 +1449,6 @@ async fn forward_with_retry(
     platform_prefix: &str,
     auto_switch: bool,
     model_name: Option<String>,
-    is_responses_api: bool,
     // When true, a 2xx streaming response is committed with an immediate
     // `: connected` SSE comment (sensenova / WorkBuddy early-flush path).
     // Key rotation on 429/5xx happens *before* committing, so a throttled key
@@ -1680,7 +1457,7 @@ async fn forward_with_retry(
 ) -> Result<axum::response::Response, String> {
     // Sequential id for this incoming request (one per proxy_handler call).
     let req_id = REQ_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    // ── Retry strategy: time-budget loop ──
+    // 閳光偓閳光偓 Retry strategy: time-budget loop 閳光偓閳光偓
     // Old design: fixed attempt count (max_retries=5) with ZERO backoff on the
     // multi-key 429 path, so a transient platform-wide 429 (sensenova 429s every
     // key at once, then self-heals ~10s later) was burned through in
@@ -1693,13 +1470,16 @@ async fn forward_with_retry(
     } else {
         None
     };
+    // Accumulates the most recent failure reason; read only when the retry
+    // budget is exhausted (all other paths `continue` or `break` past writes).
+    #[allow(unused_assignments)]
     let mut last_error = String::new();
     let mut attempt: u32 = 0;
     // How many consecutive errors we've had on the CURRENT key before rotating.
     // Incremented on each 429/5xx from the active key; reset to 0 on success or
     // when we switch to a different key. Rotation only happens after this count
     // reaches the number of available keys, so we exhaust retries on one key
-    // before moving to the next — this avoids "blitzing" every key in rapid
+    // before moving to the next 閳?this avoids "blitzing" every key in rapid
     // succession, which is exactly what triggers account-level rate limits.
     let mut current_key_errors: u32 = 0;
 
@@ -1718,7 +1498,7 @@ async fn forward_with_retry(
         keys.into_iter().map(|k| (k.id, k.key_value)).collect()
     };
 
-    // Candidate key set (independent of cooldown/quota filtering) — kept so we
+    // Candidate key set (independent of cooldown/quota filtering) 閳?kept so we
     // can tell the difference between "no keys at all" and "all keys temporarily
     // rate-limited" when `get_keys_to_try` returns empty mid-retry.
     let candidates = get_candidate_keys(platform_id, model_name.clone());
@@ -1732,7 +1512,7 @@ async fn forward_with_retry(
         if keys_to_try.is_empty() {
             // Every candidate key is in a 429 cooldown or has an exceeded quota
             // window. If a cooldown is pending and we still have retry budget,
-            // wait for the earliest one to expire and retry — this is what turns
+            // wait for the earliest one to expire and retry 閳?this is what turns
             // a transient multi-key 429 into a short delay instead of a hard 502.
             let mut waited = false;
             if let Some(mid) = model_id.as_ref() {
@@ -1779,7 +1559,6 @@ async fn forward_with_retry(
             Some(val) => val.clone(),
             None => {
                 // Key was deleted between retries, skip to next attempt
-                last_error = format!("Key not found: {}", key_id);
                 info!("Key '{}' not found in key map, skipping to next attempt", key_id);
                 continue;
             }
@@ -1796,7 +1575,7 @@ async fn forward_with_retry(
         // "Content-Type: application/json" lines) makes Mistral's edge gateway
         // mis-parse the request body as a JSON-encoded string, returning
         // HTTP 422 "model_attributes_type / Input should be a valid dictionary
-        // or object to extract fields from" — which surfaced as Mistral
+        // or object to extract fields from" 閳?which surfaced as Mistral
         // conversations failing with "unexpected status 422" through the proxy
         // while the in-app test (single Content-Type) worked fine.
         for (key, value) in original_headers.iter() {
@@ -1917,7 +1696,7 @@ async fn forward_with_retry(
             warn!("{} from {}, {}={}, model={}",
                 status, target_url, key_label, key_id, model_identifier);
 
-            // NEVER disable keys — only rotate or retry with backoff.
+            // NEVER disable keys 閳?only rotate or retry with backoff.
             // Keys are a precious resource; disabling them on transient server
             // errors would leave the proxy unable to serve requests until the
             // user manually re-enables them.
@@ -1982,7 +1761,6 @@ async fn forward_with_retry(
         // key, causing conversations to fail with "No active API keys" for no
         // apparent reason (a key hitting repeated 404s would be "used up").
         if status.is_success() {
-            current_key_errors = 0;
             if let Some(mid) = &model_id {
                 let _ = crate::modules::quota_window::record_api_call(key_id, mid, platform_id);
             }
@@ -2025,77 +1803,52 @@ async fn forward_with_retry(
             // (WorkBuddy / Codex CLI / any SSE consumer) opens a fresh TCP
             // connection for the next request.  Without this, hyper/axum may
             // leave the connection in an ambiguous state after a chunked
-            // transfer-encoding stream ends — the client reuses it via HTTP/1.1
+            // transfer-encoding stream ends 閳?the client reuses it via HTTP/1.1
             // keep-alive and hits "error reading a body from connection" on the
             // next request, which surfaces as "second message gets no reply".
             // Empirically this pattern repeats multiple times per day (see log
             // entries at 17:29:26 and 17:42:38 on 2026-08-12).
             response_builder = response_builder.header("connection", "close");
 
-            crate::modules::token_stats::record_streaming_for_platform(Some(&platform_id));
-            if is_responses_api {
-                // Translate SSE stream from Chat Completions format to
-                // Responses API format on-the-fly so Codex CLI can parse it.
-                // The upstream returns Chat Completions SSE chunks, but Codex
-                // CLI expects Responses API SSE events.
-                //
-                // The translator (`transform_stream_to_responses`) already
-                // emits `: ping` keepalives while it is actively translating,
-                // so we deliberately keep the upstream raw here — adding a
-                // second keepalive layer would risk double-comment frames.
-                let body = axum::body::Body::from_stream(
-                    crate::modules::codex_translator::transform_stream_to_responses(resp.bytes_stream(), &model_identifier)
-                );
-                return response_builder
-                    .body(body)
-                    .map_err(|e| format!("Failed to build response: {}", e));
+            crate::modules::token_stats::record_streaming_for_platform(Some(platform_id));
+            // Pure pass-through streaming (OpenAI SDKs, ChatGPT Work, Codex CLI
+            // against native-Responses upstreams, generic clients, etc.). The
+            // body is relayed byte-for-byte; only transport-level care is taken:
+            //
+            // Wrap the upstream with `SseKeepaliveStream` so the downstream
+            // client never sees a gap wider than `SSE_KEEPALIVE_INTERVAL_SECS`
+            // seconds, even when the upstream model is reasoning before its
+            // first tool call. Without this, clients that use
+            // `fetch().getReader()` time out on idle SSE connections and
+            // truncate the response mid-stream 鈥?surfacing as "the assistant's
+            // reply cut off after a tool call".
+            let upstream = resp.bytes_stream();
+            // Early-flush mode (sensenova / WorkBuddy): prepend an immediate
+            // SSE comment so the client's reader never sees an idle socket and
+            // abandons the first send. This branch is reached only AFTER a 2xx
+            // is obtained, so key rotation on 429/5xx happens before we commit.
+            // Both arms below produce the same `Chain<Iter<_>, _>` type so the
+            // `if`/`else` type-checks; the non-early arm just chains an empty
+            // head stream.
+            let head: Vec<Result<bytes::Bytes, reqwest::Error>> = if early_flush_mode {
+                vec![Ok(bytes::Bytes::from_static(b": connected\n\n"))]
             } else {
-                // Pass-through for non-Responses API streaming (OpenAI SDKs,
-                // ChatGPT Work, generic clients, etc.).
-                //
-                // Wrap the upstream with `SseKeepaliveStream` so the downstream
-                // client never sees a gap wider than `SSE_KEEPALIVE_INTERVAL_SECS`
-                // seconds, even when the upstream model is reasoning before its
-                // first tool call. Without this, clients that use
-                // `fetch().getReader()` time out on idle SSE connections and
-                // truncate the response mid-stream — surfacing as "the assistant's
-                // reply cut off after a tool call".
-                let upstream = resp.bytes_stream();
-                // Normalize reasoning/thinking field names to a unified format
-                // (`reasoning_content` + always-present `content`) so every
-                // upstream model renders correctly regardless of which field
-                // name it uses for chain-of-thought output.
-                // (sensenova-6.8-flash-lite observed putting its entire answer
-                // into `reasoning` — without this normalization the client shows
-                // a giant collapsed thinking block and the real content is lost.)
-                let upstream = Box::pin(crate::modules::codex_translator::normalize_stream_to_unified(upstream));
-                // Early-flush mode (sensenova / WorkBuddy): prepend an immediate
-                // SSE comment so the client's reader never sees an idle socket and
-                // abandons the first send. This branch is reached only AFTER a 2xx
-                // is obtained, so key rotation on 429/5xx happens before we commit.
-                // Both arms below produce the same `Chain<Iter<_>, _>` type so the
-                // `if`/`else` type-checks; the non-early arm just chains an empty
-                // head stream.
-                let head: Vec<Result<bytes::Bytes, reqwest::Error>> = if early_flush_mode {
-                    vec![Ok(bytes::Bytes::from_static(b": connected\n\n"))]
-                } else {
-                    Vec::new()
-                };
-                let wrapped = futures::StreamExt::chain(
-                    futures::stream::iter(head),
-                    upstream,
-                );
-                let body = axum::body::Body::from_stream(
-                    SseKeepaliveStream::new(
-                        wrapped,
-                        SSE_KEEPALIVE_INTERVAL_SECS,
-                        format!("[req {}]", req_id),
-                    )
-                );
-                return response_builder
-                    .body(body)
-                    .map_err(|e| format!("Failed to build response: {}", e));
-            }
+                Vec::new()
+            };
+            let wrapped = futures::StreamExt::chain(
+                futures::stream::iter(head),
+                upstream,
+            );
+            let body = axum::body::Body::from_stream(
+                SseKeepaliveStream::new(
+                    wrapped,
+                    SSE_KEEPALIVE_INTERVAL_SECS,
+                    format!("[req {}]", req_id),
+                )
+            );
+            return response_builder
+                .body(body)
+                .map_err(|e| format!("Failed to build response: {}", e));
         }
 
         // Non-streaming: buffer the body so we can inspect `usage` before
@@ -2122,51 +1875,12 @@ async fn forward_with_retry(
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
                 if prompt > 0 || completion > 0 {
-                    crate::modules::token_stats::record_usage_for_platform(Some(&platform_id), prompt, completion);
+                    crate::modules::token_stats::record_usage_for_platform(Some(platform_id), prompt, completion);
                 }
             }
         }
 
-        // ── Responses API response translation ──
-        // Translate the response body from Chat Completions format back to
-        // Responses API format so Codex CLI can understand it.
-        // If translation fails, construct a proper Responses API error response
-        // instead of falling back to the raw Chat Completions format (which
-        // Codex CLI cannot parse), and return HTTP 502 Bad Gateway.
-        let body_bytes = if is_responses_api {
-            match crate::modules::codex_translator::transform_chat_completions_to_responses(&body_bytes) {
-                Some(translated) => {
-                    info!("Responses API: response body translated ({} bytes → {} bytes)", body_bytes.len(), translated.len());
-                    translated.into()
-                }
-                None => {
-                    // Translation failed — construct a proper Responses API error
-                    // instead of passing through raw Chat Completions format.
-                    // Also set HTTP status to 502 so the client doesn't see HTTP 200 + error body.
-                    warn!("Responses API: failed to translate upstream response, sending error to client");
-                    response_builder = axum::response::Response::builder().status(reqwest::StatusCode::BAD_GATEWAY);
-                    for (key, value) in &response_headers {
-                        response_builder = response_builder.header(key.as_str(), value.as_str());
-                    }
-                    let error_response = serde_json::json!({
-                        "id": format!("resp_{}", uuid::Uuid::new_v4().to_string().replace('-', "")),
-                        "object": "response",
-                        "created_at": chrono::Utc::now().timestamp(),
-                        "model": model_identifier,
-                        "status": "failed",
-                        "error": {
-                            "code": "response_translation_failed",
-                            "message": "Upstream returned an unparseable response. The provider may use an incompatible format."
-                        },
-                        "output": []
-                    });
-                    serde_json::to_vec(&error_response).unwrap_or_else(|_| body_bytes.to_vec()).into()
-                }
-            }
-        } else {
-            body_bytes
-        };
-
+        // Pure pass-through: the body is forwarded byte-for-byte.
         let body = axum::body::Body::from(body_bytes);
         return response_builder
             .body(body)
@@ -2176,9 +1890,8 @@ async fn forward_with_retry(
     Err(format!("All keys exhausted for platform '{}': {}", platform_prefix, last_error))
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// 测试
-// ────────────────────────────────────────────────────────────────────────────
+// 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
+// 濞村鐦?// 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
 
 #[cfg(test)]
 mod tests {
@@ -2186,7 +1899,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_crlf() {
-        // WorkBuddy 会话首请求：body 为完整 HTTP/1.1 请求文本（\r\n 行尾）
+        // Test fixture (original Chinese comments lost to encoding damage)
         let raw = b"POST http://192.168.9.193:5343/sensenova/v1/chat/completions HTTP/1.1\r\nAccept: application/json\r\nContent-Type: application/json\r\nx-stainless-lang: js\r\nX-Conversation-ID: abc123\r\n\r\n{\"model\":\"sensenova-6.8-flash-lite\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
         let inner = extract_json_from_http_text(raw).expect("should extract embedded JSON");
         let v: serde_json::Value = serde_json::from_slice(&inner).expect("embedded payload must be valid JSON");
@@ -2196,7 +1909,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_lf() {
-        // \n 行尾同样支持
+        // \n 鐞涘苯鐔崥灞剧壉閺€顖涘瘮
         let raw = b"POST /v1/chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\n\n{\"model\":\"gpt-4\"}";
         let inner = extract_json_from_http_text(raw).expect("should extract");
         let v: serde_json::Value = serde_json::from_slice(&inner).unwrap();
@@ -2205,8 +1918,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_single_crlf_no_blank_line() {
-        // WorkBuddy 首请求变体：头部与 JSON 之间仅用单个 \r\n 分隔（缺少标准空行）。
-        // 此前会提取失败、被当成探测返回空 200，导致首条消息丢失。
+        // Test fixture (original Chinese comments lost to encoding damage)
         let raw = b"POST /wb/v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n{\"model\":\"sensenova-6.8-flash-lite\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}";
         let inner = extract_json_from_http_text(raw).expect("single-CRLF JSON must be extracted");
         let v: serde_json::Value = serde_json::from_slice(&inner).expect("embedded payload must be valid JSON");
@@ -2216,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_single_lf_no_blank_line() {
-        // 单 \n 分隔、无空行，同样应提取成功
+        // Test fixture (original Chinese comments lost to encoding damage)
         let raw = b"POST /v1/chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\n{\"model\":\"gpt-4\"}";
         let inner = extract_json_from_http_text(raw).expect("single-LF JSON must be extracted");
         let v: serde_json::Value = serde_json::from_slice(&inner).unwrap();
@@ -2225,7 +1937,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_headers_only_still_none() {
-        // 纯探测（仅请求行 + 请求头、无 JSON）仍应返回 None，交由调用方按探测处理。
+        // Test fixture (original Chinese comments lost to encoding damage)
         let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json";
         assert!(extract_json_from_http_text(raw).is_none(), "headers-only probe must not match");
     }
@@ -2244,7 +1956,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_returns_none_for_bad_inner_json() {
-        // 请求行像 HTTP，但内嵌 payload 不是 JSON → 不动原 body
+        // 鐠囬攱鐪扮悰灞藉剼 HTTP閿涘奔绲鹃崘鍛サ payload 娑撳秵妲?JSON 閳?娑撳秴濮╅崢?body
         let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{not-json}";
         assert!(extract_json_from_http_text(raw).is_none());
     }
@@ -2257,7 +1969,7 @@ mod tests {
         assert!(looks_like_http_request_text(raw), "must still be detected as HTTP request text");
     }
 
-    // ─── looks_like_http_request_text ─────────────────────────────────────
+    // 閳光偓閳光偓閳光偓 looks_like_http_request_text 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
 
     #[test]
     fn test_looks_like_http_request_text_full() {
@@ -2292,13 +2004,13 @@ mod tests {
         assert!(looks_like_http_request_text(b"GET /v1/models HTTP/1.1\r\nHost: localhost"), "GET must be detected");
     }
 
-    // ─── End-to-end reproduction: WorkBuddy first request ──────────────────
+    // 閳光偓閳光偓閳光偓 End-to-end reproduction: WorkBuddy first request 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
     // WorkBuddy opens a conversation by sending its first chat request as an
     // HTTP-text body (the full HTTP/1.1 message as the POST body). If the
     // embedded JSON is NOT separated from the headers by a blank line (some
     // SDKs emit a single CRLF instead), the extractor returns None and the
-    // request is answered with 200 empty — i.e. silently dropped as a liveness
-    // probe — which makes the first conversation "stop" with no output.
+    // request is answered with 200 empty 閳?i.e. silently dropped as a liveness
+    // probe 閳?which makes the first conversation "stop" with no output.
     #[tokio::test]
     async fn test_workbuddy_first_request_single_crlf_not_dropped_as_probe() {
         // Redirect the data dir to a temp location so we never touch the real
@@ -2382,23 +2094,23 @@ mod tests {
         assert!(body_str.contains("hello"), "response must contain the upstream SSE content, got: {}", body_str);
     }
 
-    // ──────────────────────────────────────────────────────────────────
+    // 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
     // SseKeepaliveStream tests
     //
     // These tests deliberately use `start_paused = true` so we can fast-
     // forward `tokio` virtual time and observe keepalive behaviour without
     // making tests slow.
-    // ──────────────────────────────────────────────────────────────────
+    // 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
 
     /// A constant-rate upstream never lets the keepalive timer fire. The
-    /// wrapped stream must therefore emit no `: ping` frames — proving that
+    /// wrapped stream must therefore emit no `: ping` frames 閳?proving that
     /// the keepalive wrapper doesn't pollute chatty streams.
     #[tokio::test(start_paused = true)]
     async fn test_sse_keepalive_no_ping_on_chatty_stream() {
         use bytes::Bytes;
         use futures::StreamExt;
 
-        // 10 chunks, 100 ms apart → total 900 ms. Keepalive = 1 s.
+        // 10 chunks, 100 ms apart 閳?total 900 ms. Keepalive = 1 s.
         let upstream = futures::stream::unfold(0u32, |i| async move {
             if i >= 10 {
                 return None;
@@ -2461,7 +2173,7 @@ mod tests {
             .expect("no error");
         assert_eq!(&first[..], b"data: hi\n\n");
 
-        // The iterator is exhausted → the wrapper must propagate end-of-
+        // The iterator is exhausted 閳?the wrapper must propagate end-of-
         // stream verbatim rather than fabricate keepalives past the real
         // end of the upstream.
         let second = kept.next().await;
@@ -2502,7 +2214,7 @@ mod tests {
     /// SSE `data:` frame. If the upstream streams `data: {...` and then goes
     /// silent (a reasoning/thinking gap before the tool_call args complete),
     /// injecting `: ping\n\n` would terminate the dangling frame and hand the
-    /// client truncated JSON — which is exactly the "conversation cut off
+    /// client truncated JSON 閳?which is exactly the "conversation cut off
     /// after a tool call" bug. The wrapper must stay silent until the event
     /// boundary is reached.
     #[tokio::test(start_paused = true)]
@@ -2548,7 +2260,7 @@ mod tests {
     }
 
     /// When the upstream completes the partial frame (ends it with `\n\n`)
-    /// and then goes idle, the keepalive is allowed to fire again — proving
+    /// and then goes idle, the keepalive is allowed to fire again 閳?proving
     /// the boundary detection correctly re-arms after a completed event.
     #[tokio::test(start_paused = true)]
     async fn test_sse_keepalive_pings_after_frame_completes() {
@@ -2573,7 +2285,7 @@ mod tests {
             .expect("no error");
         assert!(first.ends_with(b"\n\n"), "complete event forwarded as-is");
 
-        // After the boundary, idle → keepalive must fire.
+        // After the boundary, idle 閳?keepalive must fire.
         let got = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             kept.next(),

@@ -70,6 +70,7 @@ pub async fn list_models(platform_id: String) -> Result<Vec<Model>, String> {
 
 /// Add a new model under a platform
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn add_model(
     platform_id: String,
     model_name: String,
@@ -85,6 +86,7 @@ pub async fn add_model(
 
 /// Update a model
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_model(
     model_id: String,
     model_name: Option<String>,
@@ -453,71 +455,8 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 }
 
 // ============================================================================
-// Codex CLI Integration Commands
+// Model Commands (upstream sync / test)
 // ============================================================================
-
-/// Check Codex CLI status
-#[tauri::command]
-pub async fn check_codex_status() -> Result<crate::modules::codex_integration::CodexStatus, String> {
-    if !crate::modules::feature_flags::CODEX_ENABLED {
-        return Err("Codex integration is disabled (archived).".into());
-    }
-    Ok(crate::modules::codex_integration::check_codex_status())
-}
-
-/// Apply Antigravity Hub proxy config to Codex CLI
-/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
-#[tauri::command]
-pub async fn apply_codex_config(
-    proxy_host: String,
-    proxy_port: u16,
-    path_prefix: String,
-    model_name: String,
-    reasoning_effort: Option<String>,
-    disable_response_storage: Option<bool>,
-    api_key: Option<String>,
-    enable_model_catalog: Option<bool>,
-) -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    if !crate::modules::feature_flags::CODEX_ENABLED {
-        return Err("Codex integration is disabled (archived).".into());
-    }
-    let proxy_host = proxy_host;
-    let proxy_port = proxy_port;
-    let path_prefix = path_prefix;
-    let model_name = model_name;
-    let reasoning_effort = reasoning_effort;
-    let disable_response_storage = disable_response_storage;
-    let api_key = api_key;
-    let enable_model_catalog = enable_model_catalog;
-    tokio::task::spawn_blocking(move || {
-        crate::modules::codex_integration::apply_codex_config(
-            &proxy_host,
-            proxy_port,
-            &path_prefix,
-            &model_name,
-            reasoning_effort.as_deref(),
-            disable_response_storage,
-            api_key.as_deref(),
-            enable_model_catalog,
-        )
-    })
-    .await
-    .map_err(|e| format!("Blocking task failed: {}", e))?
-}
-
-/// Restore Codex CLI config from backup
-/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
-#[tauri::command]
-pub async fn restore_codex_config() -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    if !crate::modules::feature_flags::CODEX_ENABLED {
-        return Err("Codex integration is disabled (archived).".into());
-    }
-    tokio::task::spawn_blocking(move || {
-        crate::modules::codex_integration::restore_codex_config()
-    })
-    .await
-    .map_err(|e| format!("Blocking task failed: {}", e))?
-}
 
 /// Refresh models from upstream API for a given platform (full-sync variant)
 #[tauri::command]
@@ -554,29 +493,6 @@ pub async fn delete_models(model_ids: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 pub async fn test_model(platform_id: String, model_name: String) -> Result<crate::modules::proxy::TestModelResult, String> {
     modules::proxy::test_model(&platform_id, &model_name).await
-}
-
-/// Clear Codex CLI OAuth data (auth.json + sqlite/)
-/// Uses spawn_blocking to avoid blocking the tokio runtime with file I/O.
-#[tauri::command]
-pub async fn clear_codex_auth() -> Result<crate::modules::codex_integration::ApplyResult, String> {
-    if !crate::modules::feature_flags::CODEX_ENABLED {
-        return Err("Codex integration is disabled (archived).".into());
-    }
-    tokio::task::spawn_blocking(move || {
-        crate::modules::codex_integration::clear_codex_auth()
-    })
-    .await
-    .map_err(|e| format!("Blocking task failed: {}", e))?
-}
-
-/// Check for Codex-related environment variable conflicts
-#[tauri::command]
-pub async fn check_codex_env_conflicts() -> Result<crate::modules::codex_integration::EnvConflictResult, String> {
-    if !crate::modules::feature_flags::CODEX_ENABLED {
-        return Err("Codex integration is disabled (archived).".into());
-    }
-    Ok(crate::modules::codex_integration::check_codex_env_conflicts())
 }
 
 /// Check for available updates using Tauri's updater plugin.
@@ -632,7 +548,7 @@ pub async fn check_for_updates(app: tauri::AppHandle) {
 /// update:download_finished, update:install_started, update:install_completed/failed.
 #[tauri::command]
 pub async fn install_update(app: tauri::AppHandle, rid: u32) -> Result<(), String> {
-    use tauri::{Emitter, Manager, Resource, ResourceId};
+    use tauri::{Emitter, Manager, ResourceId};
     use tauri_plugin_updater::Update;
 
     let update = app.resources_table().get::<Update>(ResourceId::from(rid))
