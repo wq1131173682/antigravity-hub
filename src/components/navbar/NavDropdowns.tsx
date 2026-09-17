@@ -63,7 +63,7 @@ export function LanguageDropdown({
 
             {/* 下拉菜单 */}
             {isOpen && (
-                <div className="absolute ltr:right-0 rtl:left-0 mt-2 w-32 bg-white dark:bg-base-200 rounded-xl shadow-lg border border-gray-100 dark:border-base-100 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-200 ltr:origin-top-right rtl:origin-top-left">
+                <div className="absolute ltr:right-0 rtl:left-0 mt-2 w-32 bg-white dark:bg-base-200 rounded-xl shadow-lg border border-gray-100 dark:border-base-100 py-1 overflow-hidden animate-enter ltr:origin-top-right rtl:origin-top-left">
                     {languages.map((lang) => (
                         <button
                             key={lang.code}
@@ -138,7 +138,7 @@ export function NavigationDropdown({
 
             {/* 下拉菜单 */}
             {isOpen && (
-                <div className="absolute left-1/2 -translate-x-1/2 mt-2 w-48 bg-white dark:bg-[#1a1a1a] rounded-xl shadow-xl border-2 border-gray-200 dark:border-gray-700 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-200 origin-top">
+                <div className="absolute left-1/2 -translate-x-1/2 mt-2 w-48 bg-white dark:bg-base-100 rounded-xl shadow-xl border border-gray-200 dark:border-base-300 py-1 overflow-hidden animate-enter origin-top">
                     {navItems.map((item) => (
                         <Link
                             key={item.path}
@@ -200,7 +200,7 @@ export function MoreDropdown({
 
             {/* 下拉菜单 */}
             {isOpen && (
-                <div className="absolute ltr:right-0 rtl:left-0 mt-2 w-40 bg-white dark:bg-base-200 rounded-xl shadow-lg border border-gray-100 dark:border-base-100 py-1 overflow-hidden animate-in fade-in zoom-in-95 duration-200 ltr:origin-top-right rtl:origin-top-left">
+                <div className="absolute ltr:right-0 rtl:left-0 mt-2 w-40 bg-white dark:bg-base-200 rounded-xl shadow-lg border border-gray-100 dark:border-base-100 py-1 overflow-hidden animate-enter ltr:origin-top-right rtl:origin-top-left">
                     {/* 迷你视图 */}
                     <button
                         onClick={() => {

@@ -30,13 +30,26 @@ export default function ThemeManager() {
             const root = document.documentElement;
             const isDark = theme === 'dark';
 
+            // Toggle the class first so `--app-canvas` resolves to the new
+            // theme's value before we read it back for the native window.
+            if (isDark) {
+                root.classList.add('dark');
+            } else {
+                root.classList.remove('dark');
+            }
+
+            // Set DaisyUI theme
+            root.setAttribute('data-theme', theme);
+
+            // Single source of truth for the canvas colour (see src/App.css).
+            const canvas = getComputedStyle(root).getPropertyValue('--app-canvas').trim();
+
             // Set Tauri window background color
             // Skip on Linux due to crash with transparent windows + softbuffer
             try {
-                if (!isLinux() && (window as any).__TAURI_INTERNALS__) {
-                    const bgColor = isDark ? '#1d232a' : '#FAFBFC';
+                if (!isLinux() && (window as any).__TAURI_INTERNALS__ && canvas) {
                     // Don't await this, let it happen in background to avoid blocking React render
-                    getCurrentWindow().setBackgroundColor(bgColor).catch(e =>
+                    getCurrentWindow().setBackgroundColor(canvas).catch(e =>
                         console.error('Failed to set window background color:', e)
                     );
 
@@ -48,19 +61,6 @@ export default function ThemeManager() {
                 }
             } catch (e) {
                 console.error('Window background sync failed:', e);
-            }
-
-            // Set DaisyUI theme
-            root.setAttribute('data-theme', theme);
-
-            // Set inline style for immediate visual feedback
-            root.style.backgroundColor = isDark ? '#1d232a' : '#FAFBFC';
-
-            // Set Tailwind dark mode class
-            if (isDark) {
-                root.classList.add('dark');
-            } else {
-                root.classList.remove('dark');
             }
         };
 

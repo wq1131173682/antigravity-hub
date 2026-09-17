@@ -31,7 +31,9 @@ function Navbar() {
         const newTheme = config.theme === 'light' ? 'dark' : 'light';
 
         // Use View Transition API if supported, but skip on Linux (may cause crash)
-        if ('startViewTransition' in document && !isLinux()) {
+        // and when the user asked for reduced motion.
+        const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if ('startViewTransition' in document && !isLinux() && !prefersReducedMotion) {
             const x = event.clientX;
             const y = event.clientY;
             const endRadius = Math.hypot(
@@ -59,8 +61,10 @@ function Navbar() {
                         clipPath: clipPath
                     },
                     {
-                        duration: 500,
-                        easing: 'ease-in-out',
+                        // Interaction feedback budget: a theme switch is a direct
+                        // response to a click, so keep it short. 500ms read as lag.
+                        duration: 240,
+                        easing: 'ease-out',
                         fill: 'forwards',
                         pseudoElement: isDarkMode ? '::view-transition-old(root)' : '::view-transition-new(root)'
                     }
@@ -77,7 +81,7 @@ function Navbar() {
     };
 
     return (
-        <nav className="transition-all duration-200 bg-[#FAFBFC] dark:bg-base-300">
+        <nav className="transition-colors duration-200 bg-canvas dark:bg-base-300">
             <div className="px-6 sm:px-8 relative" style={{ zIndex: 10 }}>
                 {/* Flexbox 布局 - 子组件自己处理响应式 */}
                 <div className="flex items-center h-16 gap-4">

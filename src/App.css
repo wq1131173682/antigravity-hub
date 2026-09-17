@@ -14,12 +14,21 @@ body {
   border: none;
 }
 
-html {
-  background-color: #FAFBFC;
+/* App canvas colour, defined once.
+   This value is the app's actual background and must stay in sync with the
+   Tauri window background that ThemeManager paints (otherwise a resize or a
+   cold start flashes a different shade). Previously the literal was repeated
+   across App.css, Layout, Navbar and Dashboard. */
+:root {
+  --app-canvas: #FAFBFC;
 }
 
 html.dark {
-  background-color: #1d232a;
+  --app-canvas: #1d232a;
+}
+
+html {
+  background-color: var(--app-canvas);
 }
 
 /* 全局样式 */
@@ -30,13 +39,12 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #FAFBFC;
+  background-color: var(--app-canvas);
 }
 
 /* Dark mode override for body strictly */
 .dark body {
-  background-color: #1d232a;
-  /* matches base-300 commonly used */
+  background-color: var(--app-canvas);
 }
 
 #root {
@@ -50,6 +58,50 @@ body {
 /* 移除默认的 tap 高亮 */
 * {
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Respect the OS "reduce motion" setting for every transition we author.
+   daisyUI already guards its own component animations, but the app's
+   hand-written transitions (nav pills, quota bars, dropdown entrances) were
+   unguarded and kept animating. Reduced motion is a stated accessibility
+   requirement, not a preference. */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Entrance animation for popovers / dialogs.
+   Replaces `animate-in fade-in zoom-in-95` from tailwindcss-animate, which is
+   not a dependency of this project - those classes were absent from the built
+   bundle, so dropdowns and modals appeared with no transition at all.
+   Only compositor properties (opacity, transform) are animated. */
+@keyframes dsh-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-enter {
+  animation: dsh-enter 150ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-enter {
+    animation: none;
+  }
 }
 
 /* 只移除链接的默认下划线，不强制颜色 */

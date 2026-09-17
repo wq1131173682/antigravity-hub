@@ -9,40 +9,35 @@ export default {
     ],
     darkMode: 'class',
     theme: {
-        extend: {},
+        extend: {
+            // App canvas colour. Defined as a CSS variable in src/App.css so the
+            // HTML background, the body background and the Tauri window
+            // background all resolve from one place.
+            backgroundColor: {
+                canvas: 'var(--app-canvas)',
+            },
+            // Single z-index scale, ordered to clear daisyUI's own layers:
+            // daisyUI's `.modal` sets `z-index: 999`, so overlay/dialog must sit
+            // above 999. Previously dialogs added `z-[100]`, which won the
+            // same-specificity cascade and PULLED the modal DOWN to 100.
+            zIndex: {
+                base: '0',
+                raised: '10',
+                sticky: '20',
+                overlay: '1000',
+                toast: '1100',
+                debug: '1200',
+            },
+            // Entrance animation lives in src/App.css (`.animate-enter`) so it
+            // can also be disabled under `prefers-reduced-motion`.
+        },
     },
     plugins: [daisyui, containerQueries],
-    daisyui: {
-        themes: [
-            {
-                light: {
-                    "primary": "#3b82f6",
-                    "secondary": "#64748b",
-                    "accent": "#10b981",
-                    "neutral": "#1f2937",
-                    "base-100": "#ffffff",
-                    "info": "#0ea5e9",
-                    "success": "#10b981",
-                    "warning": "#f59e0b",
-                    "error": "#ef4444",
-                },
-            },
-            {
-                dark: {
-                    "primary": "#3b82f6",
-                    "secondary": "#94a3b8",
-                    "accent": "#10b981",
-                    "neutral": "#1f2937",
-                    "base-100": "#0f172a", // Slate-900
-                    "base-200": "#1e293b", // Slate-800
-                    "base-300": "#334155", // Slate-700
-                    "info": "#0ea5e9",
-                    "success": "#10b981",
-                    "warning": "#f59e0b",
-                    "error": "#ef4444",
-                },
-            },
-        ],
-        darkTheme: "dark",
-    },
-}
+
+    // NOTE: daisyUI 5 reads its options from a CSS `@plugin "daisyui" { ... }`
+    // block, NOT from a `daisyui` key here. The hex theme that used to live in
+    // this file was silently ignored for that reason - the bundle always
+    // carried daisyUI's stock oklch values (`--color-base-100: oklch(100% 0 0)`
+    // in light, `oklch(25.33% .016 252.42)` in dark). Configure themes in
+    // src/App.css if the stock palette ever needs to change.
+};

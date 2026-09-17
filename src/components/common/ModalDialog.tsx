@@ -61,24 +61,24 @@ export default function ModalDialog({
     const showCancel = type === 'confirm' && onCancel;
 
     return createPortal(
-        <div className="modal modal-open z-[100]">
+        <div className="modal modal-open z-overlay">
             {/* Draggable Top Region */}
-            <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-[110]" />
+            <div data-tauri-drag-region className="fixed top-0 left-0 right-0 h-8 z-toast" />
 
-            <div className="modal-box relative max-w-sm bg-white dark:bg-base-100 shadow-2xl rounded-2xl p-0 overflow-hidden transform transition-all animate-in fade-in zoom-in-95 duration-200">
+            <div className="modal-box relative max-w-sm bg-white dark:bg-base-100 shadow-2xl rounded-2xl p-0 overflow-hidden animate-enter">
                 <div className="flex flex-col items-center text-center p-6 pt-8">
                     <div className={`w-14 h-14 rounded-full flex items-center justify-center mb-4 shadow-sm ${getIconBg()}`}>
                         {getIcon()}
                     </div>
 
-                    <h3 className="text-xl font-bold text-gray-900 dark:text-base-content mb-2">{title}</h3>
+                    <h3 className="text-xl font-bold text-gray-900 dark:text-base-content mb-2 text-balance">{title}</h3>
 
                     {children ? (
                         <div className="w-full text-left mb-8 px-1">
                             {children}
                         </div>
                     ) : (
-                        <p className="text-gray-500 dark:text-gray-400 text-sm mb-8 leading-relaxed px-4">{message}</p>
+                        <p className="text-gray-500 dark:text-gray-400 text-sm mb-8 leading-relaxed px-4 text-pretty">{message}</p>
                     )}
 
                     <div className="flex gap-3 w-full">
@@ -91,9 +91,9 @@ export default function ModalDialog({
                             </button>
                         )}
                         <button
-                            className={`flex-1 px-4 py-2.5 text-white font-medium rounded-xl shadow-md transition-all focus:outline-none focus:ring-2 focus:ring-offset-2 ${isDestructive && type === 'confirm'
-                                ? 'bg-red-500 hover:bg-red-600 focus:ring-red-500 shadow-red-100'
-                                : 'bg-blue-500 hover:bg-blue-600 focus:ring-blue-500 shadow-blue-100'
+                            className={`flex-1 px-4 py-2.5 text-white font-medium rounded-xl shadow-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${isDestructive && type === 'confirm'
+                                ? 'bg-red-500 hover:bg-red-600 focus:ring-red-500'
+                                : 'bg-blue-500 hover:bg-blue-600 focus:ring-blue-500'
                                 }`}
                             onClick={onConfirm}
                         >
@@ -102,7 +102,11 @@ export default function ModalDialog({
                     </div>
                 </div>
             </div>
-            <div className="modal-backdrop bg-black/40 backdrop-blur-sm fixed inset-0 z-[-1]" onClick={showCancel ? onCancel : undefined}></div>
+            {/* No negative z-index utility here: daisyUI's own
+                `.modal-backdrop` rule already sets `z-index: -1`, so adding one
+                was redundant. (Spelling it out in a comment would not work
+                either - Tailwind scans raw text and would emit the class.) */}
+            <div className="modal-backdrop bg-black/40 backdrop-blur-sm fixed inset-0" onClick={showCancel ? onCancel : undefined}></div>
         </div>,
         document.body
     );

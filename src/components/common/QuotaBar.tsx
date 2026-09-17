@@ -52,7 +52,12 @@ export function QuotaBar({
   const barFill = unlimited
     ? ''
     : (variant === 'gradient' ? STATUS_BAR_GRADIENT : STATUS_BAR_SOLID)[status];
-  const widthPct = unlimited ? 0 : Math.max(over ? 100 : Math.min(1, used / limit) * 100, 2);
+  // Scale a full-width fill rather than setting `width`. Animating `width`
+  // triggers layout on every tick; `transform` stays on the compositor. The
+  // 0.02 floor keeps a sliver visible for a non-zero-but-tiny reading, which
+  // is what the old `Math.max(pct, 2)` did.
+  const ratio = unlimited ? 0 : (over ? 1 : Math.min(1, used / limit));
+  const scale = unlimited ? 0 : Math.max(ratio, 0.02);
   const displayValue = showValue ?? !!label;
 
   return (
@@ -76,8 +81,8 @@ export function QuotaBar({
         }`}
       >
         <div
-          className={`h-full rounded-full transition-all duration-500 ${barFill}`}
-          style={{ width: `${widthPct}%` }}
+          className={`h-full w-full origin-left rounded-full transition-transform duration-300 ease-out ${barFill}`}
+          style={{ transform: `scaleX(${scale})` }}
         />
       </div>
     </div>

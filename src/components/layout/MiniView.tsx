@@ -90,7 +90,7 @@ export default function MiniView() {
     };
 
     return (
-        <div className="h-screen w-full flex items-center justify-center bg-transparent">
+        <div className="h-dvh w-full flex items-center justify-center bg-transparent">
             <motion.div
                 ref={containerRef}
                 initial={{ opacity: 0, scale: 0.95 }}

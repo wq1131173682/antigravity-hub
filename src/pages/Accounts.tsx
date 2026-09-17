@@ -49,11 +49,11 @@ function AddModelDialog({ open, onClose, platformId }: { open: boolean; onClose:
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.add_model')}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
         <div className="space-y-3">
           <div>
@@ -141,11 +141,11 @@ function EditModelQuotaDialog({ open, onClose, model }: { open: boolean; onClose
 
   if (!open || !model) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.edit_model_quotas')} - {model.display_name || model.model_name}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
         <div className="space-y-3">
           <div className="grid grid-cols-3 gap-3">
@@ -217,11 +217,11 @@ function AddKeyDialog({ open, onClose, platformId }: { open: boolean; onClose: (
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.add_key')}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
         <div className="space-y-3">
           <div>
@@ -266,11 +266,11 @@ function AssignKeyDialog({ open, onClose, modelId, platformId }: { open: boolean
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.assign_key')}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
         {availableKeys.length === 0 ? (
           <p className="text-sm text-gray-400 text-center py-6">{t('accounts.no_available_keys')}</p>
@@ -343,6 +343,7 @@ function TestModelButton({ platformId, modelName, displayName, testModel: testMo
       onClick={handleTest}
       disabled={testing}
       title={`测试模型 ${displayName}`}
+      aria-label={`测试模型 ${displayName}`}
     >
       {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
     </button>
@@ -465,37 +466,59 @@ function Accounts() {
       <div className="w-64 min-w-[200px] bg-white dark:bg-base-100 border-r border-gray-200 dark:border-base-300 flex flex-col overflow-hidden">
         <div className="p-3 border-b border-gray-100 dark:border-base-300 flex items-center justify-between">
           <h2 className="font-bold text-sm text-gray-900 dark:text-base-content">{t('accounts.platforms')}</h2>
-          <button className="p-1.5 text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors" onClick={() => setShowAddPlatform(true)} title={t('accounts.add_platform')}><Plus className="w-4 h-4" /></button>
+          <button className="p-1.5 text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-lg transition-colors" onClick={() => setShowAddPlatform(true)} title={t('accounts.add_platform')} aria-label={t('accounts.add_platform')}><Plus className="w-4 h-4" /></button>
         </div>
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {platforms.length === 0 && (
-            <p className="text-xs text-gray-400 text-center py-8">{t('accounts.no_platforms')}</p>
+            <div className="text-center py-8 px-2">
+              <Server className="w-8 h-8 mx-auto text-gray-300 dark:text-gray-600 mb-2" />
+              <p className="text-xs text-gray-400 mb-3 text-pretty">{t('accounts.no_platforms')}</p>
+              <button
+                className="px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors"
+                onClick={() => setShowAddPlatform(true)}
+              >
+                {t('accounts.add_platform')}
+              </button>
+            </div>
           )}
           {platforms.map(p => (
             <div
               key={p.id}
-              className={`group flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+              className={`group flex items-center justify-between rounded-lg transition-colors ${
                 selectedPlatformId === p.id
                   ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300'
                   : 'hover:bg-gray-50 dark:hover:bg-base-200 text-gray-700 dark:text-gray-300'
               }`}
-              onClick={() => setSelectedPlatformId(p.id)}
             >
-              <div className="flex items-center gap-2 min-w-0">
+              {/* A real <button>, kept a sibling of the row actions below.
+                  The previous `<div onClick>` could not be focused or activated
+                  from the keyboard at all; nesting the action buttons inside a
+                  role="button" wrapper would have been invalid HTML. */}
+              <button
+                type="button"
+                onClick={() => setSelectedPlatformId(p.id)}
+                aria-current={selectedPlatformId === p.id ? 'true' : undefined}
+                className="flex items-center gap-2 min-w-0 flex-1 text-left px-3 py-2 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
                 <Server className="w-4 h-4 shrink-0" />
                 <span className="text-sm font-medium truncate">{p.name}</span>
-              </div>                              <div className="flex items-center opacity-0 group-hover:opacity-100 shrink-0">
-                                <button
-                                  className="p-1 text-gray-400 hover:text-blue-500 transition-all"
-                                  onClick={e => { e.stopPropagation(); setEditingPlatform(p); setShowEditPlatform(true); }}
-                                  title={t('accounts.edit_platform')}
-                                ><Edit3 className="w-3.5 h-3.5" /></button>
-                                <button
-                                  className="p-1 text-gray-400 hover:text-red-500 transition-all"
-                                  onClick={e => { e.stopPropagation(); setDeleteConfirm({ type: 'platform', id: p.id }); }}
-                                  title={t('common.delete')}
-                                ><Trash2 className="w-3.5 h-3.5" /></button>
-                              </div>
+              </button>
+              <div className="flex items-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 shrink-0 pr-1">
+                <button
+                  type="button"
+                  className="p-1 text-gray-400 hover:text-blue-500 transition-colors rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  onClick={() => { setEditingPlatform(p); setShowEditPlatform(true); }}
+                  title={t('accounts.edit_platform')}
+                  aria-label={t('accounts.edit_platform')}
+                ><Edit3 className="w-3.5 h-3.5" /></button>
+                <button
+                  type="button"
+                  className="p-1 text-gray-400 hover:text-red-500 transition-colors rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                  onClick={() => setDeleteConfirm({ type: 'platform', id: p.id })}
+                  title={t('common.delete')}
+                  aria-label={t('common.delete')}
+                ><Trash2 className="w-3.5 h-3.5" /></button>
+              </div>
             </div>
           ))}
         </div>
@@ -505,7 +528,18 @@ function Accounts() {
       <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-base-200">
         {!selectedPlatform ? (
           <div className="flex items-center justify-center h-full text-gray-400 dark:text-gray-500 text-sm">
-            <div className="text-center"><Server className="w-12 h-12 mx-auto mb-2 opacity-40" /><p>{t('accounts.select_platform')}</p></div>
+            <div className="text-center max-w-xs px-4">
+              <Server className="w-12 h-12 mx-auto mb-3 opacity-40" />
+              <p className="mb-4 text-pretty">{t('accounts.select_platform')}</p>
+              {platforms.length > 0 && (
+                <button
+                  className="px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors"
+                  onClick={() => setSelectedPlatformId(platforms[0].id)}
+                >
+                  {platforms[0].name}
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <div className="p-5 space-y-6 max-w-4xl mx-auto">
@@ -556,7 +590,21 @@ function Accounts() {
               {platformModels.length === 0 ? (
                 <div className="bg-white dark:bg-base-100 rounded-xl p-8 shadow-sm border border-gray-100 dark:border-base-200 text-center">
                   <Layers className="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-2" />
-                  <p className="text-sm text-gray-500 dark:text-gray-400">{t('accounts.no_models')}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4 text-pretty">{t('accounts.no_models')}</p>
+                  <div className="flex items-center justify-center gap-2">
+                    <button
+                      className="px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors inline-flex items-center gap-1.5"
+                      onClick={() => setShowAddModel(true)}
+                    >
+                      <Plus className="w-3.5 h-3.5" /> {t('accounts.add_model')}
+                    </button>
+                    <button
+                      className="px-3 py-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 rounded-lg transition-colors inline-flex items-center gap-1.5"
+                      onClick={() => setShowImportModels(true)}
+                    >
+                      <Download className="w-3.5 h-3.5" /> {t('accounts.import_models')}
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -580,7 +628,7 @@ function Accounts() {
                             >
                               {selectedModelIds.has(model.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
                             </button>
-                            <Layers className="w-4 h-4 text-purple-500 shrink-0" />
+                            <Layers className="w-4 h-4 text-blue-500 shrink-0" />
                             <span className="font-medium text-sm text-gray-900 dark:text-base-content">{model.display_name || model.model_name}</span>
                             <span className="text-xs text-gray-400 font-mono">{model.model_name}</span>
                           </div>
@@ -591,13 +639,13 @@ function Accounts() {
                               displayName={model.display_name || model.model_name}
                               testModel={testModel}
                             />
-                            <button className="p-1.5 text-gray-400 hover:text-blue-500 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors" onClick={() => { setEditingModel(model); setShowEditQuota(true); }} title={t('accounts.edit_model_quotas')}>
+                            <button className="p-1.5 text-gray-400 hover:text-blue-500 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors" onClick={() => { setEditingModel(model); setShowEditQuota(true); }} title={t('accounts.edit_model_quotas')} aria-label={t('accounts.edit_model_quotas')}>
                               <Edit3 className="w-3.5 h-3.5" />
                             </button>
-                            <button className="p-1.5 text-gray-400 hover:text-purple-500 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors" onClick={() => setAssigningModelId(model.id)} title={t('accounts.assign_key')}>
+                            <button className="p-1.5 text-gray-400 hover:text-blue-500 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors" onClick={() => setAssigningModelId(model.id)} title={t('accounts.assign_key')} aria-label={t('accounts.assign_key')}>
                               <Link2 className="w-3.5 h-3.5" />
                             </button>
-                            <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => setDeleteConfirm({ type: 'model', id: model.id })} title={t('common.delete')}>
+                            <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => setDeleteConfirm({ type: 'model', id: model.id })} title={t('common.delete')} aria-label={t('common.delete')}>
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           </div>
@@ -665,7 +713,13 @@ function Accounts() {
               {platformKeys.length === 0 ? (
                 <div className="bg-white dark:bg-base-100 rounded-xl p-8 shadow-sm border border-gray-100 dark:border-base-200 text-center">
                   <Key className="w-10 h-10 mx-auto text-gray-300 dark:text-gray-600 mb-2" />
-                  <p className="text-sm text-gray-500 dark:text-gray-400">{t('accounts.no_keys')}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4 text-pretty">{t('accounts.no_keys')}</p>
+                  <button
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors inline-flex items-center gap-1.5"
+                    onClick={() => setShowAddKey(true)}
+                  >
+                    <Plus className="w-3.5 h-3.5" /> {t('accounts.add_key')}
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -688,7 +742,7 @@ function Accounts() {
                               {assignedToModels.length > 0 && (
                                 <div className="flex gap-1">
                                   {assignedToModels.map(m => (
-                                    <span key={m.id} className="px-1.5 py-0.5 text-[10px] bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 rounded font-medium">
+                                    <span key={m.id} className="px-1.5 py-0.5 text-[10px] bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded font-medium">
                                       {m.display_name || m.model_name}
                                     </span>
                                   ))}
@@ -699,15 +753,15 @@ function Accounts() {
                               {k.disabled && k.disabled_until && (
                                 <span className="text-xs text-gray-400 hidden sm:inline">{new Date(k.disabled_until * 1000).toLocaleTimeString()}</span>
                               )}
-                              <button className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-base-300 transition-colors" onClick={() => toggleShowKey(k.id)} title={showKeyValues.has(k.id) ? t('common.hide') : t('common.show')}>
+                              <button className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-base-300 transition-colors" onClick={() => toggleShowKey(k.id)} title={showKeyValues.has(k.id) ? t('common.hide') : t('common.show')} aria-label={showKeyValues.has(k.id) ? t('common.hide') : t('common.show')}>
                                 {showKeyValues.has(k.id) ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                               </button>
                               <button className={`p-1.5 rounded-lg transition-colors ${
                                 k.disabled ? 'text-green-500 hover:bg-green-50 dark:hover:bg-green-900/20' : 'text-gray-400 hover:text-orange-500 hover:bg-orange-50 dark:hover:bg-orange-900/20'
-                              }`} onClick={() => handleToggleKey(k.id, k.disabled)} title={k.disabled ? t('accounts.enable_key') : t('accounts.disable_key')}>
+                              }`} onClick={() => handleToggleKey(k.id, k.disabled)} title={k.disabled ? t('accounts.enable_key') : t('accounts.disable_key')} aria-label={k.disabled ? t('accounts.enable_key') : t('accounts.disable_key')}>
                                 {k.disabled ? <Power className="w-3.5 h-3.5" /> : <PowerOff className="w-3.5 h-3.5" />}
                               </button>
-                              <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => selectedPlatformId && setDeleteConfirm({ type: 'key', id: k.id, platformId: selectedPlatformId })} title={t('common.delete')}>
+                              <button className="p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors" onClick={() => selectedPlatformId && setDeleteConfirm({ type: 'key', id: k.id, platformId: selectedPlatformId })} title={t('common.delete')} aria-label={t('common.delete')}>
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
                             </div>
@@ -822,11 +876,11 @@ function EditPlatformDialog({ open, onClose, platform }: { open: boolean; onClos
 
   if (!open || !platform) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.edit_platform')}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
         <div className="space-y-3">
           <div>
@@ -923,11 +977,11 @@ function ImportModelsDialog({ open, onClose, platformId }: { open: boolean; onCl
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-lg mx-4 p-5 border border-gray-200 dark:border-base-300 max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-3">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.import_models')}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
 
         <div className="relative mb-3">
@@ -967,10 +1021,20 @@ function ImportModelsDialog({ open, onClose, platformId }: { open: boolean; onCl
               ) : filtered.map(m => (
                 <div
                   key={m.model_name}
-                  className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
+                  role="checkbox"
+                  aria-checked={m.already_imported || selected.has(m.model_name)}
+                  aria-disabled={m.already_imported || undefined}
+                  tabIndex={m.already_imported ? -1 : 0}
+                  className={`flex items-center justify-between px-3 py-2 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
                     m.already_imported ? 'opacity-50' : 'hover:bg-gray-50 dark:hover:bg-base-200 cursor-pointer'
                   }`}
                   onClick={() => toggle(m.model_name, m.already_imported)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      toggle(m.model_name, m.already_imported);
+                    }
+                  }}
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     {m.already_imported ? <CheckSquare className="w-4 h-4 text-gray-300 shrink-0" /> : (
@@ -1033,11 +1097,11 @@ function AddPlatformDialog({ open, onClose }: { open: boolean; onClose: () => vo
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-overlay flex items-center justify-center bg-black/40" onClick={onClose}>
       <div className="bg-white dark:bg-base-100 rounded-xl shadow-xl w-full max-w-md mx-4 p-5 border border-gray-200 dark:border-base-300" onClick={e => e.stopPropagation()}>
         <div className="flex justify-between items-center mb-4">
           <h3 className="font-bold text-gray-900 dark:text-base-content">{t('accounts.add_platform')}</h3>
-          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300" onClick={onClose}><X className="w-5 h-5" /></button>
+          <button className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" onClick={onClose} aria-label={t('common.close')} title={t('common.close')}><X className="w-5 h-5" /></button>
         </div>
         <div className="space-y-3">
           <div>

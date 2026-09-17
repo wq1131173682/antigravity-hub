@@ -30,7 +30,7 @@ function Layout() {
     }
 
     return (
-        <div className="h-screen flex flex-col bg-[#FAFBFC] dark:bg-base-300">
+        <div className="h-dvh flex flex-col bg-canvas dark:bg-base-300">
             <ToastContainer />
             {isTauri() && <TitleBar />}
             <Navbar />

@@ -8,10 +8,25 @@ import { useTranslation } from 'react-i18next';
 import { listen } from '@tauri-apps/api/event';
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { checkForUpdates } from '../services/platformService';
+import { LANGUAGES } from '../components/navbar/constants';
 
 function Settings() {
   const { t, i18n } = useTranslation();
   const { config, loadConfig } = useConfigStore();
+
+  // i18next may report a region-tagged tag ("zh-TW", "pt-BR"). Match it against
+  // the shipped list by longest prefix so exactly one chip is ever highlighted.
+  const currentLang = (() => {
+    const tag = (i18n.resolvedLanguage || i18n.language || '').toLowerCase();
+    const exact = LANGUAGES.find(l => l.code.toLowerCase() === tag);
+    if (exact) return exact.code;
+    const prefix = LANGUAGES
+      .filter(l => tag.startsWith(l.code.toLowerCase()))
+      .sort((a, b) => b.code.length - a.code.length)[0];
+    if (prefix) return prefix.code;
+    return LANGUAGES.find(l => tag.startsWith(l.code.split('-')[0].toLowerCase()))?.code;
+  })();
+
   const [portInput, setPortInput] = useState('8080');
   const [hostInput, setHostInput] = useState('127.0.0.1');
   const [autoSwitch, setAutoSwitch] = useState(true);
@@ -285,32 +300,32 @@ function Settings() {
         {/* Language Settings */}
         <div className="bg-white dark:bg-base-100 rounded-xl p-5 shadow-sm border border-gray-100 dark:border-base-200">
           <div className="flex items-center gap-2 mb-4">
-            <Globe className="w-4 h-4 text-purple-500" />
+            <Globe className="w-4 h-4 text-gray-400" />
             <h2 className="font-semibold text-gray-900 dark:text-base-content">
               {t('settings.general.language')}
             </h2>
           </div>
-          <div className="flex gap-2">
-            <button
-              className={`px-4 py-2 text-sm rounded-lg border transition-colors ${
-                i18n.language.startsWith('zh')
-                  ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300'
-                  : 'bg-white dark:bg-base-200 border-gray-200 dark:border-base-300 text-gray-600 dark:text-gray-400 hover:border-gray-300'
-              }`}
-              onClick={() => handleLanguageChange('zh')}
-            >
-              中文
-            </button>
-            <button
-              className={`px-4 py-2 text-sm rounded-lg border transition-colors ${
-                i18n.language.startsWith('en')
-                  ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300'
-                  : 'bg-white dark:bg-base-200 border-gray-200 dark:border-base-300 text-gray-600 dark:text-gray-400 hover:border-gray-300'
-              }`}
-              onClick={() => handleLanguageChange('en')}
-            >
-              English
-            </button>
+          {/* All 12 shipped locales. This used to offer only 中文/English even
+              though the app ships 12 translations and LANGUAGES lists them. */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            {LANGUAGES.map(lang => {
+              const active = currentLang === lang.code;
+              return (
+                <button
+                  key={lang.code}
+                  className={`flex items-center justify-between gap-2 px-3 py-2 text-sm rounded-lg border transition-colors ${
+                    active
+                      ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300'
+                      : 'bg-white dark:bg-base-200 border-gray-200 dark:border-base-300 text-gray-600 dark:text-gray-400 hover:border-gray-300 dark:hover:border-base-100'
+                  }`}
+                  onClick={() => handleLanguageChange(lang.code)}
+                  aria-pressed={active}
+                >
+                  <span className="truncate">{lang.label}</span>
+                  <span className="font-mono text-[10px] opacity-60 shrink-0">{lang.short}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
