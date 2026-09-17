@@ -1372,27 +1372,18 @@ fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
 /// Get key IDs to try for a platform+model combination.
 ///
 /// Resolution order:
-///   1. If a key_model_map entry exists for the resolved model_id, use it.
+///   1. If a key_model_map entry exists for the given `model_id`, use it.
 ///   2. Otherwise, fall back to every active key on the platform (sorted by sort_order).
 ///
-/// After resolution, drop any key whose local sliding-window tracker reports the
-/// (key_id, model_id) pair as over quota or in backoff. This is what triggers an
-/// automatic key switch when the local counter is past the configured daily /
-/// weekly / monthly limit, even if the upstream keeps returning 200 OK.
-fn get_candidate_keys(platform_id: &str, model_name: Option<String>) -> Vec<String> {
-    // Resolve model_id once (used both for the mapping lookup and the quota filter).
-    let model_id: Option<String> = model_name.as_ref().and_then(|name| {
-        crate::modules::model_manager::list_models(platform_id)
-            .ok()?
-            .into_iter()
-            .find(|m| m.model_name == *name)
-            .map(|m| m.id)
-    });
-
+/// `model_id` is the already-resolved internal id (see `resolve_model_id`) so
+/// this function never touches disk itself. Note that `key_model_map` returns
+/// ALL associated key IDs regardless of keystore status, so the mapped ids are
+/// intersected with the active set to exclude manually-disabled keys.
+fn get_candidate_keys(platform_id: &str, model_id: Option<&str>) -> Vec<String> {
     // Build candidate set: explicit mapping wins, otherwise fall back to all active keys.
     // NOTE: key_model_map returns ALL associated key IDs regardless of keystore status,
     // so we must intersect with active keys to exclude manually-disabled ones.
-    if let Some(mid) = model_id.as_ref() {
+    if let Some(mid) = model_id {
         match crate::modules::key_model_map::get_keys_for_model(mid) {
             Ok(ids) if !ids.is_empty() => {
                 // Filter out keys that are disabled in the keystore (manually disabled)
@@ -1405,6 +1396,22 @@ fn get_candidate_keys(platform_id: &str, model_name: Option<String>) -> Vec<Stri
     } else {
         list_active_key_ids(platform_id)
     }
+}
+
+/// Resolve a model NAME to its internal model id for a platform.
+///
+/// This reads `models.json` from disk, so callers on the hot request path must
+/// resolve it ONCE and pass the result down rather than calling this per
+/// helper — `forward_with_retry` previously performed the same lookup
+/// independently here and in `get_candidate_keys`, doubling the file I/O for
+/// every proxied request.
+fn resolve_model_id(platform_id: &str, model_name: Option<&str>) -> Option<String> {
+    let name = model_name?;
+    crate::modules::model_manager::list_models(platform_id)
+        .ok()?
+        .into_iter()
+        .find(|m| m.model_name == name)
+        .map(|m| m.id)
 }
 
 fn get_keys_to_try(candidates: &[String], model_id: Option<&str>) -> Vec<String> {
@@ -1483,12 +1490,9 @@ async fn forward_with_retry(
     // succession, which is exactly what triggers account-level rate limits.
     let mut current_key_errors: u32 = 0;
 
-    // Resolve model_id from model_name (done once outside the loop)
-    let model_id: Option<String> = model_name.as_ref().and_then(|name| {
-        crate::modules::model_manager::list_models(platform_id).ok()?
-            .into_iter().find(|m| m.model_name == *name)
-            .map(|m| m.id)
-    });
+    // Resolve model_id from model_name (done once and reused by both the
+    // candidate-key lookup and the quota tracking below).
+    let model_id: Option<String> = resolve_model_id(platform_id, model_name.as_deref());
 
     let model_identifier = model_name.clone().unwrap_or_else(|| "unknown".to_string());
 
@@ -1501,7 +1505,7 @@ async fn forward_with_retry(
     // Candidate key set (independent of cooldown/quota filtering) 閳?kept so we
     // can tell the difference between "no keys at all" and "all keys temporarily
     // rate-limited" when `get_keys_to_try` returns empty mid-retry.
-    let candidates = get_candidate_keys(platform_id, model_name.clone());
+    let candidates = get_candidate_keys(platform_id, model_id.as_deref());
 
     loop {
         attempt += 1;
@@ -1695,6 +1699,16 @@ async fn forward_with_retry(
             let key_label = format!("key[{}]", key_idx);
             warn!("{} from {}, {}={}, model={}",
                 status, target_url, key_label, key_id, model_identifier);
+
+            // Record the server error so the key enters a short cooldown and
+            // `filter_available_keys` can deprioritize it on the next attempt.
+            // `record_500` is the tracker's only backoff setter on the 5xx path;
+            // without this call the cooldown/reason fields stayed at their
+            // defaults forever, so a key that kept returning 5xx was retried in
+            // place instead of being rotated away.
+            if let Some(mid) = &model_id {
+                let _ = crate::modules::quota_window::record_500_error(key_id, mid, platform_id);
+            }
 
             // NEVER disable keys 閳?only rotate or retry with backoff.
             // Keys are a precious resource; disabling them on transient server
@@ -2302,6 +2316,57 @@ mod tests {
     #[test]
     fn test_sse_keepalive_bytes_constant() {
         assert_eq!(SSE_KEEPALIVE_BYTES, b": ping\n\n");
+    }
+
+    /// Regression: the 5xx branch of `forward_with_retry` must record the
+    /// error so the key enters a cooldown. Previously only the 429 branch
+    /// recorded anything, so `record_500_error` was dead code on the hot path
+    /// and a key returning 5xx was retried in place forever.
+    ///
+    /// This asserts the tracker contract the proxy relies on: after a 5xx is
+    /// recorded, the key is unavailable (cooldown active) and carries a
+    /// reason, and it becomes available again once the cooldown expires.
+    #[test]
+    fn test_record_500_error_puts_key_into_cooldown() {
+        use crate::modules::quota_window::{ModelKeyTracker, UsageWindow};
+
+        let mut tracker = ModelKeyTracker {
+            key_id: "k".into(),
+            model_id: "m".into(),
+            platform_id: "p".into(),
+            five_hour: UsageWindow::new(),
+            day: UsageWindow::new(),
+            month: UsageWindow::new(),
+            consecutive_429: 0,
+            consecutive_500: 0,
+            last_429_time: 0,
+            last_500_time: 0,
+            disabled_until: None,
+            disabled_reason: None,
+        };
+
+        assert!(tracker.is_available(), "fresh tracker starts available");
+
+        tracker.record_500();
+
+        assert_eq!(tracker.consecutive_500, 1, "the 5xx must be counted");
+        assert!(
+            !tracker.is_available(),
+            "a recorded 5xx must put the key in cooldown so the proxy rotates away"
+        );
+        assert!(
+            tracker.disabled_until.is_some(),
+            "cooldown expiry must be set for `earliest_cooldown_expiry` to wait on"
+        );
+        assert!(
+            tracker.disabled_reason.as_deref().unwrap_or("").contains("Server error"),
+            "cooldown must carry a human-readable reason, got {:?}",
+            tracker.disabled_reason
+        );
+
+        // A success clears the error state again.
+        tracker.record_success();
+        assert_eq!(tracker.consecutive_500, 0);
     }
 }
 

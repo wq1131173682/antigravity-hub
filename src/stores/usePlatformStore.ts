@@ -196,14 +196,16 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
   updateModelLimits: async (modelId: string, per5hour: number, perDay: number, perMonth: number, maxInputTokens?: number | null, maxOutputTokens?: number | null) => {
     try {
       await platformService.updateModel(modelId, undefined, undefined, per5hour, perDay, perMonth, maxInputTokens, maxOutputTokens);
-      // Refresh all platforms' models to get updated state
+      // Refresh every platform whose models are already loaded. The previous
+      // implementation `break`-ed after the first match, so editing a model on
+      // any platform other than the first cached one left the UI on stale quota
+      // values (and never refreshed the edited platform at all).
       const { platforms, models } = get();
-      for (const p of platforms) {
-        if (models[p.id]) {
-          await get().fetchModels(p.id);
-          break;
-        }
-      }
+      await Promise.all(
+        platforms
+          .filter(p => models[p.id])
+          .map(p => get().fetchModels(p.id)),
+      );
     } catch (e) {
       set({ error: String(e) });
       throw e;
