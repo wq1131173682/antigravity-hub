@@ -217,12 +217,6 @@ pub fn run() {
             commands::check_for_updates,
             commands::install_update,
             commands::get_app_version,
-            // Debug console
-            modules::log_bridge::enable_debug_console,
-            modules::log_bridge::disable_debug_console,
-            modules::log_bridge::is_debug_console_enabled,
-            modules::log_bridge::get_debug_console_logs,
-            modules::log_bridge::clear_debug_console_logs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

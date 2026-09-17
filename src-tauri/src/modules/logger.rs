@@ -62,15 +62,14 @@ pub fn init_logger() {
     let filter_layer = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    // 6. Log bridge layer
-    let bridge_layer = crate::modules::log_bridge::TauriLogBridgeLayer::new();
-
     // 5. Initialize global subscriber (use try_init to avoid crash on repeated initialization)
+    // The log-bridge layer used to sit here. It was removed with the debug
+    // console: its enable flag was only ever set by a deleted Tauri command, so
+    // the layer returned early on every event and never emitted anything.
     let _ = tracing_subscriber::registry()
         .with(filter_layer)
         .with(console_layer)
         .with(file_layer)
-        .with(bridge_layer)
         .try_init();
 
     // Leak _guard to ensure its lifetime lasts until program exit
