@@ -6,16 +6,13 @@
  .
  ├── src/                  # Frontend (React 19 + TypeScript)
  │   ├── components/       # UI components grouped by feature
- │   │   ├── accounts/     # Account management components
  │   │   ├── common/       # Shared/reusable components
  │   │   ├── dashboard/    # Dashboard widgets
- │   │   ├── debug/        # Debug console components
- │   │   ├── layout/       # App shell and layout
+ │   │   ├── layout/       # App shell, title bar, mini view
  │   │   └── navbar/       # Top navigation bar
  │   ├── config/           # App configuration (e.g., model config)
- │   ├── hooks/            # Custom React hooks
  │   ├── locales/          # i18n translation files (12 languages)
- │   ├── pages/            # Top-level route pages
+ │   ├── pages/            # Top-level route pages (Dashboard, Accounts, Settings)
  │   ├── services/         # API abstraction layer (backend calls)
  │   ├── stores/           # Zustand state stores
  │   ├── types/            # TypeScript type definitions
@@ -26,15 +23,18 @@
  │       ├── models/       # Data models (apikey, config, platform, etc.)
  │       ├── modules/      # Core business logic (proxy, keystore, scheduler)
  │       └── utils/        # Shared utilities (HTTP client, etc.)
- ├── docker/               # Docker compose and Dockerfiles
  ├── docs/                 # Internal documentation
- ├── workflows/            # GitHub Actions CI/CD
- ├── scripts/              # Build and release helper scripts
- ├── public/               # Static assets (fonts, icons)
+ ├── scripts/              # Local dev helpers (gitignored)
+ ├── public/               # Static assets (Effra font, app icon)
  └── dist/                 # Built frontend output (gitignored)
  ```
  
- The frontend follows a feature-grouped component structure. Each store in `src/stores/` owns a single domain (accounts, config, platforms, view state). The Rust backend mirrors this with `models/` for data structures and `modules/` for business logic.
+ The frontend follows a feature-grouped component structure. Each store in `src/stores/` owns a single domain (platforms, config, view state). The Rust backend mirrors this with `models/` for data structures and `modules/` for business logic.
+
+ This repo is a **derivative work** of [`lbjlaq/Antigravity-Manager`](https://github.com/lbjlaq/Antigravity-Manager)
+ (CC BY-NC-SA 4.0) rebuilt as a key-rotation proxy. It shares **no git history**
+ with upstream, so upstream changes must be ported by hand. See `DESIGN.md`
+ section 7. Only three routes exist: `/` (Dashboard), `/accounts`, `/settings`.
  
  ## Build, Test, and Development Commands
  
@@ -62,7 +62,7 @@
  **Frontend (TypeScript/React)**
  
  - Indentation: 2 spaces. Use single quotes for strings.
- - Components use PascalCase, files use camelCase (e.g., `accountService.ts`, `useAccountStore.ts`).
+ - Components use PascalCase, files use camelCase (e.g., `platformService.ts`, `usePlatformStore.ts`).
  - React components are `.tsx` files; pure logic lives in `.ts` files.
  - TypeScript is strict mode: `noUnusedLocals` and `noUnusedParameters` are enforced.
  - CSS uses Tailwind utility classes with daisyUI theme tokens. PostCSS + Autoprefixer handle vendor prefixes.
@@ -101,8 +101,14 @@
  
  ## Security & Configuration Tips
  
- - API keys are stored locally via the Tauri filesystem plugin. The proxy runs on `127.0.0.1:8045` and only listens locally.
+ - API keys are stored locally by the Rust backend in `api_keys.json` under the
+   app data dir (`src-tauri/src/modules/keystore.rs` uses `std::fs` directly).
+   The proxy listens on `127.0.0.1:8045` and is local-only by default.
  - The Vite dev server proxies `/api/` requests to the backend; no external exposure in production.
  - The Tauri CSP is restrictive: `default-src 'self'` with minimal allowances for images and styles. Do not relax it without review.
  - Sensitive configuration (signing keys, API tokens) must never be committed. Use environment variables or Tauri build secrets.
- - Docker configurations in `docker/` are intended for backend services only — the Tauri desktop app is not containerized.
+ - `@tauri-apps/plugin-*` npm bindings are NOT used by the frontend. The Rust
+   side registers `tauri-plugin-dialog`, `-fs`, `-opener` and `-updater` in
+   `lib.rs`, but no frontend module imports their JS counterparts. The one
+   exception historically was the updater, which the UI drives through the
+   custom `check_for_updates` / `install_update` IPC commands instead.
