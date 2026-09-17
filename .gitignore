@@ -67,9 +67,6 @@ QWEN.md
 SETUP_NOTES.md
 DOCKER_DEPLOYMENT.md
 
-# Agent workspace memory (not part of the app)
-.workbuddy/
-
 # Minisign private key (keep secret!)
 src-tauri/minisign/minisign.key
 
@@ -82,6 +79,13 @@ nul
 *.AppImage
 *.msi
 *.exe
-# AI assistant dirs
+# AI assistant / agent working directories - local tooling state, not app code.
+# These change on every session and must never be published.
+#   .mnemon/  dsh-mneme's project memory (SQLite DB + notes + user preferences)
 .dsh-vision-toolkit/
 .workbuddy/
+.mnemon/
+
+# SQLite sidecar files, created next to any .db at runtime
+*.db-shm
+*.db-wal
