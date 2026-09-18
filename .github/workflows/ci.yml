@@ -126,11 +126,32 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install WebView2 (required by Tauri v2 on Windows)
+      - name: Ensure WebView2 runtime (Windows)
+        shell: pwsh
+        # windows-latest already ships the WebView2 Evergreen Runtime, and Tauri
+        # only needs it at runtime — not to compile. Check first so the build
+        # cannot fail on a CDN hiccup: the old hardcoded release asset URL
+        # (webview2/releases/download/126.0.2592.102/...) began returning 404
+        # and turned every master build red.
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri "https://github.com/webview/webview2/releases/download/126.0.2592.102/WinWebview2Setup.exe" -OutFile "$env:TEMP\WebView2.exe"
-          Start-Process "$env:TEMP\WebView2.exe" -ArgumentList "/silent", "/install" -Wait
+          $clientKeys = @(
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+            'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+            'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          )
+          if ($clientKeys | Where-Object { Test-Path $_ }) {
+            Write-Host "WebView2 runtime already present; skipping install."
+            exit 0
+          }
+          Write-Host "WebView2 runtime not detected; installing via Evergreen bootstrapper..."
+          try {
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile "$env:TEMP\WebView2.exe" -UseBasicParsing
+            Start-Process "$env:TEMP\WebView2.exe" -ArgumentList '/silent', '/install' -Wait
+            Write-Host "WebView2 runtime installed."
+          } catch {
+            Write-Warning "WebView2 install skipped after error: $_"
+          }
 
       - name: Install system dependencies (Windows)
         run: choco install llvm -y
