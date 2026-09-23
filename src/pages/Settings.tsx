@@ -27,7 +27,7 @@ function Settings() {
     return LANGUAGES.find(l => tag.startsWith(l.code.split('-')[0].toLowerCase()))?.code;
   })();
 
-  const [portInput, setPortInput] = useState('8080');
+  const [portInput, setPortInput] = useState('8045');
   const [hostInput, setHostInput] = useState('127.0.0.1');
   const [autoSwitch, setAutoSwitch] = useState(true);
   const [proxyUrlInput, setProxyUrlInput] = useState('');
@@ -44,7 +44,7 @@ function Settings() {
 
   useEffect(() => {
     if (config) {
-      setPortInput(String(config.proxy_port ?? 8080));
+      setPortInput(String(config.proxy_port ?? 8045));
       setHostInput(config.proxy_host ?? '127.0.0.1');
       setAutoSwitch(config.auto_switch ?? true);
       setProxyUrlInput(config.upstream_proxy_url ?? '');

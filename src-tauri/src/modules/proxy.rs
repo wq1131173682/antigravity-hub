@@ -12,6 +12,25 @@ use tracing::{info, warn, error};
 static MODELS_CACHE: once_cell::sync::Lazy<std::sync::Mutex<Option<(String, std::time::Instant)>>> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 const MODELS_CACHE_TTL_SECS: u64 = 60;
 
+/// Initial retry budget for one proxied request, in seconds.
+///
+/// This is a *floor*, not a hard cap: when every candidate key is merely
+/// cooling down from an upstream 429, the deadline is extended (see the
+/// empty-candidate branch in `forward_with_retry`) so a recoverable
+/// account-level rate limit is waited out instead of being reported as a
+/// hard failure.
+const RETRY_BUDGET_BASE_SECS: i64 = 60;
+
+/// Hard ceiling for the extended retry budget, measured from the moment the
+/// request arrived. Bounds how long a client may be held waiting for a
+/// rate-limited key pool to recover. Anchored to the request start (never to
+/// "now") so repeated extensions cannot push it forward forever.
+const RETRY_BUDGET_MAX_SECS: i64 = 180;
+
+/// Slack added when extending the deadline to cover a known cooldown expiry,
+/// so the retry lands just after the cooldown lifts rather than exactly on it.
+const RETRY_BUDGET_GRACE_SECS: i64 = 2;
+
 /// Helper: build an HTTP error response without `.unwrap()`.
 /// Returns an axum Response with the given status code and body text.
 fn error_response(status: u16, body: String) -> axum::response::Response {
@@ -26,13 +45,46 @@ fn error_response(status: u16, body: String) -> axum::response::Response {
         })
 }
 
+/// Like `error_response`, but advertises how long the client should wait and
+/// emits an OpenAI-compatible JSON error object.
+///
+/// Used for the "all keys cooling down" case: the request was not misrouted and
+/// the proxy is not broken, the upstream is throttling the account. Clients that
+/// understand `Retry-After` (most OpenAI-compatible SDKs) back off cleanly
+/// instead of treating it as a hard failure, and the JSON shape matches what
+/// those SDKs parse for `error.message` / `error.code`.
+fn error_response_with_retry_after(
+    status: u16,
+    message: String,
+    retry_after_secs: u64,
+) -> axum::response::Response {
+    let payload = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "rate_limit_error",
+            "code": "upstream_rate_limited",
+            "retry_after": retry_after_secs,
+        }
+    });
+    axum::response::Response::builder()
+        .status(status)
+        .header("retry-after", retry_after_secs.to_string())
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(payload.to_string()))
+        .unwrap_or_else(|_| {
+            axum::response::Response::new(axum::body::Body::from(
+                format!("Internal error (status={})", status),
+            ))
+        })
+}
+
 /// Shared HTTP client for LLM API calls.
 ///
 /// The total timeout is a generous 1 hour (3600s). It MUST NOT be a short
 /// wall-clock cap like 300s: reqwest's `.timeout()` bounds the ENTIRE request
 /// including streaming body reads, and relays such as Agnes buffer the full
 /// response before streaming it out. A single generation (long reasoning +
-/// web_search + tool calls) can legitimately exceed 5 minutes 閳?a 300s cap
+/// web_search + tool calls) can legitimately exceed 5 minutes —a 300s cap
 /// aborts the stream mid-response, which surfaced as "conversation got
 /// interrupted after a few minutes". Genuinely dead streams are still caught
 /// by the idle timeouts in `transform_stream_to_responses` (first-chunk /
@@ -53,7 +105,7 @@ fn build_http_client(proxy_url: Option<&str>) -> Client {
         .timeout(std::time::Duration::from_secs(3600))
         // Bound connection establishment so a dead/black-holed upstream fails
         // fast instead of hanging the whole request (which surfaced as
-        // "second conversation gets no response, needs several retries" 閳?the
+        // "second conversation gets no response, needs several retries" —the
         // client reused a stale pooled socket and blocked until the client's
         // own timeout).
         .connect_timeout(std::time::Duration::from_secs(20))
@@ -92,7 +144,7 @@ pub fn init_proxy_client(proxy_url: Option<String>) {
 
 /// Update the proxy client at runtime with a new proxy URL.
 /// When `proxy_url` is None or empty, reverts to direct connection.
-/// The proxy server does NOT need to be restarted 閳?the new client is used
+/// The proxy server does NOT need to be restarted —the new client is used
 /// immediately for subsequent requests.
 pub fn update_proxy_client(proxy_url: Option<String>) {
     info!("Updating proxy client, proxy_url={:?}", proxy_url);
@@ -110,7 +162,7 @@ pub struct ProxyStatus {
 }
 
 static PROXY_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static PROXY_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(8080);
+static PROXY_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(8045);
 static PROXY_HOST: once_cell::sync::Lazy<std::sync::Mutex<String>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new("127.0.0.1".to_string()));
 static SHUTDOWN_TX: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
@@ -250,14 +302,14 @@ fn create_router() -> axum::Router {
 /// the real JSON payload so the proxy can process it normally.
 ///
 /// Header/body separators handled (in priority order):
-///   - `"\r\n\r\n"` 閳?standard HTTP/1.1
-///   - `"\n\n"` 閳?LF-only
+///   - `"\r\n\r\n"` —standard HTTP/1.1
+///   - `"\n\n"` —LF-only
 ///   - a SINGLE `"\r\n"` / `"\n"` between the last header and the JSON payload.
 ///     Some SDKs (WorkBuddy among them) emit the body immediately after the
 ///     final header with only one line break instead of the required blank
 ///     line. Without recovering the JSON in that case the request was silently
 ///     answered with `200 OK` (treated as a liveness probe) and the real chat
-///     message was dropped 閳?which surfaced as "the first conversation stops
+///     message was dropped —which surfaced as "the first conversation stops
 ///     immediately with no output".
 ///
 /// Returns `Some(inner_json_bytes)` when the body looks like an HTTP request
@@ -296,7 +348,7 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Embedded payload must be valid JSON 閳?otherwise we don't touch the body.
+    // Embedded payload must be valid JSON —otherwise we don't touch the body.
     serde_json::from_str::<serde_json::Value>(inner).ok()?;
     Some(inner.as_bytes().to_vec())
 }
@@ -306,7 +358,7 @@ fn extract_json_from_http_text(body: &[u8]) -> Option<Vec<u8>> {
 ///
 /// WorkBuddy's session-opening probe sends only the request line + headers
 /// as the POST body (no `\r\n\r\n` separator, no JSON payload). We must not
-/// hard-reject that 閳?it is a liveness/session probe, not a real chat call.
+/// hard-reject that —it is a liveness/session probe, not a real chat call.
 fn looks_like_http_request_text(body: &[u8]) -> bool {
     let Some(text) = std::str::from_utf8(body).ok() else {
         return false;
@@ -326,7 +378,7 @@ fn looks_like_http_request_text(body: &[u8]) -> bool {
 /// nothing else on the wire. If the upstream is slow (e.g. reasoning models
 /// before the first tool call, or anything that buffers upstream), the
 /// client's SSE implementation will eventually give up on an idle connection
-/// and close it 閳?surfacing as "the assistant's response cut off mid-stream".
+/// and close it —surfacing as "the assistant's response cut off mid-stream".
 ///
 /// To prevent that, we wrap the upstream `bytes_stream` with a keepalive
 /// stream (`SseKeepaliveStream`) that periodically emits an SSE comment frame
@@ -334,8 +386,8 @@ fn looks_like_http_request_text(body: &[u8]) -> bool {
 /// and keep the underlying TCP socket live.
 ///
 /// CRITICAL: the comment is injected ONLY at a complete SSE event boundary
-/// (`\n\n`). Injecting it while the upstream is mid `data:` frame 閳?exactly
-/// what happens during a tool-call reasoning gap 閳?would terminate that frame
+/// (`\n\n`). Injecting it while the upstream is mid `data:` frame —exactly
+/// what happens during a tool-call reasoning gap —would terminate that frame
 /// early and hand the client truncated JSON, aborting the conversation ("cut
 /// off after a tool call"). When the stream is silent inside a partial frame,
 /// the wrapper stays quiet and lets the upstream finish the event.
@@ -352,7 +404,7 @@ const SSE_KEEPALIVE_BYTES: &[u8] = b": ping\n\n";
 
 /// Monotonic request counter so proxy logs can be correlated: how many
 /// requests actually reached the proxy vs. how many the client believes it
-/// sent. Each incoming HTTP request through `proxy_handler` 閳?/// `forward_with_retry` gets one sequential id.
+/// sent. Each incoming HTTP request through `proxy_handler` —/// `forward_with_retry` gets one sequential id.
 static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Adapt an upstream byte stream into one that emits periodic SSE comment
@@ -364,7 +416,7 @@ static REQ_SEQ: AtomicU64 = AtomicU64::new(0);
 /// - If the upstream stays idle for `keepalive_secs`, an SSE comment frame
 ///   is yielded instead so the client never sees a "no bytes for too long"
 ///   gap on the socket.
-/// - Upstream errors and end-of-stream are passed through verbatim 閳?we
+/// - Upstream errors and end-of-stream are passed through verbatim —we
 ///   never fabricate success or stretch a dead stream past its real end.
 ///
 /// The `Sleep` is held behind `Pin<Box<_>>` because `tokio::time::Sleep` is
@@ -461,7 +513,7 @@ where
         // are pinned through `&mut *self`.
         let me = &mut *self;
 
-        // Data path 閳?try upstream first. Real data always wins so a chunk
+        // Data path —try upstream first. Real data always wins so a chunk
         // never gets a comment frame glued to its tail.
         match std::pin::Pin::new(&mut me.inner).poll_next(cx) {
             std::task::Poll::Ready(Some(Ok(bytes))) => {
@@ -508,9 +560,9 @@ where
             std::task::Poll::Pending => {}
         }
 
-        // Keepalive path 閳?only reached when the upstream produced no data
+        // Keepalive path —only reached when the upstream produced no data
         // this call. If the silence has lasted long enough, inject a comment
-        // frame AND re-arm 閳?but ONLY when we are sitting on a complete SSE
+        // frame AND re-arm —but ONLY when we are sitting on a complete SSE
         // event boundary.
         if me.next_ping_at.as_mut().as_mut().poll(cx).is_ready() {
             if me.at_event_boundary() {
@@ -529,7 +581,7 @@ where
             } else {
                 // Upstream went silent in the MIDDLE of a partial `data:` frame
                 // (very common during tool-call reasoning gaps). Do NOT inject a
-                // comment here 閳?re-arm and keep waiting for the upstream to
+                // comment here —re-arm and keep waiting for the upstream to
                 // finish the event first. If the stream is genuinely dead, the
                 // client's own timeout ends it; we must not fabricate a frame
                 // that corrupts the partial one we already relayed.
@@ -552,7 +604,7 @@ fn parse_model_name(body_bytes: &[u8]) -> Option<String> {
         .and_then(|v| v.get("model")?.as_str().map(String::from))
 }
 
-/// Handle `/v1/models` requests 閳?return the models configured in Antigravity Hub
+/// Handle `/v1/models` requests —return the models configured in Antigravity Hub
 /// in OpenAI-compatible format.
 ///
 /// OpenAI format:
@@ -680,7 +732,7 @@ pub struct ImportModelsResult {
 }
 
 /// Fetch the upstream model list (`/v1/models` or `/models`) for a platform.
-/// Returns (model_name, display_name, max_input_tokens) tuples 閳?nothing is
+/// Returns (model_name, display_name, max_input_tokens) tuples —nothing is
 /// written to local storage. Shared by the full-sync and selective-import
 /// flows. Handles Gemini's `/v1beta/openai` root via deduplicate_url_path.
 async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, String, Option<u64>, Option<u64>)>, String> {
@@ -705,7 +757,7 @@ async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, Str
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
 
-    // Try multiple URL patterns 閳?some providers use /v1/models, others /models.
+    // Try multiple URL patterns —some providers use /v1/models, others /models.
     // Use deduplicate_url_path to handle base URLs that already include /v1
     // (or Gemini's /v1beta/openai root, where the /v1 is stripped).
     let url_candidates = vec![
@@ -758,7 +810,7 @@ async fn fetch_upstream_model_list(platform_id: &str) -> Result<Vec<(String, Str
         )
     })?;
 
-    // Parse the model list from the upstream response 閳?support multiple formats
+    // Parse the model list from the upstream response —support multiple formats
     let upstream_models = body.get("data")
         .and_then(|d| d.as_array())
         .or_else(|| body.as_array())
@@ -1000,7 +1052,7 @@ pub async fn test_model(
 
     let base_url = platform.base_url.trim_end_matches('/').to_string();
     // Use deduplicate_url_path to handle base URLs that already include /v1
-    // (e.g., "https://token.sensenova.cn/v1" 閳?"/v1/chat/completions" 閳?"https://token.sensenova.cn/v1/chat/completions")
+    // (e.g., "https://token.sensenova.cn/v1" —"/v1/chat/completions" —"https://token.sensenova.cn/v1/chat/completions")
     let url = deduplicate_url_path(&base_url, "/v1/chat/completions");
 
     let request_body = serde_json::json!({
@@ -1126,7 +1178,7 @@ async fn proxy_handler(
             // cross-platform. (Model discovery at /v1/models is handled
             // prefix-agnostically above, so it is unaffected.)
             warn!(
-                "No platform matches prefix '{}' 閳?refusing request (use /<platform>/... path prefix)",
+                "No platform matches prefix '{}' —refusing request (use /<platform>/... path prefix)",
                 platform_prefix
             );
             return error_response(
@@ -1139,14 +1191,14 @@ async fn proxy_handler(
         }
     };
 
-    // 閳光偓閳光偓 Pure pass-through mode 閳光偓閳光偓
+    // ── Pure pass-through mode ──
     // The proxy does NOT rewrite request/response bodies or protocol formats.
     // Its only jobs are: route by platform prefix, inject a rotated API key,
     // track quota/token stats, and relay the response (with SSE keepalive)
     // untouched. Requests to /v1/responses etc. are forwarded as-is; whether
     // an upstream supports them is the upstream's business.
 
-    // 閳光偓閳光偓 Model list interception 閳光偓閳光偓
+    // ── Model list interception ──
     // Intercept all variants of /models requests and return locally configured
     // models. This includes:
     // - /v1/models (standard OpenAI format)
@@ -1184,14 +1236,14 @@ async fn proxy_handler(
         Ok(b) => b,
         Err(e) => {
             error!(
-                "Failed to read request body (likely dead keep-alive connection from client 閳?\
+                "Failed to read request body (likely dead keep-alive connection from client —\
                  client must reconnect): {}", e
             );
             return error_response(400, format!("Failed to read body: {}", e));
         }
     };
 
-    // 鈹€鈹€ Malformed body defense (compat for HTTP-text-body clients) 鈹€鈹€
+    // ── Malformed body defense (compat for HTTP-text-body clients) ──
     // Some clients send their first request with the ENTIRE HTTP/1.1 message
     // (request line + headers) as the POST body instead of a JSON payload.
     // Recover the embedded JSON body when possible, acknowledge bare session
@@ -1259,7 +1311,18 @@ async fn proxy_handler(
 
     match result {
         Ok(response) => response,
-        Err(e) => {
+        Err(ProxyFailure::RateLimited { retry_after, message }) => {
+            // The upstream answered (429) and the key pool is cooling down, so
+            // this is "try again shortly" — NOT a proxy fault. 503 + Retry-After
+            // is what OpenAI-compatible clients understand and back off on;
+            // the old blanket 502 told them the proxy itself was broken.
+            warn!(
+                "Upstream rate limit for {}: {} (retry after {}s)",
+                target_url_str, message, retry_after
+            );
+            error_response_with_retry_after(503, message, retry_after)
+        }
+        Err(ProxyFailure::Other(e)) => {
             error!("Proxy error for {}: {}", target_url_str, e);
             error_response(502, format!("Proxy error: {}", e))
         }
@@ -1333,7 +1396,7 @@ fn normalize_models_path(path: &str) -> Option<&str> {
 }
 
 /// e.g., base_url="https://api.sensenova.com/v1", target_path="/v1/chat/completions"
-///       閳?"https://api.sensenova.com/v1/chat/completions" (not /v1/v1/...)
+///       —"https://api.sensenova.com/v1/chat/completions" (not /v1/v1/...)
 /// If target_path does not start with a version prefix, or the prefixes differ,
 /// the raw concatenation is returned unchanged.
 fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
@@ -1357,7 +1420,7 @@ fn deduplicate_url_path(base_url: &str, target_path: &str) -> String {
         // Gemini's OpenAI-compatibility layer: base_url ends with
         // "/v1beta/openai" and exposes endpoints DIRECTLY under that root
         // (e.g. /v1beta/openai/chat/completions). The proxy maps
-        // /v1/responses 閳?/v1/chat/completions, so without this rule the
+        // /v1/responses —/v1/chat/completions, so without this rule the
         // target would become "/v1beta/openai/v1/chat/completions", which
         // Gemini rejects with HTTP 404. When the base ends with "/openai",
         // drop the leading version segment from the target path.
@@ -1416,7 +1479,7 @@ fn resolve_model_id(platform_id: &str, model_name: Option<&str>) -> Option<Strin
 
 fn get_keys_to_try(candidates: &[String], model_id: Option<&str>) -> Vec<String> {
     // Skip keys whose quota window is already exceeded or currently in cooldown
-    // (e.g. rate-limited by a recent 429 閳?see `record_429`).
+    // (e.g. rate-limited by a recent 429 —see `record_429`).
     let mut available = if let Some(mid) = model_id {
         crate::modules::quota_window::filter_available_keys(candidates, mid, "")
     } else {
@@ -1443,6 +1506,51 @@ fn list_active_key_ids(platform_id: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Failure modes of `forward_with_retry`.
+///
+/// Previously every failure collapsed into a `String` that `proxy_handler`
+/// reported as HTTP 502 "Proxy error". That made a *rate-limited but healthy*
+/// key pool indistinguishable from a broken upstream: clients saw
+/// `502 No active API keys available`, which is both the wrong status (the
+/// upstream answered, it just said 429) and the wrong diagnosis (keys exist and
+/// are about to recover). Splitting the type lets the handler answer 503 with a
+/// `Retry-After` header for the throttling case and keep 502 for genuine faults.
+enum ProxyFailure {
+    /// Upstream returned 429 for every candidate key; the pool is cooling down.
+    /// `retry_after` is seconds until the earliest key becomes usable again.
+    RateLimited { retry_after: u64, message: String },
+    /// Transport failure, upstream 5xx, missing configuration, ...
+    Other(String),
+}
+
+impl From<String> for ProxyFailure {
+    fn from(e: String) -> Self {
+        ProxyFailure::Other(e)
+    }
+}
+
+/// Build the `RateLimited` failure for a fully-cooling-down key pool.
+fn rate_limited_failure(
+    candidate_count: usize,
+    earliest_expiry: i64,
+    request_started_at: i64,
+) -> ProxyFailure {
+    let now = chrono::Utc::now().timestamp();
+    let retry_after = (earliest_expiry - now).max(1) as u64;
+    ProxyFailure::RateLimited {
+        retry_after,
+        message: format!(
+            "Upstream rate limit (HTTP 429) on all {} key(s) for this platform. \
+             Every key is cooling down and the pool should recover in ~{}s \
+             (retried for {}s). This is upstream throttling of the account, \
+             not a missing or disabled key — retry after the indicated delay.",
+            candidate_count,
+            retry_after,
+            (now - request_started_at).max(0)
+        ),
+    }
+}
+
 /// Forward request with automatic key rotation on 429/500.
 /// Tracks quota per (model_id, key_id).
 #[allow(clippy::too_many_arguments)]
@@ -1461,22 +1569,32 @@ async fn forward_with_retry(
     // Key rotation on 429/5xx happens *before* committing, so a throttled key
     // no longer breaks the conversation.
     early_flush_mode: bool,
-) -> Result<axum::response::Response, String> {
+) -> Result<axum::response::Response, ProxyFailure> {
     // Sequential id for this incoming request (one per proxy_handler call).
     let req_id = REQ_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    // 閳光偓閳光偓 Retry strategy: time-budget loop 閳光偓閳光偓
+    // ── Retry strategy: time-budget loop ──
     // Old design: fixed attempt count (max_retries=5) with ZERO backoff on the
     // multi-key 429 path, so a transient platform-wide 429 (sensenova 429s every
     // key at once, then self-heals ~10s later) was burned through in
     // milliseconds and reported as "All keys exhausted" before the cooldown
     // window even expired. Now we retry until a time budget elapses, waiting out
     // 429 cooldowns so transient blips recover into a short delay instead of a 502.
-    let retry_budget_secs: i64 = if auto_switch { 60 } else { 0 };
-    let retry_deadline: Option<i64> = if retry_budget_secs > 0 {
-        Some(chrono::Utc::now().timestamp() + retry_budget_secs)
+    //
+    // The budget is a floor that can be EXTENDED (up to RETRY_BUDGET_MAX_SECS
+    // from request start) when every candidate key is cooling down. A flat 60s
+    // budget used to give up while the soonest cooldown was still ~30s away,
+    // producing a bogus "No active API keys available" for a pool that was
+    // merely rate-limited and about to recover.
+    let request_started_at = chrono::Utc::now().timestamp();
+    let mut retry_deadline: Option<i64> = if auto_switch {
+        Some(request_started_at + RETRY_BUDGET_BASE_SECS)
     } else {
         None
     };
+    // Set when we give up specifically because the whole key pool was cooling
+    // down. Lets the caller report an accurate status (503 + Retry-After)
+    // instead of the generic 502 that means "the upstream call failed".
+    let mut rate_limited_until: Option<i64> = None;
     // Accumulates the most recent failure reason; read only when the retry
     // budget is exhausted (all other paths `continue` or `break` past writes).
     #[allow(unused_assignments)]
@@ -1486,7 +1604,7 @@ async fn forward_with_retry(
     // Incremented on each 429/5xx from the active key; reset to 0 on success or
     // when we switch to a different key. Rotation only happens after this count
     // reaches the number of available keys, so we exhaust retries on one key
-    // before moving to the next 閳?this avoids "blitzing" every key in rapid
+    // before moving to the next —this avoids "blitzing" every key in rapid
     // succession, which is exactly what triggers account-level rate limits.
     let mut current_key_errors: u32 = 0;
 
@@ -1502,7 +1620,7 @@ async fn forward_with_retry(
         keys.into_iter().map(|k| (k.id, k.key_value)).collect()
     };
 
-    // Candidate key set (independent of cooldown/quota filtering) 閳?kept so we
+    // Candidate key set (independent of cooldown/quota filtering) —kept so we
     // can tell the difference between "no keys at all" and "all keys temporarily
     // rate-limited" when `get_keys_to_try` returns empty mid-retry.
     let candidates = get_candidate_keys(platform_id, model_id.as_deref());
@@ -1515,9 +1633,9 @@ async fn forward_with_retry(
 
         if keys_to_try.is_empty() {
             // Every candidate key is in a 429 cooldown or has an exceeded quota
-            // window. If a cooldown is pending and we still have retry budget,
-            // wait for the earliest one to expire and retry 閳?this is what turns
-            // a transient multi-key 429 into a short delay instead of a hard 502.
+            // window. If a cooldown is pending, wait for the earliest one to
+            // expire and retry —this is what turns a transient multi-key 429
+            // into a short delay instead of a hard failure.
             let mut waited = false;
             if let Some(mid) = model_id.as_ref() {
                 if let Some(expiry) =
@@ -1525,10 +1643,37 @@ async fn forward_with_retry(
                 {
                     let now = chrono::Utc::now().timestamp();
                     if expiry > now {
-                        let wait = (expiry - now).clamp(1, 30) as u64;
-                        let budget_left =
-                            retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
-                        // Only wait if it fits within the remaining retry budget.
+                        // Record the soonest moment the pool can recover, even
+                        // if we end up not waiting for it — the caller uses it
+                        // for the Retry-After header on the 503 below.
+                        rate_limited_until = Some(expiry);
+                        // Wait for the FULL cooldown rather than a truncated
+                        // slice: the previous clamp(1, 30) capped the sleep at
+                        // 30s while cooldowns can reach 30s *plus* elapsed
+                        // retry time, so a "wait" could expire before the key
+                        // actually became available and burn an attempt.
+                        let wait = (expiry - now + RETRY_BUDGET_GRACE_SECS).max(1) as u64;
+                        // Extend the budget to cover this cooldown when the
+                        // remaining budget is too short, bounded by
+                        // RETRY_BUDGET_MAX_SECS measured from request start.
+                        if let Some(deadline) = retry_deadline.as_mut() {
+                            let needed = now + wait as i64;
+                            let hard_cap = request_started_at + RETRY_BUDGET_MAX_SECS;
+                            if *deadline < needed && needed <= hard_cap {
+                                info!(
+                                    "[req {}] extending retry budget to {}s (from request start) to wait out 429 cooldown (attempt {})",
+                                    req_id,
+                                    needed - request_started_at,
+                                    attempt
+                                );
+                                *deadline = needed;
+                            }
+                        }
+                        let budget_left = retry_deadline
+                            .map(|d| d - chrono::Utc::now().timestamp())
+                            .unwrap_or(0);
+                        // Only wait if it fits within the (possibly extended)
+                        // retry budget.
                         if budget_left > 0 && (budget_left as u64) >= wait {
                             warn!(
                                 "[req {}] all keys rate-limited (429 cooldown), waiting {}s before retry (attempt {})",
@@ -1541,7 +1686,25 @@ async fn forward_with_retry(
                 }
             }
             if !waited {
-                return Err("No active API keys available for this platform".to_string());
+                // Distinguish the two genuinely different situations:
+                //  - every key is merely cooling down from an upstream 429 →
+                //    the pool is fine, the upstream is throttling this account;
+                //  - keys exist but are excluded for a non-cooldown reason
+                //    (quota window exceeded) or there are no keys at all.
+                return if let Some(until) = rate_limited_until {
+                    Err(rate_limited_failure(
+                        candidates.len(),
+                        until,
+                        request_started_at,
+                    ))
+                } else {
+                    Err(ProxyFailure::Other(format!(
+                        "No usable API keys for platform '{}': all {} candidate key(s) are over their quota window. \
+                         Raise the model's quota limits or add another key.",
+                        platform_prefix,
+                        candidates.len()
+                    )))
+                };
             }
             continue;
         }
@@ -1579,7 +1742,7 @@ async fn forward_with_retry(
         // "Content-Type: application/json" lines) makes Mistral's edge gateway
         // mis-parse the request body as a JSON-encoded string, returning
         // HTTP 422 "model_attributes_type / Input should be a valid dictionary
-        // or object to extract fields from" 閳?which surfaced as Mistral
+        // or object to extract fields from" —which surfaced as Mistral
         // conversations failing with "unexpected status 422" through the proxy
         // while the in-app test (single Content-Type) worked fine.
         for (key, value) in original_headers.iter() {
@@ -1642,8 +1805,17 @@ async fn forward_with_retry(
             last_error = "Rate limited (429)".to_string();
             let budget_left =
                 retry_deadline.map(|d| d - chrono::Utc::now().timestamp()).unwrap_or(0);
-            // Budget exhausted: stop retrying.
+            // Budget exhausted: stop retrying. Record the pool's recovery time so
+            // the caller classifies this as an upstream rate limit (503 +
+            // Retry-After) instead of a generic 502 proxy error.
             if budget_left <= 0 {
+                if let Some(mid) = model_id.as_ref() {
+                    rate_limited_until =
+                        crate::modules::quota_window::earliest_cooldown_expiry(&candidates, mid)
+                            .or_else(|| Some(chrono::Utc::now().timestamp() + 1));
+                } else {
+                    rate_limited_until = Some(chrono::Utc::now().timestamp() + 1);
+                }
                 break;
             }
             let num_keys = keys_to_try.len();
@@ -1710,7 +1882,7 @@ async fn forward_with_retry(
                 let _ = crate::modules::quota_window::record_500_error(key_id, mid, platform_id);
             }
 
-            // NEVER disable keys 閳?only rotate or retry with backoff.
+            // NEVER disable keys —only rotate or retry with backoff.
             // Keys are a precious resource; disabling them on transient server
             // errors would leave the proxy unable to serve requests until the
             // user manually re-enables them.
@@ -1817,7 +1989,7 @@ async fn forward_with_retry(
             // (WorkBuddy / Codex CLI / any SSE consumer) opens a fresh TCP
             // connection for the next request.  Without this, hyper/axum may
             // leave the connection in an ambiguous state after a chunked
-            // transfer-encoding stream ends 閳?the client reuses it via HTTP/1.1
+            // transfer-encoding stream ends —the client reuses it via HTTP/1.1
             // keep-alive and hits "error reading a body from connection" on the
             // next request, which surfaces as "second message gets no reply".
             // Empirically this pattern repeats multiple times per day (see log
@@ -1834,7 +2006,7 @@ async fn forward_with_retry(
             // seconds, even when the upstream model is reasoning before its
             // first tool call. Without this, clients that use
             // `fetch().getReader()` time out on idle SSE connections and
-            // truncate the response mid-stream 鈥?surfacing as "the assistant's
+            // truncate the response mid-stream —surfacing as "the assistant's
             // reply cut off after a tool call".
             let upstream = resp.bytes_stream();
             // Early-flush mode (sensenova / WorkBuddy): prepend an immediate
@@ -1862,7 +2034,7 @@ async fn forward_with_retry(
             );
             return response_builder
                 .body(body)
-                .map_err(|e| format!("Failed to build response: {}", e));
+                .map_err(|e| ProxyFailure::Other(format!("Failed to build response: {}", e)));
         }
 
         // Non-streaming: buffer the body so we can inspect `usage` before
@@ -1871,7 +2043,10 @@ async fn forward_with_retry(
         let body_bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                return Err(format!("Failed to read upstream response: {}", e));
+                return Err(ProxyFailure::Other(format!(
+                    "Failed to read upstream response: {}",
+                    e
+                )));
             }
         };
 
@@ -1898,14 +2073,26 @@ async fn forward_with_retry(
         let body = axum::body::Body::from(body_bytes);
         return response_builder
             .body(body)
-            .map_err(|e| format!("Failed to build response: {}", e));
+            .map_err(|e| ProxyFailure::Other(format!("Failed to build response: {}", e)));
     }
 
-    Err(format!("All keys exhausted for platform '{}': {}", platform_prefix, last_error))
+    // Budget exhausted. If the reason was a cooling-down key pool, report it as
+    // a rate limit (503 + Retry-After) rather than a generic proxy failure.
+    if let Some(until) = rate_limited_until {
+        return Err(rate_limited_failure(
+            candidates.len(),
+            until,
+            request_started_at,
+        ));
+    }
+    Err(ProxyFailure::Other(format!(
+        "All keys exhausted for platform '{}': {}",
+        platform_prefix, last_error
+    )))
 }
 
-// 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
-// 濞村鐦?// 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1923,7 +2110,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_lf() {
-        // \n 鐞涘苯鐔崥灞剧壉閺€顖涘瘮
+        // LF-only line ending
         let raw = b"POST /v1/chat/completions HTTP/1.1\nHost: localhost\nContent-Type: application/json\n\n{\"model\":\"gpt-4\"}";
         let inner = extract_json_from_http_text(raw).expect("should extract");
         let v: serde_json::Value = serde_json::from_slice(&inner).unwrap();
@@ -1970,7 +2157,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_from_http_text_returns_none_for_bad_inner_json() {
-        // 鐠囬攱鐪扮悰灞藉剼 HTTP閿涘奔绲鹃崘鍛サ payload 娑撳秵妲?JSON 閳?娑撳秴濮╅崢?body
+        // HTTP request text with a malformed (non-JSON) embedded payload must not be treated as JSON
         let raw = b"POST http://x HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{not-json}";
         assert!(extract_json_from_http_text(raw).is_none());
     }
@@ -1983,7 +2170,7 @@ mod tests {
         assert!(looks_like_http_request_text(raw), "must still be detected as HTTP request text");
     }
 
-    // 閳光偓閳光偓閳光偓 looks_like_http_request_text 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
+    // ---------------------------------------------------------------------
 
     #[test]
     fn test_looks_like_http_request_text_full() {
@@ -2018,13 +2205,13 @@ mod tests {
         assert!(looks_like_http_request_text(b"GET /v1/models HTTP/1.1\r\nHost: localhost"), "GET must be detected");
     }
 
-    // 閳光偓閳光偓閳光偓 End-to-end reproduction: WorkBuddy first request 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
+    // --- End-to-end reproduction: WorkBuddy first request ---
     // WorkBuddy opens a conversation by sending its first chat request as an
     // HTTP-text body (the full HTTP/1.1 message as the POST body). If the
     // embedded JSON is NOT separated from the headers by a blank line (some
     // SDKs emit a single CRLF instead), the extractor returns None and the
-    // request is answered with 200 empty 閳?i.e. silently dropped as a liveness
-    // probe 閳?which makes the first conversation "stop" with no output.
+    // request is answered with 200 empty —i.e. silently dropped as a liveness
+    // probe —which makes the first conversation "stop" with no output.
     #[tokio::test]
     async fn test_workbuddy_first_request_single_crlf_not_dropped_as_probe() {
         // Redirect the data dir to a temp location so we never touch the real
@@ -2108,23 +2295,23 @@ mod tests {
         assert!(body_str.contains("hello"), "response must contain the upstream SSE content, got: {}", body_str);
     }
 
-    // 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
+    // ---------------------------------------------------------------------
     // SseKeepaliveStream tests
     //
     // These tests deliberately use `start_paused = true` so we can fast-
     // forward `tokio` virtual time and observe keepalive behaviour without
     // making tests slow.
-    // 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
+    // ---------------------------------------------------------------------
 
     /// A constant-rate upstream never lets the keepalive timer fire. The
-    /// wrapped stream must therefore emit no `: ping` frames 閳?proving that
+    /// wrapped stream must therefore emit no `: ping` frames —proving that
     /// the keepalive wrapper doesn't pollute chatty streams.
     #[tokio::test(start_paused = true)]
     async fn test_sse_keepalive_no_ping_on_chatty_stream() {
         use bytes::Bytes;
         use futures::StreamExt;
 
-        // 10 chunks, 100 ms apart 閳?total 900 ms. Keepalive = 1 s.
+        // 10 chunks, 100 ms apart —total 900 ms. Keepalive = 1 s.
         let upstream = futures::stream::unfold(0u32, |i| async move {
             if i >= 10 {
                 return None;
@@ -2187,7 +2374,7 @@ mod tests {
             .expect("no error");
         assert_eq!(&first[..], b"data: hi\n\n");
 
-        // The iterator is exhausted 閳?the wrapper must propagate end-of-
+        // The iterator is exhausted —the wrapper must propagate end-of-
         // stream verbatim rather than fabricate keepalives past the real
         // end of the upstream.
         let second = kept.next().await;
@@ -2228,7 +2415,7 @@ mod tests {
     /// SSE `data:` frame. If the upstream streams `data: {...` and then goes
     /// silent (a reasoning/thinking gap before the tool_call args complete),
     /// injecting `: ping\n\n` would terminate the dangling frame and hand the
-    /// client truncated JSON 閳?which is exactly the "conversation cut off
+    /// client truncated JSON —which is exactly the "conversation cut off
     /// after a tool call" bug. The wrapper must stay silent until the event
     /// boundary is reached.
     #[tokio::test(start_paused = true)]
@@ -2274,7 +2461,7 @@ mod tests {
     }
 
     /// When the upstream completes the partial frame (ends it with `\n\n`)
-    /// and then goes idle, the keepalive is allowed to fire again 閳?proving
+    /// and then goes idle, the keepalive is allowed to fire again —proving
     /// the boundary detection correctly re-arms after a completed event.
     #[tokio::test(start_paused = true)]
     async fn test_sse_keepalive_pings_after_frame_completes() {
@@ -2299,7 +2486,7 @@ mod tests {
             .expect("no error");
         assert!(first.ends_with(b"\n\n"), "complete event forwarded as-is");
 
-        // After the boundary, idle 閳?keepalive must fire.
+        // After the boundary, idle —keepalive must fire.
         let got = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             kept.next(),
@@ -2367,6 +2554,104 @@ mod tests {
         // A success clears the error state again.
         tracker.record_success();
         assert_eq!(tracker.consecutive_500, 0);
+    }
+
+    /// Regression: a pool that is merely cooling down from upstream 429s must
+    /// be reported as a rate limit (503 + Retry-After), not as "no keys".
+    ///
+    /// Previously every failure became `Err(String)` → HTTP 502
+    /// "Proxy error: No active API keys available", which told clients the
+    /// proxy was broken and that no key existed, when in fact four keys existed
+    /// and were about to recover.
+    #[test]
+    fn test_rate_limited_failure_reports_503_semantics() {
+        let now = chrono::Utc::now().timestamp();
+        // Pool recovers 30s from now; the request has already been retrying 12s.
+        let failure = rate_limited_failure(4, now + 30, now - 12);
+
+        match failure {
+            ProxyFailure::RateLimited { retry_after, message } => {
+                assert!(
+                    (29..=30).contains(&retry_after),
+                    "retry_after must be the seconds until the earliest key recovers, got {}",
+                    retry_after
+                );
+                assert!(
+                    message.contains("429") && message.contains("4 key"),
+                    "message must name the upstream status and the key count, got {:?}",
+                    message
+                );
+                assert!(
+                    !message.contains("No active API keys"),
+                    "a cooling-down pool must NOT be described as having no keys, got {:?}",
+                    message
+                );
+            }
+            ProxyFailure::Other(e) => panic!("expected RateLimited, got Other({:?})", e),
+        }
+    }
+
+    /// A cooldown that has already expired must still yield a sane, positive
+    /// `Retry-After` rather than 0 (which some clients read as "retry now").
+    #[test]
+    fn test_rate_limited_failure_clamps_expired_cooldown() {
+        let now = chrono::Utc::now().timestamp();
+        let failure = rate_limited_failure(1, now - 5, now - 60);
+        match failure {
+            ProxyFailure::RateLimited { retry_after, .. } => {
+                assert_eq!(retry_after, 1, "an already-expired cooldown clamps to 1s");
+            }
+            ProxyFailure::Other(e) => panic!("expected RateLimited, got Other({:?})", e),
+        }
+    }
+
+    /// The 503 body must be a parseable OpenAI-compatible error object with a
+    /// matching `Retry-After` header — clients read `error.message`/`error.code`
+    /// and back off on the header.
+    #[tokio::test]
+    async fn test_rate_limited_response_is_openai_shaped_json() {
+        let resp = error_response_with_retry_after(503, "throttled".to_string(), 42);
+        assert_eq!(resp.status(), 503);
+        assert_eq!(
+            resp.headers().get("retry-after").unwrap().to_str().unwrap(),
+            "42"
+        );
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            "application/json"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body)
+            .expect("503 body must be valid JSON, not plain text");
+        assert_eq!(json["error"]["type"], "rate_limit_error");
+        assert_eq!(json["error"]["code"], "upstream_rate_limited");
+        assert_eq!(json["error"]["retry_after"], 42);
+        assert_eq!(json["error"]["message"], "throttled");
+    }
+
+    /// The retry budget must be extensible up to the hard ceiling, so a 30s
+    /// cooldown is waited out instead of being abandoned at the 60s floor.
+    #[test]
+    fn test_retry_budget_extension_is_bounded_by_hard_cap() {
+        let request_started_at = 1_000_000_i64;
+        let base_deadline = request_started_at + RETRY_BUDGET_BASE_SECS;
+        let hard_cap = request_started_at + RETRY_BUDGET_MAX_SECS;
+
+        // A cooldown needing 90s total fits under the 180s cap → deadline moves.
+        let needed = request_started_at + 90;
+        assert!(needed <= hard_cap, "90s must be inside the cap");
+        assert!(base_deadline < needed, "the 60s floor must be too short here");
+
+        // A cooldown needing 300s exceeds the cap → deadline must NOT move.
+        let too_far = request_started_at + 300;
+        assert!(too_far > hard_cap, "300s must exceed the cap");
+
+        // Compile-time invariants: the extension window must be strictly wider
+        // than the floor, otherwise extending the deadline is meaningless.
+        const _: () = assert!(RETRY_BUDGET_MAX_SECS > RETRY_BUDGET_BASE_SECS);
+        assert_eq!(RETRY_BUDGET_BASE_SECS, 60);
+        assert_eq!(RETRY_BUDGET_MAX_SECS, 180);
     }
 }
 

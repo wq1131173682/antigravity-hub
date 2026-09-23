@@ -8,6 +8,49 @@ This project is a derivative work of
 pushing a tag runs the Release workflow, which builds Windows and Linux bundles,
 signs them, and publishes a GitHub release with `updater.json`.
 
+## [5.3.41] - 2026-09-23
+
+Correct error semantics and retry behaviour when the upstream rate-limits every
+key at once, plus consistency fixes found while investigating that path.
+
+### Fixed
+
+- **Proxy**: a key pool that was merely cooling down from upstream 429s was
+  reported as `502 Proxy error: No active API keys available`, which was wrong on
+  both counts — the keys existed, and the upstream had answered. The retry loop
+  now records the pool's recovery time and the handler returns **`503` with a
+  `Retry-After` header** and an OpenAI-compatible JSON error body
+  (`error.type = "rate_limit_error"`, `error.code = "upstream_rate_limited"`).
+  `502` is now reserved for genuine proxy/transport faults.
+- **Proxy**: the retry budget was a hard 60s, so a request could give up while
+  the soonest cooldown was still ~30s away. It is now a *floor* that is extended
+  to cover a known cooldown expiry, capped at 180s measured from request start
+  (anchored to the start, not to "now", so repeated extensions cannot push it
+  forward forever).
+- **Proxy**: the per-cooldown sleep was truncated by `clamp(1, 30)`, which could
+  wake before the key became available and burn an attempt. It now waits out the
+  full cooldown plus a 2s grace.
+- **Proxy**: a pool excluded for a non-cooldown reason (quota window exceeded) is
+  no longer described as having no keys; it names the quota cause and the
+  candidate count instead.
+- **Proxy**: repaired GBK/UTF-8 double-decoded comments (`—` and `─` had become
+  CJK mojibake in `proxy.rs` and `keystore.rs`); unrecoverable Chinese comments
+  were rewritten in English.
+- **Config**: the default proxy port was `8080` while the docs, the Vite dev
+  proxy and the UI placeholder all said `8045`. The default is now `8045`
+  consistently (`models/config.rs`, `proxy.rs`, `usePlatformStore`, `Settings`).
+  Existing installs are unaffected — the persisted port wins.
+- **Frontend**: `utils/request.ts` carried a `COMMAND_MAPPING` table and a
+  `fetch()` fallback for a "web mode" that has no backend (the Rust side
+  registers a single `/*path` proxy route, so every one of those paths 404s).
+  The dead branch is removed; calling IPC outside Tauri now fails loudly.
+
+### Tests
+
+- Added regression coverage for the new failure classification: 503 semantics
+  and message wording, the already-expired cooldown clamp, the bounded budget
+  extension, and the OpenAI-shaped JSON error body. 35 tests pass.
+
 ## [5.3.40] - 2026-09-17
 
 Repository hygiene, dead-code removal, and UI correctness fixes. No behaviour of

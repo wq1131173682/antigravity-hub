@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -25,7 +25,7 @@ impl KeyStore {
     }
 }
 
-// 鈹€鈹€ Key store persistence 鈹€鈹€
+// ── Key store persistence ──
 
 pub fn load_key_store() -> Result<KeyStore, String> {
     let path = get_keys_file_path()?;
@@ -49,7 +49,7 @@ fn get_keys_file_path() -> Result<PathBuf, String> {
     Ok(data_dir.join(KEY_STORE_FILE))
 }
 
-// 鈹€鈹€ Key CRUD 鈹€鈹€
+// ── Key CRUD ──
 
 /// List all keys for a platform
 pub fn list_keys(platform_id: &str) -> Result<Vec<ApiKey>, String> {
