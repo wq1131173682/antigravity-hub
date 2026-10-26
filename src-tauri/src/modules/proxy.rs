@@ -12,6 +12,18 @@ use tracing::{info, warn, error};
 static MODELS_CACHE: once_cell::sync::Lazy<std::sync::Mutex<Option<(String, std::time::Instant)>>> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 const MODELS_CACHE_TTL_SECS: u64 = 60;
 
+/// Drop the cached `/v1/models` response.
+///
+/// Must be called whenever the advertised model list changes (platform added,
+/// renamed or deleted; model added, renamed, deleted or imported). Without it a
+/// client that just created a model would keep receiving the previous list —and
+/// the `<platform>:<model>` ids it advertises — for up to a minute.
+pub fn invalidate_models_cache() {
+    if let Ok(mut cache) = MODELS_CACHE.lock() {
+        *cache = None;
+    }
+}
+
 /// Initial retry budget for one proxied request, in seconds.
 ///
 /// This is a *floor*, not a hard cap: when every candidate key is merely
@@ -162,7 +174,7 @@ pub struct ProxyStatus {
 }
 
 static PROXY_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static PROXY_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(8045);
+static PROXY_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(5343);
 static PROXY_HOST: once_cell::sync::Lazy<std::sync::Mutex<String>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new("127.0.0.1".to_string()));
 static SHUTDOWN_TX: Mutex<Option<watch::Sender<bool>>> = Mutex::new(None);
@@ -607,12 +619,24 @@ fn parse_model_name(body_bytes: &[u8]) -> Option<String> {
 /// Handle `/v1/models` requests —return the models configured in Antigravity Hub
 /// in OpenAI-compatible format.
 ///
+/// Every id is namespaced as `<platform_prefix>:<model_name>` so that a single
+/// unified `/v1` endpoint can address the models of every platform, and two
+/// platforms offering the same model name stay distinguishable. The raw name is
+/// kept in the extra `model` field, and `owned_by` carries the platform prefix
+/// (it used to carry the opaque platform UUID, which clients cannot use).
+///
 /// OpenAI format:
 /// ```json
 /// {
 ///   "object": "list",
 ///   "data": [
-///     {"id": "model-name", "object": "model", "created": 1234567890, "owned_by": "platform-id"}
+///     {
+///       "id": "sensenova:deepseek-v4-flash",
+///       "object": "model",
+///       "created": 1234567890,
+///       "owned_by": "sensenova",
+///       "model": "deepseek-v4-flash"
+///     }
 ///   ]
 /// }
 /// ```
@@ -655,10 +679,11 @@ fn handle_models_request(platform_filter: Option<&str>) -> axum::response::Respo
                         info!("handle_models_request: platform '{}' has {} models", platform.id, models.len());
                         for model in &models {
                             let mut entry = serde_json::json!({
-                                "id": model.model_name,
+                                "id": namespaced_model_id(&platform.path_prefix, &model.model_name),
                                 "object": "model",
                                 "created": model.created_at,
-                                "owned_by": platform.id,
+                                "owned_by": platform.path_prefix,
+                                "model": model.model_name,
                             });
                             if let Some(ctx) = model.max_input_tokens {
                                 entry["max_input_tokens"] = serde_json::json!(ctx);
@@ -1135,7 +1160,16 @@ pub async fn test_model(
 }
 
 
-/// Handle all incoming proxy requests
+/// Handle all incoming proxy requests.
+///
+/// Two routing modes are supported:
+///
+/// 1. **Platform-prefixed** — `/{path_prefix}/v1/chat/completions`. The first
+///    path segment picks the platform; the rest is forwarded as-is.
+/// 2. **Unified** — `/v1/chat/completions` with `"model": "<path_prefix>:<model>"`.
+///    The id's namespace picks the platform, so a single base URL reaches
+///    every model of every configured platform. A bare model name is accepted
+///    too, but only when exactly one platform defines that model.
 async fn proxy_handler(
     method: axum::http::Method,
     uri: axum::http::Uri,
@@ -1148,74 +1182,163 @@ async fn proxy_handler(
     // /v1/models (or /models) whether or not a platform prefix is present, so
     // OpenAI-compatible clients can always discover available models. This is
     // handled before platform resolution so the no-prefix 404 below does not
-    // break discovery.
-    if path == "v1/models" || path == "v1/models/" || path == "models" {
+    // break discovery. `/v1/v1/models` is included because some clients (DSH
+    // among them) double the version prefix.
+    if path == "v1/models"
+        || path == "v1/models/"
+        || path == "models"
+        || path == "v1/v1/models"
+        || path == "v1/v1/models/"
+    {
         info!("Intercepting model discovery request (prefix-agnostic): /{}", path);
         return handle_models_request(None);
     }
 
     // Split path into platform prefix and remaining API path
-    let (platform_prefix, remaining_path) = match path.split_once('/') {
+    let (first_seg, remaining_path) = match path.split_once('/') {
         Some((prefix, rest)) => (prefix.to_string(), format!("/{}", rest)),
         None => (path.to_string(), String::new()),
     };
 
-    // Look up the platform by path_prefix
-    let platform_lookup = get_platform_info(&platform_prefix);
-
-    // Determine the effective base_url, platform_id, auto_switch, and target_path
-    let (base_url, platform_id, auto_switch, target_path) = match platform_lookup {
-        Some((base, id, auto)) => {
-            // Normal: platform prefix matched, use the split remaining path
-            (base, id, auto, remaining_path)
+    // ── Routing table: one config read for the whole request ──
+    // Platform lookup, namespace resolution and base-URL overrides all need the
+    // platform list. Reading `gui_config.json` separately for each would hit the
+    // disk up to three times per proxied request.
+    let app_config = match crate::modules::config::load_app_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to load configuration while routing: {}", e);
+            return error_response(500, format!("Failed to load configuration: {}", e));
         }
+    };
+    let routing = RoutingTable::new(&app_config);
+
+    // Look up the platform by path_prefix.
+    //
+    // `None` no longer means "misrouted" unconditionally: when the first
+    // segment is an API version segment (v1, v2, v1beta, ...) the request is a
+    // UNIFIED request whose platform is chosen by the body's `model` field.
+    // Anything else without a matching platform is still refused loudly —
+    // silently falling back to the first configured platform used to route a
+    // request into the wrong key pool (e.g. glm-5.2 sent without its
+    // /sensenova prefix hitting a different platform's keys).
+    let path_platform = match routing.platform_by_prefix(&first_seg) {
+        Some(platform) => Some(platform),
+        None if is_version_segment(&first_seg) => None,
         None => {
-            // No platform matches this path prefix. Previously this silently
-            // fell back to the FIRST configured platform, which would route a
-            // request to the WRONG key pool (e.g. glm-5.2 sent without its
-            // /sensenova prefix hitting a different platform's keys). Refuse
-            // loudly so misconfiguration is obvious instead of silently
-            // cross-platform. (Model discovery at /v1/models is handled
-            // prefix-agnostically above, so it is unaffected.)
             warn!(
-                "No platform matches prefix '{}' —refusing request (use /<platform>/... path prefix)",
-                platform_prefix
+                "No platform matches prefix '{}' - refusing request (use /<platform>/... or a unified /v1 request with a namespaced model id)",
+                first_seg
             );
             return error_response(
                 404,
                 format!(
-                    "Unknown platform prefix: '{}'. Requests must include a platform prefix, e.g. /sensenova/v1/chat/completions.",
-                    platform_prefix
+                    "Unknown platform prefix: '{}'. Use '/{{platform}}/v1/...' or the unified \
+                     '/v1/...' with a model id of the form '<platform>:<model>'. \
+                     List the available ids at GET /v1/models.",
+                    first_seg
                 ),
             );
         }
     };
 
-    // ── Pure pass-through mode ──
-    // The proxy does NOT rewrite request/response bodies or protocol formats.
-    // Its only jobs are: route by platform prefix, inject a rotated API key,
-    // track quota/token stats, and relay the response (with SSE keepalive)
-    // untouched. Requests to /v1/responses etc. are forwarded as-is; whether
-    // an upstream supports them is the upstream's business.
-
-    // ── Model list interception ──
-    // Intercept all variants of /models requests and return locally configured
-    // models. This includes:
-    // - /v1/models (standard OpenAI format)
-    // - /models (some providers use this directly)
-    // - /v1/v1/models (duplicate v1 prefix, clients like DSH send this)
-    // All are normalized to return the proxy's configured model list.
-    let normalized_path = normalize_models_path(&target_path);
-    if let Some(desc) = normalized_path {
-        info!("Intercepting model list request ({:?}), returning configured models", desc);
-        return handle_models_request(Some(&platform_prefix));
+    // Platform-scoped model list: /<prefix>/v1/models returns that platform's
+    // models only. The unified /v1/models case was answered above.
+    if path_platform.is_some() {
+        if let Some(desc) = normalize_models_path(&remaining_path) {
+            info!("Intercepting model list request ({:?}), returning configured models", desc);
+            return handle_models_request(Some(&first_seg));
+        }
     }
 
-    // Check for path-specific base URL overrides (e.g., /agnesapi at the API root, not under /v1)
-    let effective_base_url = resolve_base_url(&platform_id, &target_path, &base_url);
+    // Read the full body once for parsing and forwarding. This happens before
+    // routing completes because a unified request derives its platform from the
+    // body. The early returns above are body-less by design.
+    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            error!(
+                "Failed to read request body (likely dead keep-alive connection from client - client must reconnect): {}",
+                e
+            );
+            return error_response(400, format!("Failed to read body: {}", e));
+        }
+    };
+
+    // ── Malformed body defense (compat for HTTP-text-body clients) ──
+    // Some clients send their first request with the ENTIRE HTTP/1.1 message
+    // (request line + headers) as the POST body instead of a JSON payload.
+    // `sanitize_request_body` recovers the embedded JSON, acknowledges bare
+    // session probes, or rejects unparseable bodies instead of proxying
+    // garbage upstream.
+    let body_bytes = match sanitize_request_body(body_bytes) {
+        Ok(b) => b,
+        Err(resp) => return *resp,
+    };
+
+    // Parse the model name only (used for routing, quota tracking and
+    // logging). The body itself is forwarded untouched unless a namespace has
+    // to be stripped (see below).
+    let model_ref = parse_model_name(&body_bytes);
+
+    // ── Routing: which platform, which base URL, which upstream path ──
+    let route = match path_platform {
+        Some(platform) => {
+            // Prefixed path: the platform is fixed by the path, so a namespaced
+            // model id must agree with it (mismatch is a misconfiguration, not
+            // something to guess around).
+            let (upstream_model, strip_namespace) = match model_ref.as_deref() {
+                None => (None, false),
+                Some(model) => match routing.split_namespace(model) {
+                    Some((prefix, bare)) if prefix == first_seg => (Some(bare), true),
+                    Some((prefix, _)) => {
+                        warn!(
+                            "Model id '{}' names platform '{}' but the path routes to '{}'",
+                            model, prefix, first_seg
+                        );
+                        return error_response(
+                            400,
+                            format!(
+                                "Model id '{}' names platform '{}' but this path routes to '{}'. \
+                                 Either drop the namespace or use the '/{}/v1/...' path.",
+                                model, prefix, first_seg, prefix
+                            ),
+                        );
+                    }
+                    None => (Some(model.to_string()), false),
+                },
+            };
+            Route {
+                platform_prefix: first_seg.clone(),
+                platform_id: platform.id.clone(),
+                base_url: platform.base_url.clone(),
+                auto_switch: app_config.auto_switch,
+                target_path: remaining_path,
+                upstream_model,
+                strip_namespace,
+                base_url_overrides: platform.base_url_overrides.clone(),
+            }
+        }
+        None => match routing.resolve_unified(model_ref.as_deref().unwrap_or(""), path) {
+            Ok(route) => route,
+            Err((status, message)) => return error_response(status, message),
+        },
+    };
+
+    // ── Pure pass-through mode ──
+    // The proxy does NOT rewrite request/response bodies or protocol formats.
+    // Its only jobs are: route by platform prefix (or by the model namespace),
+    // inject a rotated API key, track quota/token stats, and relay the response
+    // (with SSE keepalive) untouched. Requests to /v1/responses etc. are
+    // forwarded as-is; whether an upstream supports them is the upstream's
+    // business.
+
+    // Check for path-specific base URL overrides (e.g., /agnesapi at the API
+    // root, not under /v1)
+    let effective_base_url = resolve_base_url(&route.base_url_overrides, &route.target_path, &route.base_url);
 
     // Build the target URL with dedup for version-like path segments (e.g., /v1)
-    let mut target_url_str = deduplicate_url_path(&effective_base_url, &target_path);
+    let mut target_url_str = deduplicate_url_path(&effective_base_url, &route.target_path);
     // Preserve query parameters from the original request (e.g., ?video_id=xxx)
     if let Some(query) = uri.query() {
         if !query.is_empty() {
@@ -1231,65 +1354,20 @@ async fn proxy_handler(
         }
     };
 
-    // Read the full body once for parsing and forwarding
-    let body_bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => {
-            error!(
-                "Failed to read request body (likely dead keep-alive connection from client —\
-                 client must reconnect): {}", e
-            );
-            return error_response(400, format!("Failed to read body: {}", e));
-        }
+    // Strip the `<platform>:` namespace before forwarding: upstreams only know
+    // their own bare model ids.
+    let body_bytes = match (&route.upstream_model, route.strip_namespace) {
+        (Some(bare), true) => rewrite_model_field(body_bytes, bare),
+        _ => body_bytes,
     };
-
-    // ── Malformed body defense (compat for HTTP-text-body clients) ──
-    // Some clients send their first request with the ENTIRE HTTP/1.1 message
-    // (request line + headers) as the POST body instead of a JSON payload.
-    // Recover the embedded JSON body when possible, acknowledge bare session
-    // probes, and reject unparseable non-JSON bodies with a clear error
-    // instead of proxying garbage upstream. The result is always a
-    // `axum::body::Bytes` ready for forwarding.
-    let body_bytes: axum::body::Bytes = if body_bytes.is_empty()
-        || serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok()
-    {
-        body_bytes
-    } else if let Some(inner) = extract_json_from_http_text(&body_bytes) {
-        info!(
-            "Extracted embedded JSON from HTTP request text body ({} -> {} bytes)",
-            body_bytes.len(),
-            inner.len()
-        );
-        inner.into()
-    } else if looks_like_http_request_text(&body_bytes) {
-        // HTTP request-line text but no recoverable embedded JSON payload.
-        // This is typically WorkBuddy's session-opening probe (request line +
-        // headers only). Acknowledging with 200 lets the client proceed to the
-        // real chat request instead of failing the connection outright.
-        let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
-        info!("HTTP-text body without embedded JSON (session probe), acknowledging: {}", preview);
-        return error_response(200, String::new());
-    } else {
-        let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
-        warn!("Rejecting request with non-JSON, non-HTTP-text body: {}", preview);
-        return error_response(400, format!(
-            "Request body must be valid JSON. Received unparseable payload (first 200 chars): {}",
-            preview
-        ));
-    };
-
-    // Parse the model name only (used for quota tracking / key selection and
-    // logging). The body itself is forwarded untouched.
-    let model_name = parse_model_name(&body_bytes);
 
     // Early-flush (immediate 200 + SSE headers) is used only on the sensenova
-    // pass-through path (WorkBuddy): that upstream can take seconds before
-    // its first byte, so we must return one byte immediately to stop the
-    // client's SSE reader from giving up on the first send. Note: key
-    // rotation now completes BEFORE committing the 200 (see
-    // forward_with_retry), so a throttled key no longer breaks the
-    // conversation.
-    let wants_early_flush = platform_prefix == "sensenova"
+    // pass-through path (WorkBuddy): that upstream can take seconds before its
+    // first byte, so we must return one byte immediately to stop the client's
+    // SSE reader from giving up on the first send. Note: key rotation now
+    // completes BEFORE committing the 200 (see forward_with_retry), so a
+    // throttled key no longer breaks the conversation.
+    let wants_early_flush = route.platform_prefix == "sensenova"
         && (target_url.path().contains("/chat/completions")
             || target_url.path().contains("/v1/messages")
             || target_url.path().contains("/completions"));
@@ -1302,18 +1380,19 @@ async fn proxy_handler(
         &target_url,
         &headers,
         body_bytes,
-        &platform_id,
-        &platform_prefix,
-        auto_switch,
-        model_name,
+        &route.platform_id,
+        &route.platform_prefix,
+        route.auto_switch,
+        route.upstream_model.clone(),
         wants_early_flush,
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(response) => response,
         Err(ProxyFailure::RateLimited { retry_after, message }) => {
             // The upstream answered (429) and the key pool is cooling down, so
-            // this is "try again shortly" — NOT a proxy fault. 503 + Retry-After
+            // this is "try again shortly" - NOT a proxy fault. 503 + Retry-After
             // is what OpenAI-compatible clients understand and back off on;
             // the old blanket 502 told them the proxy itself was broken.
             warn!(
@@ -1329,42 +1408,259 @@ async fn proxy_handler(
     }
 }
 
-/// Get platform info by path prefix: (base_url, platform_id, auto_switch)
-fn get_platform_info(prefix: &str) -> Option<(String, String, bool)> {
-    use crate::modules::config;
-    let config = config::load_app_config().ok()?;
-    let platform = config.platforms.iter().find(|p| p.path_prefix == prefix)?;
-    let auto_switch = config.auto_switch;
-    Some((
-        platform.base_url.clone(),
-        platform.id.clone(),
-        auto_switch,
-    ))
+/// Resolved routing target for one incoming proxy request.
+struct Route {
+    /// Platform path prefix — also the namespace used in `/v1/models` ids.
+    platform_prefix: String,
+    platform_id: String,
+    base_url: String,
+    auto_switch: bool,
+    /// Path forwarded upstream, e.g. "/v1/chat/completions".
+    target_path: String,
+    /// Bare model name (namespace stripped) used for forwarding and quota.
+    upstream_model: Option<String>,
+    /// Whether `upstream_model` came from a namespaced id and the body's
+    /// `model` field therefore has to be rewritten before forwarding.
+    strip_namespace: bool,
+    /// The platform's path-specific base URL overrides, carried along so the
+    /// request never has to re-read the config to resolve them.
+    base_url_overrides: Vec<crate::models::platform::PathOverride>,
 }
 
-/// Resolve the effective base URL for a given target path, taking into account
-/// any path-specific base URL overrides defined in the platform config.
-/// E.g., if the platform's base_url is "https://apihub.agnes-ai.com/v1" and
-/// there's an override for path "/agnesapi" with base_url "https://apihub.agnes-ai.com",
-/// then requests to "/agnesapi/..." will use the override base_url (without /v1).
-fn resolve_base_url(platform_id: &str, target_path: &str, default_base_url: &str) -> String {
-    use crate::modules::config;
-    if let Ok(config) = config::load_app_config() {
-        if let Some(platform) = config.platforms.iter().find(|p| p.id == platform_id) {
-            for override_entry in &platform.base_url_overrides {
-                // Match if target_path starts with the override prefix
-                if target_path == override_entry.path_prefix
-                    || target_path.starts_with(&format!("{}/", override_entry.path_prefix))
-                {
-                    info!(
-                        "Using base URL override for path prefix '{}': '{}' (override '{}')",
-                        override_entry.path_prefix,
-                        override_entry.base_url,
-                        default_base_url
-                    );
-                    return override_entry.base_url.clone();
+/// An immutable snapshot of the platform list for one request.
+///
+/// Built from an already-loaded `AppConfig`, so platform lookup, namespace
+/// splitting and base-URL overrides all work off the same read of
+/// `gui_config.json` instead of loading it repeatedly inside a single request.
+struct RoutingTable<'a> {
+    config: &'a crate::models::AppConfig,
+}
+
+impl<'a> RoutingTable<'a> {
+    fn new(config: &'a crate::models::AppConfig) -> Self {
+        Self { config }
+    }
+
+    /// Find a platform by its path prefix.
+    fn platform_by_prefix(&self, prefix: &str) -> Option<&'a crate::models::Platform> {
+        self.config.platforms.iter().find(|p| p.path_prefix == prefix)
+    }
+
+    /// Split `<platform_prefix>:<model_name>` when the leading segment is a
+    /// configured platform.
+    ///
+    /// Returns `None` for bare model names, so an id that merely happens to
+    /// contain a colon is passed through untouched.
+    fn split_namespace(&self, model: &str) -> Option<(String, String)> {
+        let (prefix, bare) = model.split_once(':')?;
+        if prefix.is_empty() || bare.is_empty() {
+            return None;
+        }
+        // An unknown prefix means the id is not namespaced after all.
+        self.platform_by_prefix(prefix)?;
+        Some((prefix.to_string(), bare.to_string()))
+    }
+
+    /// Resolve the platform for a UNIFIED request (no platform path prefix).
+    ///
+    /// The request body's `model` decides:
+    ///   - `<path_prefix>:<model>` → that platform, namespace stripped;
+    ///   - `<model>` alone → the single platform that defines it (ambiguous
+    ///     names are rejected with the candidate list rather than guessed).
+    fn resolve_unified(&self, requested_model: &str, full_path: &str) -> Result<Route, (u16, String)> {
+        let model = requested_model.trim();
+        if model.is_empty() {
+            return Err((
+                400,
+                format!(
+                    "Unified request to '/{}' has no 'model' field. Send a model id of the form \
+                     '<platform>:<model>' (list them at GET /v1/models).",
+                    full_path
+                ),
+            ));
+        }
+
+        let (prefix, bare, namespaced) = match self.split_namespace(model) {
+            Some((prefix, bare)) => (prefix, bare, true),
+            None => {
+                // Bare model name: only unambiguous when one platform owns it.
+                // `all_models()` loads models.json once instead of once per
+                // platform (list_models would re-read and re-parse the file
+                // each time).
+                let models = crate::modules::model_manager::all_models().map_err(|e| (500, e))?;
+                let mut owners: Vec<String> = Vec::new();
+                for platform in &self.config.platforms {
+                    let owns = models
+                        .iter()
+                        .any(|m| m.platform_id == platform.id && m.model_name == model);
+                    if owns {
+                        owners.push(platform.path_prefix.clone());
+                    }
+                }
+                match owners.len() {
+                    0 => {
+                        return Err((
+                            404,
+                            format!(
+                                "Model '{}' is not configured on any platform. Call GET /v1/models \
+                                 to list the available ids ('<platform>:<model>').",
+                                model
+                            ),
+                        ));
+                    }
+                    1 => (owners.remove(0), model.to_string(), false),
+                    _ => {
+                        // Spell out the concrete ids the client can send instead
+                        // of a generic template — the candidates are already known.
+                        let candidates: Vec<String> = owners
+                            .iter()
+                            .map(|prefix| namespaced_model_id(prefix, model))
+                            .collect();
+                        return Err((
+                            400,
+                            format!(
+                                "Model '{}' exists on several platforms ({}). Use a namespaced id \
+                                 instead: {}.",
+                                model,
+                                owners.join(", "),
+                                candidates.join(" or ")
+                            ),
+                        ));
+                    }
                 }
             }
+        };
+
+        let platform = self.platform_by_prefix(&prefix).ok_or_else(|| {
+            (
+                500,
+                format!("Platform '{}' disappeared while routing the request", prefix),
+            )
+        })?;
+
+        Ok(Route {
+            platform_prefix: prefix,
+            platform_id: platform.id.clone(),
+            base_url: platform.base_url.clone(),
+            auto_switch: self.config.auto_switch,
+            target_path: format!("/{}", full_path),
+            upstream_model: Some(bare),
+            strip_namespace: namespaced,
+            base_url_overrides: platform.base_url_overrides.clone(),
+        })
+    }
+}
+
+/// Build the public model id advertised by `/v1/models`: `<prefix>:<model>`.
+///
+/// The colon is deliberate — model names routinely contain hyphens
+/// (`deepseek-v4-flash`), so a hyphen separator could not be split reliably.
+fn namespaced_model_id(platform_prefix: &str, model_name: &str) -> String {
+    format!("{}:{}", platform_prefix, model_name)
+}
+
+/// True for API version path segments: `v1`, `v2`, `v1beta`, ...
+/// Requires a digit straight after the `v`, so an ordinary path segment such as
+/// `videos` is NOT mistaken for a unified API root.
+fn is_version_segment(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'v' || !bytes[1].is_ascii_digit() {
+        return false;
+    }
+    bytes[1..].iter().all(|b| b.is_ascii_digit() || b.is_ascii_alphabetic())
+}
+
+/// Recover a usable JSON body from what clients actually send.
+///
+/// Returns `Ok(bytes)` when the body is JSON (or empty) or an embedded JSON
+/// payload was recovered from an HTTP-text body, and `Err(response)` when the
+/// caller must answer immediately: a bare HTTP-text session probe is
+/// acknowledged with 200, an unparseable payload is rejected with 400.
+///
+/// The error response is boxed because an `axum::response::Response` is large
+/// enough to trip `clippy::result_large_err` on every `Ok` path.
+fn sanitize_request_body(
+    body_bytes: axum::body::Bytes,
+) -> Result<axum::body::Bytes, Box<axum::response::Response>> {
+    if body_bytes.is_empty() || serde_json::from_slice::<serde_json::Value>(&body_bytes).is_ok() {
+        return Ok(body_bytes);
+    }
+    if let Some(inner) = extract_json_from_http_text(&body_bytes) {
+        info!(
+            "Extracted embedded JSON from HTTP request text body ({} -> {} bytes)",
+            body_bytes.len(),
+            inner.len()
+        );
+        return Ok(inner.into());
+    }
+    if looks_like_http_request_text(&body_bytes) {
+        // HTTP request-line text but no recoverable embedded JSON payload.
+        // This is typically WorkBuddy's session-opening probe (request line +
+        // headers only). Acknowledging with 200 lets the client proceed to the
+        // real chat request instead of failing the connection outright.
+        let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
+        info!("HTTP-text body without embedded JSON (session probe), acknowledging: {}", preview);
+        return Err(Box::new(error_response(200, String::new())));
+    }
+    let preview: String = String::from_utf8_lossy(&body_bytes).chars().take(200).collect();
+    warn!("Rejecting request with non-JSON, non-HTTP-text body: {}", preview);
+    Err(Box::new(error_response(
+        400,
+        format!(
+            "Request body must be valid JSON. Received unparseable payload (first 200 chars): {}",
+            preview
+        ),
+    )))
+}
+
+/// Replace the `model` field of a JSON body in place, keeping every other field
+/// byte-for-byte equivalent. Returns the input unchanged when the body is not a
+/// JSON object or has no `model` field.
+fn rewrite_model_field(body: axum::body::Bytes, bare_model: &str) -> axum::body::Bytes {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return body;
+    };
+    if !obj.contains_key("model") {
+        return body;
+    }
+    obj.insert(
+        "model".to_string(),
+        serde_json::Value::String(bare_model.to_string()),
+    );
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => bytes.into(),
+        Err(_) => body,
+    }
+}
+
+/// Resolve the effective base URL for a given target path from the platform's
+/// path-specific overrides.
+///
+/// E.g., if the platform's base_url is "https://apihub.agnes-ai.com/v1" and
+/// there is an override for path "/agnesapi" with base_url
+/// "https://apihub.agnes-ai.com", then requests to "/agnesapi/..." use the
+/// override (without /v1). The overrides are passed in rather than re-read from
+/// the config, so one request loads the config exactly once.
+fn resolve_base_url(
+    overrides: &[crate::models::platform::PathOverride],
+    target_path: &str,
+    default_base_url: &str,
+) -> String {
+    for override_entry in overrides {
+        // Match if target_path starts with the override prefix
+        if target_path == override_entry.path_prefix
+            || target_path.starts_with(&format!("{}/", override_entry.path_prefix))
+        {
+            info!(
+                "Using base URL override for path prefix '{}': '{}' (override '{}')",
+                override_entry.path_prefix,
+                override_entry.base_url,
+                default_base_url
+            );
+            return override_entry.base_url.clone();
         }
     }
     default_base_url.to_string()
@@ -2214,12 +2510,18 @@ mod tests {
     // probe —which makes the first conversation "stop" with no output.
     #[tokio::test]
     async fn test_workbuddy_first_request_single_crlf_not_dropped_as_probe() {
+        // `ABV_DATA_DIR` is process-wide, so any test that sets it has to hold
+        // this lock — otherwise a concurrently running test overwrites the data
+        // dir mid-request and this one sees the wrong platform list.
+        let _guard = unified_routing_lock().lock().await;
+
         // Redirect the data dir to a temp location so we never touch the real
         // config / keys on disk.
         let tmp = std::env::temp_dir()
             .join(format!("abv_wb_test_{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("ABV_DATA_DIR", &tmp);
+        invalidate_models_cache();
 
         // Spin up a mock upstream that returns a small SSE chat stream.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2653,5 +2955,633 @@ mod tests {
         assert_eq!(RETRY_BUDGET_BASE_SECS, 60);
         assert_eq!(RETRY_BUDGET_MAX_SECS, 180);
     }
-}
 
+    // -----------------------------------------------------------------------
+    // Unified `/v1` routing (namespace parsing, version segments, body rewrite)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_namespaced_model_id_uses_colon() {
+        // A hyphens-only separator would be ambiguous here: is the platform
+        // "sensenova" or "sensenova-deepseek"? The colon removes the question.
+        assert_eq!(
+            namespaced_model_id("sensenova", "deepseek-v4-flash"),
+            "sensenova:deepseek-v4-flash"
+        );
+        assert_eq!(
+            namespaced_model_id("glm", "glm-5.2"),
+            "glm:glm-5.2"
+        );
+    }
+
+    #[test]
+    fn test_is_version_segment() {
+        for yes in ["v1", "v2", "v10", "v1beta", "v1alpha2"] {
+            assert!(is_version_segment(yes), "{} must be a version segment", yes);
+        }
+        // A real platform prefix must never be mistaken for a unified API root.
+        for no in ["videos", "v", "vx", "sensenova", "api", "", "V1"] {
+            assert!(!is_version_segment(no), "{} must NOT be a version segment", no);
+        }
+    }
+
+    #[test]
+    fn test_rewrite_model_field_strips_namespace_only_model() {
+        let body = bytes::Bytes::from_static(
+            br#"{"model":"sensenova:deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+        );
+        let out = rewrite_model_field(body, "deepseek-v4-flash");
+        let json: serde_json::Value = serde_json::from_slice(&out).expect("must stay valid JSON");
+        assert_eq!(json["model"], "deepseek-v4-flash");
+        // Everything else is preserved verbatim.
+        assert_eq!(json["stream"], true);
+        assert_eq!(json["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn test_rewrite_model_field_leaves_other_bodies_alone() {
+        // Not JSON at all → returned unchanged (the streaming/HTTP-text paths
+        // must never be corrupted by the rewrite).
+        let raw = bytes::Bytes::from_static(b"not json");
+        assert_eq!(rewrite_model_field(raw.clone(), "x"), raw);
+
+        // Valid JSON without a `model` field → unchanged, no field invented.
+        let no_model = bytes::Bytes::from_static(br#"{"input":"hello"}"#);
+        let out = rewrite_model_field(no_model.clone(), "x");
+        assert_eq!(out, no_model);
+
+        // A JSON array (not an object) → unchanged.
+        let array = bytes::Bytes::from_static(br#"[1,2,3]"#);
+        assert_eq!(rewrite_model_field(array.clone(), "x"), array);
+    }
+
+    #[test]
+    fn test_sanitize_request_body_passes_json_and_recovers_http_text() {
+        // Plain JSON passes through untouched.
+        let json = bytes::Bytes::from_static(br#"{"model":"x","messages":[]}"#);
+        assert_eq!(
+            sanitize_request_body(json.clone()).expect("valid JSON must pass"),
+            json
+        );
+
+        // Empty body stays empty (GET-style requests reach the upstream as-is).
+        let empty = bytes::Bytes::new();
+        assert!(sanitize_request_body(empty).expect("empty body must pass").is_empty());
+
+        // An HTTP-text body with an embedded JSON payload is unwrapped.
+        let http_text = bytes::Bytes::from_static(
+            b"POST http://192.168.9.193:5343/sensenova/v1/chat/completions HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{\"model\":\"sensenova-6.8-flash-lite\",\"messages\":[]}",
+        );
+        let recovered = sanitize_request_body(http_text).expect("embedded JSON must be recovered");
+        let v: serde_json::Value = serde_json::from_slice(&recovered).expect("must be JSON");
+        assert_eq!(v["model"], "sensenova-6.8-flash-lite");
+    }
+
+    #[test]
+    fn test_sanitize_request_body_rejects_garbage_and_acks_probe() {
+        // Unparseable, non-HTTP payload → 400.
+        let garbage = bytes::Bytes::from_static(b"}{ this is not json");
+        let resp = sanitize_request_body(garbage).expect_err("garbage must be rejected");
+        assert_eq!(resp.status().as_u16(), 400);
+
+        // Headers-only probe → 200 with an empty body, so the client continues.
+        let probe = bytes::Bytes::from_static(b"POST /v1/chat/completions HTTP/1.1\r\nAccept: */*");
+        let resp = sanitize_request_body(probe).expect_err("probe must be acknowledged");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    // ---------------------------------------------------------------------
+    // End-to-end: unified `/v1` routing through the real proxy_handler
+    //
+    // These drive the actual handler against a mock upstream, so they prove the
+    // whole path (path parsing → body model namespace → upstream URL → forwarded
+    // body.model → response relay) rather than just the helpers.
+    // ---------------------------------------------------------------------
+
+    /// Spin up a mock upstream that echoes back the request it received, plus a
+    /// temp data dir configured with two platforms that both offer a model with
+    /// the SAME bare name (`shared-model`) — the exact case the namespace solves.
+    ///
+    /// Returns (data_dir, upstream_port). The caller is responsible for setting
+    /// `ABV_DATA_DIR`; tests in one process share process env, so they are
+    /// serialised by the `unified_routing_lock` mutex below.
+    async fn setup_unified_test_env(tag: &str) -> (std::path::PathBuf, u16) {
+        let tmp = std::env::temp_dir().join(format!(
+            "abv_unified_{}_{}",
+            tag,
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Mock upstream: replies with the model it was asked for, so the test
+        // can assert the namespace was stripped before forwarding.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            async fn handle(req: axum::http::Request<axum::body::Body>) -> axum::response::Response {
+                let path = req.uri().path().to_string();
+                let body = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap_or_default();
+                let parsed: serde_json::Value =
+                    serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
+                let model = parsed
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<none>")
+                    .to_string();
+                let payload = serde_json::json!({
+                    "path": path,
+                    "model": model,
+                    "messages": parsed.get("messages").cloned().unwrap_or(serde_json::json!(null)),
+                });
+                axum::response::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(payload.to_string()))
+                    .unwrap()
+            }
+            let app = axum::Router::new()
+                .route("/v1/chat/completions", axum::routing::post(handle))
+                .route("/v1/models", axum::routing::get(handle));
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let config = serde_json::json!({
+            "language": "zh",
+            "theme": "system",
+            "proxy_port": 8080,
+            "proxy_host": "127.0.0.1",
+            "auto_switch": false,
+            "platforms": [
+                {
+                    "id": "p-sensenova",
+                    "name": "SenseNova",
+                    "base_url": format!("http://127.0.0.1:{}", port),
+                    "path_prefix": "sensenova",
+                    "sort_order": 0,
+                    "created_at": 0,
+                    "base_url_overrides": []
+                },
+                {
+                    "id": "p-glm",
+                    "name": "GLM",
+                    "base_url": format!("http://127.0.0.1:{}", port),
+                    "path_prefix": "glm",
+                    "sort_order": 1,
+                    "created_at": 0,
+                    "base_url_overrides": []
+                }
+            ]
+        });
+        std::fs::write(
+            tmp.join("gui_config.json"),
+            serde_json::to_string_pretty(&config).unwrap(),
+        )
+        .unwrap();
+
+        let keys = serde_json::json!({
+            "keys": [
+                {
+                    "id": "k-sn", "platform_id": "p-sensenova", "name": "sn",
+                    "key_value": "sk-sn", "status": "active", "sort_order": 0, "created_at": 0
+                },
+                {
+                    "id": "k-glm", "platform_id": "p-glm", "name": "glm",
+                    "key_value": "sk-glm", "status": "active", "sort_order": 0, "created_at": 0
+                }
+            ],
+            "rotation_index": {}
+        });
+        std::fs::write(
+            tmp.join("api_keys.json"),
+            serde_json::to_string_pretty(&keys).unwrap(),
+        )
+        .unwrap();
+
+        // `shared-model` exists on BOTH platforms; the per-platform unique names
+        // exist on exactly one.
+        let models = serde_json::json!({
+            "models": [
+                {
+                    "id": "m-sn-shared", "platform_id": "p-sensenova",
+                    "model_name": "shared-model", "display_name": "Shared (SN)",
+                    "per_5hour": 1000, "per_day": 10000, "per_month": 100000,
+                    "sort_order": 0, "created_at": 0,
+                    "max_input_tokens": 1000000
+                },
+                {
+                    "id": "m-glm-shared", "platform_id": "p-glm",
+                    "model_name": "shared-model", "display_name": "Shared (GLM)",
+                    "per_5hour": 1000, "per_day": 10000, "per_month": 100000,
+                    "sort_order": 1, "created_at": 0,
+                    "max_input_tokens": 128000
+                },
+                {
+                    "id": "m-sn-unique", "platform_id": "p-sensenova",
+                    "model_name": "sn-only-model", "display_name": "SN only",
+                    "per_5hour": 1000, "per_day": 10000, "per_month": 100000,
+                    "sort_order": 2, "created_at": 0,
+                    "max_input_tokens": 65536
+                }
+            ]
+        });
+        std::fs::write(
+            tmp.join("models.json"),
+            serde_json::to_string_pretty(&models).unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var("ABV_DATA_DIR", &tmp);
+        invalidate_models_cache();
+        (tmp, port)
+    }
+
+    /// A single shared lock: these tests mutate the process-wide
+    /// `ABV_DATA_DIR`, so they must not overlap.
+    fn unified_routing_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
+            once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+        &LOCK
+    }
+
+    async fn post_json(
+        path: &str,
+        body: serde_json::Value,
+    ) -> (u16, String) {
+        let uri = axum::http::Uri::from_maybe_shared(format!("http://127.0.0.1:8080{}", path))
+            .expect("valid uri");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        let resp = proxy_handler(
+            axum::http::Method::POST,
+            uri,
+            headers,
+            axum::body::Body::from(body.to_string()),
+        )
+        .await;
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        (status, String::from_utf8_lossy(&bytes).to_string())
+    }
+
+    async fn get_models(path: &str) -> (u16, serde_json::Value, String) {
+        let uri = axum::http::Uri::from_maybe_shared(format!("http://127.0.0.1:8080{}", path))
+            .expect("valid uri");
+        let resp = proxy_handler(
+            axum::http::Method::GET,
+            uri,
+            axum::http::HeaderMap::new(),
+            axum::body::Body::empty(),
+        )
+        .await;
+        let status = resp.status().as_u16();
+        let cache = resp
+            .headers()
+            .get("x-cache")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let bytes = axum::body::to_bytes(resp.into_body(), 10 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let json = serde_json::from_str(&text).unwrap_or(serde_json::json!(null));
+        (status, json, cache)
+    }
+
+    /// The unified `/v1/chat/completions` route must work with a namespaced
+    /// model id, and must strip the namespace before forwarding upstream.
+    #[tokio::test]
+    async fn test_unified_v1_chat_routes_by_model_namespace() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("chat").await;
+
+        let (status, body) = post_json(
+            "/v1/chat/completions",
+            serde_json::json!({
+                "model": "sensenova:shared-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "unified request must be routed, body={}", body);
+        let echoed: serde_json::Value = serde_json::from_str(&body).expect("upstream JSON");
+        assert_eq!(
+            echoed["model"], "shared-model",
+            "the '<platform>:' namespace must be stripped before forwarding"
+        );
+        assert_eq!(echoed["path"], "/v1/chat/completions");
+        assert_eq!(echoed["messages"][0]["content"], "hi");
+    }
+
+    /// A bare, unambiguous model name is accepted on the unified route.
+    #[tokio::test]
+    async fn test_unified_v1_accepts_unambiguous_bare_model() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("bare").await;
+
+        let (status, body) = post_json(
+            "/v1/chat/completions",
+            serde_json::json!({
+                "model": "sn-only-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "unambiguous bare model must route, body={}", body);
+        let echoed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(echoed["model"], "sn-only-model");
+    }
+
+    /// A bare model name owned by two platforms must be refused (not guessed).
+    #[tokio::test]
+    async fn test_unified_v1_rejects_ambiguous_bare_model() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("ambig").await;
+
+        let (status, body) = post_json(
+            "/v1/chat/completions",
+            serde_json::json!({
+                "model": "shared-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, 400, "ambiguous name must be rejected, body={}", body);
+        assert!(
+            body.contains("sensenova") && body.contains("glm"),
+            "the error must name both candidate platforms, got: {}",
+            body
+        );
+        assert!(
+            body.contains("sensenova:shared-model"),
+            "the error should show the namespaced form to use, got: {}",
+            body
+        );
+    }
+
+    /// An unknown model on the unified route is a 404 that points at /v1/models.
+    #[tokio::test]
+    async fn test_unified_v1_unknown_model_is_404() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("unknown").await;
+
+        let (status, body) = post_json(
+            "/v1/chat/completions",
+            serde_json::json!({"model": "nope:nothing", "messages": []}),
+        )
+        .await;
+        assert_eq!(status, 404, "unknown model must 404, body={}", body);
+        assert!(body.contains("/v1/models"), "error must point at discovery, got: {}", body);
+    }
+
+    /// `/v1/models` advertises `<platform>:<model>` ids for EVERY platform, and
+    /// keeps the bare name in a separate field.
+    #[tokio::test]
+    async fn test_models_endpoint_namespaces_ids_across_platforms() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("models").await;
+
+        let (status, json, _cache) = get_models("/v1/models").await;
+        assert_eq!(status, 200);
+        let data = json["data"].as_array().expect("data array");
+        assert_eq!(data.len(), 3, "all three models must be listed, got {:?}", data);
+
+        let ids: Vec<&str> = data.iter().filter_map(|m| m["id"].as_str()).collect();
+        assert!(ids.contains(&"sensenova:shared-model"), "ids: {:?}", ids);
+        assert!(ids.contains(&"glm:shared-model"), "ids: {:?}", ids);
+        assert!(ids.contains(&"sensenova:sn-only-model"), "ids: {:?}", ids);
+        assert!(
+            !ids.contains(&"shared-model"),
+            "a bare id must never be advertised, ids: {:?}",
+            ids
+        );
+
+        // The raw name stays available and `owned_by` is usable (not a UUID).
+        let sn_shared = data
+            .iter()
+            .find(|m| m["id"] == "sensenova:shared-model")
+            .expect("sensenova:shared-model present");
+        assert_eq!(sn_shared["model"], "shared-model");
+        assert_eq!(sn_shared["owned_by"], "sensenova");
+        assert_eq!(sn_shared["max_input_tokens"], 1000000);
+    }
+
+    /// The legacy `/<platform>/v1/models` path still returns only that
+    /// platform's models (backwards compatibility).
+    #[tokio::test]
+    async fn test_platform_scoped_models_endpoint_still_works() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("scoped").await;
+
+        let (status, json, _cache) = get_models("/glm/v1/models").await;
+        assert_eq!(status, 200);
+        let data = json["data"].as_array().expect("data array");
+        assert_eq!(data.len(), 1, "only GLM's model, got {:?}", data);
+        assert_eq!(data[0]["id"], "glm:shared-model");
+    }
+
+    /// The legacy prefixed chat path must still work with a BARE model name.
+    #[tokio::test]
+    async fn test_prefixed_path_still_accepts_bare_model() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("prefix").await;
+
+        let (status, body) = post_json(
+            "/glm/v1/chat/completions",
+            serde_json::json!({
+                "model": "shared-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "prefixed path must keep working, body={}", body);
+        let echoed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(echoed["model"], "shared-model");
+    }
+
+    /// A namespaced id on the prefixed path is accepted when it agrees, and
+    /// rejected when it contradicts the path (rather than silently rerouting).
+    #[tokio::test]
+    async fn test_prefixed_path_namespace_agreement() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("agree").await;
+
+        // Agrees → forwarded with the namespace stripped.
+        let (status, body) = post_json(
+            "/glm/v1/chat/completions",
+            serde_json::json!({
+                "model": "glm:shared-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "agreeing namespace must work, body={}", body);
+        let echoed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(echoed["model"], "shared-model");
+
+        // Contradicts → 400, and the message names both.
+        let (status, body) = post_json(
+            "/glm/v1/chat/completions",
+            serde_json::json!({
+                "model": "sensenova:shared-model",
+                "messages": [{"role": "user", "content": "hi"}]
+            }),
+        )
+        .await;
+        assert_eq!(status, 400, "contradicting namespace must be refused, body={}", body);
+        assert!(body.contains("sensenova") && body.contains("glm"), "got: {}", body);
+    }
+
+    /// The model list cache must be served on the second call, and invalidated
+    /// when the advertised set changes.
+    #[tokio::test]
+    async fn test_models_cache_hit_and_invalidation() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("cache").await;
+
+        let (_, first, cache1) = get_models("/v1/models").await;
+        assert_eq!(cache1, "MISS", "first call must populate the cache");
+
+        let (_, second, cache2) = get_models("/v1/models").await;
+        assert_eq!(cache2, "HIT", "second call must be served from the cache");
+        assert_eq!(first, second, "cached payload must equal the computed one");
+
+        // Adding a model must invalidate immediately, not after the 60s TTL.
+        crate::modules::model_manager::add_model(
+            "p-glm".to_string(),
+            "brand-new-model".to_string(),
+            "Brand New".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        invalidate_models_cache();
+
+        let (_, third, cache3) = get_models("/v1/models").await;
+        assert_eq!(cache3, "MISS", "invalidated cache must recompute");
+        let ids: Vec<&str> = third["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"glm:brand-new-model"),
+            "the new model must appear as a namespaced id, ids: {:?}",
+            ids
+        );
+    }
+
+    /// A path whose first segment is neither a platform nor a version must 404
+    /// with guidance, instead of silently using the first platform.
+    #[tokio::test]
+    async fn test_unknown_prefix_is_refused_not_guessed() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("noprefix").await;
+
+        let (status, body) = post_json(
+            "/definitely-not-a-platform/v1/chat/completions",
+            serde_json::json!({"model": "shared-model", "messages": []}),
+        )
+        .await;
+        assert_eq!(status, 404, "unknown prefix must be refused, body={}", body);
+        assert!(body.contains("/v1/models"), "error must point at discovery, got: {}", body);
+    }
+
+    /// Full-stack check: the router that `create_router()` builds must serve a
+    /// unified `/v1` request over real HTTP (not just an in-process handler
+    /// call). Verifies the route glob `/*path` plus axum's body handling, and
+    /// that a client-visible `x-cache` header appears on `/v1/models`.
+    #[tokio::test]
+    async fn test_unified_entry_over_real_http() {
+        let _guard = unified_routing_lock().lock().await;
+        let (_tmp, _port) = setup_unified_test_env("http").await;
+
+        // Bind the REAL production router on an ephemeral port.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let app = create_router();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let client = PROXY_CLIENT.read().unwrap().clone();
+        let base = format!("http://{}", proxy_addr);
+
+        // 1. Model discovery lists namespaced ids for every platform.
+        let resp = client
+            .get(format!("{}/v1/models", base))
+            .send()
+            .await
+            .expect("GET /v1/models must connect");
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get("x-cache").and_then(|v| v.to_str().ok()),
+            Some("MISS"),
+            "the models endpoint must advertise its cache state"
+        );
+        let body: serde_json::Value = resp.json().await.expect("JSON body");
+        let ids: Vec<&str> = body["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        assert!(ids.contains(&"sensenova:shared-model"), "ids: {:?}", ids);
+        assert!(ids.contains(&"glm:shared-model"), "ids: {:?}", ids);
+
+        // 2. Unified chat: the model namespace selects the platform end to end.
+        let resp = client
+            .post(format!("{}/v1/chat/completions", base))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"glm:shared-model","messages":[{"role":"user","content":"ping"}]}"#)
+            .send()
+            .await
+            .expect("POST /v1/chat/completions must connect");
+        assert_eq!(resp.status(), 200);
+        let echoed: serde_json::Value = resp.json().await.expect("JSON body");
+        assert_eq!(
+            echoed["model"], "shared-model",
+            "the namespace must be stripped before the upstream sees the body"
+        );
+        assert_eq!(echoed["messages"][0]["content"], "ping");
+
+        // 3. A bare ambiguous name is refused over HTTP too (400, not 500).
+        let resp = client
+            .post(format!("{}/v1/chat/completions", base))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"shared-model","messages":[]}"#)
+            .send()
+            .await
+            .expect("ambiguous request must still get a response");
+        assert_eq!(resp.status(), 400);
+        let text = resp.text().await.unwrap_or_default();
+        assert!(
+            text.contains("sensenova:shared-model") && text.contains("glm:shared-model"),
+            "the error must list both concrete ids to use, got: {}",
+            text
+        );
+
+        // 4. Legacy prefixed path keeps working over HTTP.
+        let resp = client
+            .post(format!("{}/sensenova/v1/chat/completions", base))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"sn-only-model","messages":[]}"#)
+            .send()
+            .await
+            .expect("legacy path must connect");
+        assert_eq!(resp.status(), 200, "legacy /<prefix>/v1 must keep working");
+    }
+}

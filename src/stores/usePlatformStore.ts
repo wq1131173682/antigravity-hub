@@ -57,7 +57,7 @@ export const usePlatformStore = create<PlatformState>((set, get) => ({
   modelUsage: {},
   modelKeyIds: {},
   proxyRunning: false,
-  proxyPort: 8045,
+  proxyPort: 5343,
   loading: false,
   error: null,
 

@@ -26,7 +26,7 @@ pub struct AppConfig {
 }
 
 fn default_proxy_port() -> u16 {
-    8045
+    5343
 }
 
 fn default_proxy_host() -> String {
@@ -42,7 +42,7 @@ impl AppConfig {
         Self {
             language: "zh".to_string(),
             theme: "system".to_string(),
-            proxy_port: 8045,
+            proxy_port: 5343,
             proxy_host: "127.0.0.1".to_string(),
             auto_switch: true,
             upstream_proxy_url: None,

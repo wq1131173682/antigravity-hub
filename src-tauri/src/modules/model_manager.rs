@@ -50,6 +50,15 @@ pub fn list_models(platform_id: &str) -> Result<Vec<Model>, String> {
     Ok(models)
 }
 
+/// List every model of every platform, loading `models.json` exactly once.
+///
+/// Used when routing a bare (non-namespaced) model id: it has to be matched
+/// against all platforms, and calling `list_models` per platform would re-read
+/// and re-parse the whole file once per platform.
+pub fn all_models() -> Result<Vec<Model>, String> {
+    Ok(load_store()?.models)
+}
+
 /// Add a new model
 #[allow(clippy::too_many_arguments)]
 pub fn add_model(

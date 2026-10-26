@@ -28,11 +28,10 @@ export default defineConfig(async () => ({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
-    proxy: {
-      "/api/": {
-        target: "http://127.0.0.1:8045",
-        changeOrigin: true,
-      },
-    },
+    // No `proxy` block on purpose. A previous version forwarded `/api/` to a
+    // hardcoded proxy port, but nothing in `src/` ever fetches `/api/`: every
+    // backend call goes through Tauri IPC (`utils/request.ts`), and the Rust
+    // side registers a single `/*path` route for the LLM proxy. The entry was
+    // dead and drifted out of sync with the real port.
   },
 }));

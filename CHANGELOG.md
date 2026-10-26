@@ -8,6 +8,73 @@ This project is a derivative work of
 pushing a tag runs the Release workflow, which builds Windows and Linux bundles,
 signs them, and publishes a GitHub release with `updater.json`.
 
+## [5.3.42] - 2026-10-26
+
+One URL for every model of every platform, plus the consistency fixes that
+change required.
+
+### Added
+
+- **Proxy**: a **unified entry** at `/v1/...`. Its platform is not taken from the
+  path but from the request body's `model`, which is namespaced
+  `"<platform_prefix>:<model_name>"`. `GET /v1/models` is now prefix-agnostic and
+  lists every platform's models, so a single base URL reaches all of them.
+- **Proxy**: `GET /v1/v1/models` is also answered (some clients, DSH among them,
+  double the version prefix).
+- **UI**: the dashboard shows the unified entry URL next to the per-platform
+  paths, and each model card shows the exact `<prefix>:<model>` id to send.
+
+### Changed
+
+- **Proxy**: `/v1/models` ids are `"<platform_prefix>:<model_name>"` instead of
+  the bare model name. Two platforms offering the same model name are now
+  distinguishable. The colon is deliberate — model names routinely contain
+  hyphens (`deepseek-v4-flash`), so a hyphen separator could not be split
+  reliably.
+- **Proxy**: each `/v1/models` entry keeps the raw name in a new `model` field,
+  and `owned_by` now carries the platform prefix instead of the platform UUID
+  (which no client could use).
+- **Proxy**: `model` in a forwarded body has its namespace stripped, so upstreams
+  only ever see the bare id they know.
+- **Platform**: `path_prefix` is validated. Version-like segments (`v1`, `v2`,
+  `v1beta`, ...) are refused because `/<version>/...` is the unified API root;
+  `/`, `:`, whitespace and duplicates are refused too. The frontend input and
+  its error message follow the same rule.
+- **Proxy**: a single proxied request now reads `gui_config.json` once instead of
+  up to three times (platform lookup, namespace resolution, base-URL overrides
+  each used to load it independently).
+
+### Fixed
+
+- **Proxy**: the `/v1/models` cache was not invalidated when the advertised set
+  changed. Adding, renaming, deleting or importing a platform/model left clients
+  (and the new namespaced ids) stale for up to the 60s TTL. All mutation paths
+  now invalidate it.
+- **Proxy**: the "ambiguous bare model name" error now names the concrete ids to
+  send (`a:model` or `b:model`) instead of a template.
+- **Config**: the default proxy port is now `5343` (was `8045`), consistently
+  across `models/config.rs`, `proxy.rs`, `usePlatformStore` and `Settings`. This
+  is the default only — an existing install keeps whatever `proxy_port` is
+  already persisted in `gui_config.json`.
+- **Dev**: removed the dead `/api/` proxy from `vite.config.ts`. Nothing in
+  `src/` ever fetched `/api/` (all backend calls are Tauri IPC, and the Rust side
+  exposes only the `/*path` LLM proxy), so the entry forwarded to a port that had
+  already drifted out of sync with the real one.
+
+### Backwards compatibility
+
+`/{platform_prefix}/v1/...` and `/{platform_prefix}/v1/models` are unchanged.
+A namespaced id on a prefixed path is accepted when it agrees with the prefix and
+rejected with `400` when it contradicts it — it is never silently rerouted into
+another platform's key pool.
+
+### Tests
+
+23 new backend tests. Beyond unit coverage of the helpers, several drive the real
+`proxy_handler`, and one stands up the production router on a real listener and
+exercises it over HTTP, so routing is verified end to end rather than by
+inspection. Suite: 58 passing.
+
 ## [5.3.41] - 2026-09-23
 
 Correct error semantics and retry behaviour when the upstream rate-limits every

@@ -16,8 +16,9 @@ pub async fn list_platforms() -> Result<Vec<Platform>, String> {
 #[tauri::command]
 pub async fn add_platform(name: String, base_url: String, path_prefix: String, notes: Option<String>) -> Result<Platform, String> {
     let mut config = modules::config::load_app_config()?;
-    let platform = modules::platform_manager::add_platform(&mut config, name, base_url, path_prefix, notes);
+    let platform = modules::platform_manager::add_platform(&mut config, name, base_url, path_prefix, notes)?;
     modules::config::save_app_config(&config)?;
+    modules::proxy::invalidate_models_cache();
     Ok(platform)
 }
 
@@ -33,6 +34,7 @@ pub async fn update_platform(
     let mut config = modules::config::load_app_config()?;
     let platform = modules::platform_manager::update_platform(&mut config, &platform_id, name, base_url, path_prefix, notes)?;
     modules::config::save_app_config(&config)?;
+    modules::proxy::invalidate_models_cache();
     Ok(platform)
 }
 
@@ -47,7 +49,9 @@ pub async fn delete_platform(platform_id: String) -> Result<(), String> {
     // Delete the platform from config
     let mut config = modules::config::load_app_config()?;
     modules::platform_manager::delete_platform(&mut config, &platform_id)?;
-    modules::config::save_app_config(&config)
+    let saved = modules::config::save_app_config(&config);
+    modules::proxy::invalidate_models_cache();
+    saved
 }
 
 /// Reorder platforms
@@ -55,7 +59,10 @@ pub async fn delete_platform(platform_id: String) -> Result<(), String> {
 pub async fn reorder_platforms(platform_ids: Vec<String>) -> Result<(), String> {
     let mut config = modules::config::load_app_config()?;
     modules::platform_manager::reorder_platforms(&mut config, platform_ids)?;
-    modules::config::save_app_config(&config)
+    let saved = modules::config::save_app_config(&config);
+    // Reordering changes the order of /v1/models entries.
+    modules::proxy::invalidate_models_cache();
+    saved
 }
 
 // ============================================================================
@@ -81,7 +88,9 @@ pub async fn add_model(
     max_input_tokens: Option<u64>,
     max_output_tokens: Option<u64>,
 ) -> Result<Model, String> {
-    modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens, max_output_tokens)
+    let model = modules::model_manager::add_model(platform_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens, max_output_tokens)?;
+    modules::proxy::invalidate_models_cache();
+    Ok(model)
 }
 
 /// Update a model
@@ -97,7 +106,10 @@ pub async fn update_model(
     max_input_tokens: Option<Option<u64>>,
     max_output_tokens: Option<Option<u64>>,
 ) -> Result<Model, String> {
-    modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens, max_output_tokens)
+    let model = modules::model_manager::update_model(&model_id, model_name, display_name, per_5hour, per_day, per_month, max_input_tokens, max_output_tokens)?;
+    // A rename changes the advertised `<platform>:<model>` id.
+    modules::proxy::invalidate_models_cache();
+    Ok(model)
 }
 
 /// Delete a model
@@ -105,7 +117,9 @@ pub async fn update_model(
 pub async fn delete_model(model_id: String) -> Result<(), String> {
     let _ = modules::key_model_map::remove_model_associations(&model_id);
     let _ = modules::quota_window::remove_model_trackers(&model_id);
-    modules::model_manager::delete_model(&model_id)
+    let deleted = modules::model_manager::delete_model(&model_id);
+    modules::proxy::invalidate_models_cache();
+    deleted
 }
 
 // ============================================================================
@@ -461,7 +475,9 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 /// Refresh models from upstream API for a given platform (full-sync variant)
 #[tauri::command]
 pub async fn refresh_models_from_upstream(platform_id: String) -> Result<crate::modules::proxy::RefreshModelsResult, String> {
-    modules::proxy::refresh_models_from_upstream(&platform_id).await
+    let result = modules::proxy::refresh_models_from_upstream(&platform_id).await?;
+    modules::proxy::invalidate_models_cache();
+    Ok(result)
 }
 
 /// List models available on the upstream WITHOUT importing them.
@@ -475,7 +491,9 @@ pub async fn list_upstream_models(platform_id: String) -> Result<Vec<crate::modu
 /// Import ONLY the selected model names from the upstream list.
 #[tauri::command]
 pub async fn import_models(platform_id: String, model_names: Vec<String>) -> Result<crate::modules::proxy::ImportModelsResult, String> {
-    modules::proxy::import_models(&platform_id, model_names).await
+    let result = modules::proxy::import_models(&platform_id, model_names).await?;
+    modules::proxy::invalidate_models_cache();
+    Ok(result)
 }
 
 /// Batch delete models by id (cleans up associations and quota trackers).
@@ -486,6 +504,7 @@ pub async fn delete_models(model_ids: Vec<String>) -> Result<(), String> {
         let _ = modules::quota_window::remove_model_trackers(model_id);
         modules::model_manager::delete_model(model_id)?;
     }
+    modules::proxy::invalidate_models_cache();
     Ok(())
 }
 

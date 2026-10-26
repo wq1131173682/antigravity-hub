@@ -9,6 +9,12 @@ interface ModelCardProps {
   model: Model;
   usageEntries: ModelUsageEntry[];
   defaultExpanded?: boolean;
+  /**
+   * Public id used by clients on the unified `/v1` endpoint:
+   * `<platform_prefix>:<model_name>`. Shown on hover so the card can be
+   * copied from without guessing the namespace.
+   */
+  namespacedId?: string;
 }
 
 function formatLimit(v: number): string {
@@ -17,7 +23,7 @@ function formatLimit(v: number): string {
   return String(v);
 }
 
-export function ModelCard({ model, usageEntries, defaultExpanded = false }: ModelCardProps) {
+export function ModelCard({ model, usageEntries, defaultExpanded = false, namespacedId }: ModelCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
 
   const usageLoaded = usageEntries.length > 0;
@@ -82,9 +88,22 @@ export function ModelCard({ model, usageEntries, defaultExpanded = false }: Mode
         {/* Model name */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate" title={model.model_name}>
+            <span
+              className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate"
+              title={namespacedId ? `${model.model_name}\n${namespacedId}` : model.model_name}
+            >
               {model.display_name || model.model_name}
             </span>
+            {/* The id clients must send on the unified /v1 endpoint. Kept on
+                its own line so it is never confused with the display name. */}
+            {namespacedId && (
+              <span
+                className="text-[9px] font-mono text-gray-400 dark:text-gray-500 truncate flex-shrink-0 max-w-[45%]"
+                title={namespacedId}
+              >
+                {namespacedId}
+              </span>
+            )}
             {/* Exceeded badge */}
             {usageLoaded && exceededCount > 0 && (
               <span className="flex items-center gap-0.5 px-1 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 text-[10px] font-bold flex-shrink-0">

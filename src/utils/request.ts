@@ -8,8 +8,9 @@ import { isTauri } from './env';
  * surface for the UI commands to call. A previous version of this module also
  * carried a `COMMAND_MAPPING` table and a `fetch()` fallback for "web mode",
  * but no such backend ever existed — the dev server's `/api/` proxy pointed at
- * the proxy port (8045), where every one of those paths 404s. That branch was
- * unreachable in production and silently wrong in development, so it is gone.
+ * the LLM proxy port, where every one of those paths 404s. That branch was
+ * unreachable in production and silently wrong in development, so it is gone
+ * (along with the dead `/api/` proxy entry in `vite.config.ts`).
  *
  * Calling this outside Tauri now fails loudly instead of issuing a request
  * that cannot succeed.

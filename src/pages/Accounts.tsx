@@ -839,6 +839,17 @@ function Accounts() {
   );
 }
 
+// Path prefixes are URL segments AND the namespace in public model ids
+// (`<prefix>:<model>`), so the character set is tighter than "anything
+// without a slash". Kept in lockstep with `validate_path_prefix` in
+// src-tauri/src/modules/platform_manager.rs.
+const sanitizePathPrefix = (value: string) =>
+  value.replace(/[\s/\\:]/g, '').toLowerCase();
+
+/** Mirrors the Rust rule: `v1`, `v2`, `v1beta`, ... are the unified API root. */
+const isReservedPrefix = (prefix: string) =>
+  /^v\d[a-z0-9]*$/.test(prefix);
+
 // ---------------------------------------------------------------------------
 // Dialog: Edit Platform (modify name / base_url / path_prefix)
 // ---------------------------------------------------------------------------
@@ -862,6 +873,10 @@ function EditPlatformDialog({ open, onClose, platform }: { open: boolean; onClos
     if (!platform) return;
     if (!name.trim() || !baseUrl.trim() || !pathPrefix.trim()) {
       showToast(t('accounts.fill_all_fields'), 'error');
+      return;
+    }
+    if (isReservedPrefix(pathPrefix.trim())) {
+      showToast(t('accounts.path_prefix_reserved').replace('{prefix}', pathPrefix.trim()), 'error');
       return;
     }
     setSaving(true);
@@ -893,7 +908,7 @@ function EditPlatformDialog({ open, onClose, platform }: { open: boolean; onClos
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('accounts.path_prefix')}</label>
-            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={pathPrefix} onChange={e => setPathPrefix(e.target.value.replace(/[\s\/]/g, ''))} placeholder="gemini" />
+            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={pathPrefix} onChange={e => setPathPrefix(sanitizePathPrefix(e.target.value))} placeholder="gemini" />
             <p className="text-xs text-gray-400 mt-1">{t('accounts.path_prefix_hint').replace('{prefix}', pathPrefix || 'gemini')}</p>
           </div>
         </div>
@@ -1085,6 +1100,10 @@ function AddPlatformDialog({ open, onClose }: { open: boolean; onClose: () => vo
       showToast(t('accounts.fill_all_fields'), 'error');
       return;
     }
+    if (isReservedPrefix(pathPrefix.trim())) {
+      showToast(t('accounts.path_prefix_reserved').replace('{prefix}', pathPrefix.trim()), 'error');
+      return;
+    }
     setSaving(true);
     try {
       await addPlatform(name.trim(), baseUrl.trim(), pathPrefix.trim());
@@ -1114,7 +1133,7 @@ function AddPlatformDialog({ open, onClose }: { open: boolean; onClose: () => vo
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('accounts.path_prefix')}</label>
-            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={pathPrefix} onChange={e => setPathPrefix(e.target.value.replace(/[\s\/]/g, ''))} placeholder="openai" />
+            <input className="w-full px-3 py-2 text-sm border border-gray-200 dark:border-base-300 rounded-lg bg-white dark:bg-base-200 text-gray-900 dark:text-base-content focus:ring-2 focus:ring-blue-500 outline-none" value={pathPrefix} onChange={e => setPathPrefix(sanitizePathPrefix(e.target.value))} placeholder="openai" />
             <p className="text-xs text-gray-400 mt-1">{t('accounts.path_prefix_hint').replace('{prefix}', pathPrefix || 'openai')}</p>
           </div>
         </div>

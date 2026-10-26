@@ -94,3 +94,6 @@ nul
 # The committed copy went stale (it pinned an older version and dead asset
 # URLs), so it is not tracked: the app fetches it from the latest release.
 updater.json
+
+# Agent runtime scratch (live panel state written by DSH during a session)
+.dsh-ops/

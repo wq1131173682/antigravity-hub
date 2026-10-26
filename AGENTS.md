@@ -103,8 +103,11 @@
  
  - API keys are stored locally by the Rust backend in `api_keys.json` under the
    app data dir (`src-tauri/src/modules/keystore.rs` uses `std::fs` directly).
-   The proxy listens on `127.0.0.1:8045` and is local-only by default.
- - The Vite dev server proxies `/api/` requests to the backend; no external exposure in production.
+   The proxy listens on `127.0.0.1:5343` (default; a persisted `proxy_port` wins).
+ - The Vite dev server has **no** `/api/` proxy (the old entry was dead: nothing
+   in `src/` fetches `/api/` — every backend call goes through Tauri IPC, and the
+   Rust side registers only the `/*path` LLM proxy route). No external exposure
+   in production.
  - The Tauri CSP is restrictive: `default-src 'self'` with minimal allowances for images and styles. Do not relax it without review.
  - Sensitive configuration (signing keys, API tokens) must never be committed. Use environment variables or Tauri build secrets.
  - `@tauri-apps/plugin-*` npm bindings are NOT used by the frontend. The Rust

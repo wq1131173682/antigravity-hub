@@ -40,7 +40,7 @@ One entry point, many keys, smart quota-aware scheduling.
 ## Features
 
 ### 🚀 Core Proxy
-- Local OpenAI-compatible proxy (default `127.0.0.1:8045`) for any OpenAI-compatible SDK / client
+- Local OpenAI-compatible proxy (default `127.0.0.1:5343`) for any OpenAI-compatible SDK / client
 - Automatic key rotation & load balancing with intelligent 429/5xx backoff (single key supported too)
 - ⚠️ **Codex integration & Responses API translation archived in v5.3.10** — code retained, UI greyed/disabled; the proxy now targets OpenAI Chat Completions pass-through
 - Broad upstream compatibility: multiple reasoning field names (`reasoning_content` / `thinking` / …), inline thinking blocks (`>think` / `<think>` / `[think]` markers), tool calls, streaming & non-streaming
@@ -92,8 +92,8 @@ npm run tauri build
 ### Usage
 
 1. Launch the app and add platforms & API keys under "Account Management"
-2. Start the local proxy (default port `8045`)
-3. Point any OpenAI-compatible client at `http://127.0.0.1:8045/{platform-prefix}/v1`
+2. Start the local proxy (default port `5343`)
+3. Point any OpenAI-compatible client at `http://127.0.0.1:5343/v1` (unified) or `http://127.0.0.1:5343/{platform-prefix}/v1`
 4. (Optional) Codex CLI integration is archived/disabled in v5.3.10; watch for it in a future release
 
 ## Tech Stack

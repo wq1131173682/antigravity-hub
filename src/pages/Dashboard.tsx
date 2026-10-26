@@ -404,6 +404,28 @@ function Dashboard() {
                       </>
                     )}
                   </div>
+                  {/* Unified entry: one base URL for every platform. Model ids
+                      are namespaced (`platform:model`), so clients never need a
+                      per-platform path. */}
+                  {proxyRunning && platforms.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1 ml-1">
+                      <span className="text-[11px] text-green-700/80 dark:text-green-400/80">
+                        {t('dashboard.unified_entry', '统一入口（所有模型）')}
+                      </span>
+                      <code
+                        onClick={() => copyAddress(`http://${displayHost}:${proxyPort}/v1`)}
+                        className="group text-[11px] font-mono px-1.5 py-0.5 rounded bg-green-50/80 dark:bg-green-950/30 text-green-700 dark:text-green-300 border border-green-200/60 dark:border-green-800/30 cursor-pointer hover:bg-green-100 dark:hover:bg-green-950/50 transition-colors flex items-center gap-1"
+                        title={`http://${displayHost}:${proxyPort}/v1`}
+                      >
+                        {copiedPath === `http://${displayHost}:${proxyPort}/v1` ? (
+                          <Check className="w-3 h-3" />
+                        ) : (
+                          <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100 transition-opacity" />
+                        )}
+                        /v1
+                      </code>
+                    </div>
+                  )}
                   {/* Platform path mappings - clickable to copy per-platform URL */}
                   {proxyRunning && platforms.length > 0 && (
                     <div className="flex flex-wrap gap-x-1 gap-y-0.5 mt-1.5 ml-1">
@@ -813,6 +835,7 @@ function Dashboard() {
                             key={m.id}
                             model={m}
                             usageEntries={modelUsage[m.id] || []}
+                            namespacedId={`${p.path_prefix}:${m.model_name}`}
                           />
                         ))}
                       </div>
