@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "antigravity_tools"
-version = "5.3.42"
+version = "5.3.43"
 dependencies = [
  "anyhow",
  "axum",
@@ -58,6 +58,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "shlex",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

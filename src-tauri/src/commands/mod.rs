@@ -355,6 +355,61 @@ pub async fn set_proxy_host(host: String) -> Result<(), String> {
 }
 
 // ============================================================================
+// SSH Tunnel Commands (jump-host local port forwarding, ssh -N -L)
+// ============================================================================
+
+/// List all persisted tunnels
+#[tauri::command]
+pub async fn list_tunnels() -> Result<Vec<crate::models::tunnel::TunnelConfig>, String> {
+    Ok(modules::tunnel::load_tunnels())
+}
+
+/// Add and persist a new tunnel
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn add_tunnel(
+    label: Option<String>,
+    local_port: u16,
+    user: String,
+    bastion_host: String,
+    bastion_port: Option<u16>,
+    target_host: String,
+    target_port: u16,
+    bind_address: Option<String>,
+    identity_file: Option<String>,
+    extra_args: Option<String>,
+) -> Result<crate::models::tunnel::TunnelConfig, String> {
+    modules::tunnel::add_tunnel(
+        label, local_port, user, bastion_host, bastion_port, target_host, target_port,
+        bind_address, identity_file, extra_args,
+    )
+}
+
+/// Delete a tunnel (stops it first if running)
+#[tauri::command]
+pub async fn delete_tunnel(id: String) -> Result<(), String> {
+    modules::tunnel::delete_tunnel(&id).await
+}
+
+/// Start the ssh process for a tunnel
+#[tauri::command]
+pub async fn start_tunnel(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    modules::tunnel::start_tunnel(&app, &id).await
+}
+
+/// Stop a running tunnel
+#[tauri::command]
+pub async fn stop_tunnel(id: String) -> Result<(), String> {
+    modules::tunnel::stop_tunnel(&id).await
+}
+
+/// Runtime status of every persisted tunnel
+#[tauri::command]
+pub async fn get_tunnel_statuses() -> Result<Vec<crate::models::tunnel::TunnelStatus>, String> {
+    Ok(modules::tunnel::list_statuses())
+}
+
+// ============================================================================
 // Window Control Commands
 // ============================================================================
 

@@ -199,6 +199,13 @@ pub fn run() {
             commands::save_config,
             commands::set_proxy_port,
             commands::set_proxy_host,
+            // SSH tunnels (jump-host port forwarding)
+            commands::list_tunnels,
+            commands::add_tunnel,
+            commands::delete_tunnel,
+            commands::start_tunnel,
+            commands::stop_tunnel,
+            commands::get_tunnel_statuses,
             // Window controls
             commands::minimize_window,
             commands::toggle_maximize_window,
@@ -234,6 +241,20 @@ pub fn run() {
                 }
                 tauri::RunEvent::Exit => {
                     tracing::info!("Application exiting");
+                    // Kill any running ssh tunnel children so they do not
+                    // outlive the app (Windows orphans them otherwise).
+                    // The task runs on the async runtime; the main thread
+                    // waits for the stop to complete (bounded 5s).
+                    let (tx, rx) = std::sync::mpsc::channel::<()>();
+                    tauri::async_runtime::spawn(async move {
+                        modules::tunnel::stop_all_tunnels().await;
+                        let _ = tx.send(());
+                    });
+                    let _ = std::thread::Builder::new()
+                        .name("tunnel-shutdown".into())
+                        .spawn(move || {
+                            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+                        });
                 }
                 _ => {}
             }
