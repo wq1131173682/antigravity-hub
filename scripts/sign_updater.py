@@ -183,7 +183,10 @@ def build_updater_json(
     for key, path in platforms.items():
         basename = os.path.basename(path)
         out_platforms[key] = {
-            "signature": signatures[key],
+            # tauri-plugin-updater's verify_signature() base64-decodes this
+            # field before minisign Signature::decode (updater.rs:1457), so the
+            # manifest must carry base64(4-line signature box), not the raw box.
+            "signature": base64.b64encode(signatures[key].encode("ascii")).decode("ascii"),
             "url": f"{base}/{basename}",
         }
     return {

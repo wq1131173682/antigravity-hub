@@ -87,8 +87,10 @@ function Settings() {
           if (data.rid !== undefined) setUpdateRid(data.rid);
           setUpdateStatus(`${t('settings.update.new_version')}: ${v} (${cv})`);
         } else if (data.status === 'up_to_date') {
+          setUpdateRid(null);
           setUpdateStatus(t('settings.update.current'));
         } else if (data.status === 'error') {
+          setUpdateRid(null);
           setUpdateStatus(`${t('settings.update.check_failed')}: ${data.message ?? ''}`);
         } else {
           setUpdateStatus(t('settings.update.check_completed'));

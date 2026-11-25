@@ -15,10 +15,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Windows only: Linux bundles are not needed and roughly double build time.
+          # (updater.json will only carry windows-x86_64; Linux clients get a
+          # clear "target not found" error on update check.)
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

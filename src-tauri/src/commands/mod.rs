@@ -569,6 +569,9 @@ pub async fn test_model(platform_id: String, model_name: String) -> Result<crate
     modules::proxy::test_model(&platform_id, &model_name).await
 }
 
+/// Resource id of the last cached update; each check drops the previous entry.
+static LAST_UPDATE_RID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Check for available updates using Tauri's updater plugin.
 /// Emits a `update:check_result` event with the result.
 #[tauri::command]
@@ -586,6 +589,12 @@ pub async fn check_for_updates(app: tauri::AppHandle) {
                         let version = update.version.clone();
                         let current_version = update.current_version.clone();
                         let rid: u32 = app.resources_table().add(update);
+                        // Drop the previous cached update so the resource table
+                        // does not grow on every check.
+                        let prev = LAST_UPDATE_RID.swap(rid, std::sync::atomic::Ordering::SeqCst);
+                        if prev != 0 {
+                            let _ = app.resources_table().take::<tauri_plugin_updater::Update>(tauri::ResourceId::from(prev));
+                        }
                         let _ = app.emit(
                             "update:check_result",
                             serde_json::json!({
@@ -628,6 +637,11 @@ pub async fn install_update(app: tauri::AppHandle, rid: u32) -> Result<(), Strin
     let update = app.resources_table().get::<Update>(ResourceId::from(rid))
         .map_err(|e| format!("Failed to retrieve update: {}", e))?;
     let update = (*update).clone();
+
+    // The Windows installer path ends in std::process::exit() (updater plugin),
+    // which bypasses RunEvent::Exit, so the exit hook in lib.rs would never run:
+    // stop managed SSH tunnels before the installer takes over.
+    crate::modules::tunnel::stop_all_tunnels().await;
 
     // Emit download start event with content length
     tauri::async_runtime::spawn(async move {
