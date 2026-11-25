@@ -378,10 +378,11 @@ pub async fn add_tunnel(
     bind_address: Option<String>,
     identity_file: Option<String>,
     extra_args: Option<String>,
+    password: Option<String>,
 ) -> Result<crate::models::tunnel::TunnelConfig, String> {
     modules::tunnel::add_tunnel(
         label, local_port, user, bastion_host, bastion_port, target_host, target_port,
-        bind_address, identity_file, extra_args,
+        bind_address, identity_file, extra_args, password,
     )
 }
 

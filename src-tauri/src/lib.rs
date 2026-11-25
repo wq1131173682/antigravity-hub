@@ -250,11 +250,12 @@ pub fn run() {
                         modules::tunnel::stop_all_tunnels().await;
                         let _ = tx.send(());
                     });
-                    let _ = std::thread::Builder::new()
-                        .name("tunnel-shutdown".into())
-                        .spawn(move || {
-                            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
-                        });
+                    // The main thread must wait here: tauri exits the process
+                    // right after this handler returns, so a detached
+                    // watcher thread could not prevent the ssh children from
+                    // being orphaned. Bounded at 5s so a wedged kill cannot
+                    // hold up the exit.
+                    let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
                 }
                 _ => {}
             }

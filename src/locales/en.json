@@ -47,6 +47,8 @@
     "target_host": "Target host",
     "target_port": "Target port",
     "identity_file": "Identity file (optional)",
+    "password": "Password (optional, instead of key auth)",
+    "password_placeholder": "Bastion login password (leave empty for key auth)",
     "extra_args": "Extra ssh args (optional)",
     "status_running": "Running",
     "status_stopped": "Stopped",
@@ -67,7 +69,7 @@
     "stopped": "Tunnel stopped",
     "start_failed": "Start failed: ",
     "exited": "Tunnel exited unexpectedly: ",
-    "ssh_hint": "Requires a local OpenSSH client and key/ssh-agent auth to the bastion (password login needs a terminal and is not supported yet)"
+    "ssh_hint": "Requires a local OpenSSH client; key/ssh-agent auth works out of the box, password login needs PuTTY (plink.exe) on Windows or sshpass on Linux/macOS; passwords are stored in plaintext in local tunnels.json"
   },
   "dashboard": {
     "hello": "Hello, User 馃憢",

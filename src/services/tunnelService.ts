@@ -20,6 +20,7 @@ export async function addTunnel(params: {
   bindAddress?: string;
   identityFile?: string;
   extraArgs?: string;
+  password?: string;
 }): Promise<TunnelConfig> {
   return await invoke('add_tunnel', {
     label: params.label || null,
@@ -32,6 +33,7 @@ export async function addTunnel(params: {
     bindAddress: params.bindAddress || null,
     identityFile: params.identityFile || null,
     extraArgs: params.extraArgs || null,
+    password: params.password || null,
   });
 }
 
@@ -51,7 +53,7 @@ export async function getTunnelStatuses(): Promise<TunnelStatus[]> {
   return await invoke('get_tunnel_statuses');
 }
 
-/** The equivalent ssh command, for display next to each tunnel. */
+/** The equivalent ssh command, for display next to each tunnel (password masked). */
 export function sshCommandPreview(t: TunnelConfig): string {
   const bind = t.bind_address || '127.0.0.1';
   let cmd = `ssh -N -L ${bind}:${t.local_port}:${t.target_host}:${t.target_port}`;
@@ -59,5 +61,6 @@ export function sshCommandPreview(t: TunnelConfig): string {
   if (t.identity_file) cmd += ` -i ${t.identity_file}`;
   cmd += ` ${t.user}@${t.bastion_host}`;
   if (t.extra_args) cmd += ` ${t.extra_args}`;
+  if (t.password) cmd = `sshpass -p *** ${cmd}`;
   return cmd;
 }

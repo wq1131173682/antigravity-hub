@@ -47,6 +47,8 @@
     "target_host": "目标地址",
     "target_port": "目标端口",
     "identity_file": "密钥文件（可选）",
+    "password": "密码（可选，与密钥二选一）",
+    "password_placeholder": "跳板机登录密码（留空则用密钥登录）",
     "extra_args": "额外 ssh 参数（可选）",
     "status_running": "运行中",
     "status_stopped": "已停止",
@@ -67,7 +69,7 @@
     "stopped": "隧道已停止",
     "start_failed": "启动失败：",
     "exited": "隧道异常退出：",
-    "ssh_hint": "需要本机 OpenSSH 客户端，且到跳板机使用密钥/ssh-agent 认证（密码登录需要终端，暂不支持）"
+    "ssh_hint": "需要本机 OpenSSH 客户端；密钥/ssh-agent 登录开箱即用，密码登录需 Windows 安装 PuTTY（plink.exe）、Linux/macOS 安装 sshpass；密码明文保存在本机 tunnels.json"
   },
   "dashboard": {
     "hello": "你好, 用户 👋",

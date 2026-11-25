@@ -40,7 +40,8 @@ function Settings() {
   const [updateInfo, setUpdateInfo] = useState<{ version: string; current: string } | null>(null);
   const [updateRid, setUpdateRid] = useState<number | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<{ chunk: number; total: number } | null>(null);
-  const unlistenRef = useRef<(() => void) | null>(null);
+  const unlistenCheckRef = useRef<(() => void) | null>(null);
+  const unlistenProgressRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (config) {
@@ -97,14 +98,14 @@ function Settings() {
         }
         setCheckingUpdate(false);
       });
-      unlistenRef.current = unlisten;
+      unlistenCheckRef.current = unlisten;
     };
     setupListener();
     return () => {
       cancelled = true;
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
+      if (unlistenCheckRef.current) {
+        unlistenCheckRef.current();
+        unlistenCheckRef.current = null;
       }
     };
   }, [t]);
@@ -134,7 +135,7 @@ function Settings() {
         setInstalling(false);
         setUpdateStatus(`${t('settings.update.check_failed')}: ${event.payload.message ?? ''}`);
       });
-      unlistenRef.current = () => {
+      unlistenProgressRef.current = () => {
         unlistenProgress();
         unlistenFinished();
         unlistenCompleted();
@@ -144,9 +145,9 @@ function Settings() {
     setupListeners();
     return () => {
       cancelled = true;
-      if (unlistenRef.current) {
-        unlistenRef.current();
-        unlistenRef.current = null;
+      if (unlistenProgressRef.current) {
+        unlistenProgressRef.current();
+        unlistenProgressRef.current = null;
       }
     };
   }, [t]);

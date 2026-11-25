@@ -35,6 +35,11 @@ pub struct TunnelConfig {
     /// Optional raw extra ssh arguments (shlex-parsed and appended)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<String>,
+    /// Optional password login. OpenSSH cannot answer the interactive
+    /// password prompt, so this routes through `plink` (Windows) or
+    /// `sshpass` (Linux/macOS). Stored in plaintext in tunnels.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 fn default_bind_address() -> String {

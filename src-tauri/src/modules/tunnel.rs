@@ -93,6 +93,7 @@ pub fn add_tunnel(
     bind_address: Option<String>,
     identity_file: Option<String>,
     extra_args: Option<String>,
+    password: Option<String>,
 ) -> Result<TunnelConfig, String> {
     let user = user.trim().to_string();
     let bastion_host = bastion_host.trim().to_string();
@@ -126,6 +127,9 @@ pub fn add_tunnel(
         target_port,
         identity_file: identity_file.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
         extra_args: extra_args.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        password: password
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     };
     list.push(config.clone());
     save_tunnels(&list)?;
@@ -142,6 +146,7 @@ pub fn add_tunnel(
 /// Delete a tunnel (stopping it first if running).
 pub async fn delete_tunnel(id: &str) -> Result<(), String> {
     let _ = stop_tunnel(id).await;
+    lock_registry().remove(id);
     let mut list = load_tunnels();
     let before = list.len();
     list.retain(|t| t.id != id);
@@ -196,10 +201,94 @@ fn build_ssh_args(config: &TunnelConfig) -> Vec<String> {
     args
 }
 
-/// Spawn the system OpenSSH client. On Windows OpenSSH may not be on PATH
-/// (feature install), so retry the default system location once.
-fn spawn_ssh_process(config: &TunnelConfig) -> Result<Child, String> {
-    let args = build_ssh_args(config);
+/// First existing candidate on PATH (or in `extra`), as an absolute path.
+fn find_on_path(bin: &str, extra: &[&str]) -> Option<String> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(bin);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    extra
+        .iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .map(|p| p.to_string())
+}
+
+/// Pick the process for a tunnel: plain `ssh` for key/agent auth, or
+/// `plink` (Windows) / `sshpass` (Unix) when a password is configured —
+/// OpenSSH cannot answer the interactive password prompt headlessly.
+fn build_command(config: &TunnelConfig) -> Result<(String, Vec<String>), String> {
+    let password = config
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    match password {
+        Some(pw) => {
+            #[cfg(windows)]
+            {
+                // PuTTY plink: password via -pw, no TTY needed.
+                let mut args: Vec<String> = Vec::new();
+                args.push("-ssh".into());
+                if config.bastion_port != 22 {
+                    args.push("-P".into());
+                    args.push(config.bastion_port.to_string());
+                }
+                // plink -L [bind:]lport:rhost:rport
+                let forward = if config.bind_address == "127.0.0.1" {
+                    format!("{}:{}:{}", config.local_port, config.target_host, config.target_port)
+                } else {
+                    format!(
+                        "{}:{}:{}:{}",
+                        config.bind_address, config.local_port, config.target_host, config.target_port
+                    )
+                };
+                args.push(format!("-L{forward}"));
+                args.push("-N".into());
+                args.push("-pw".into());
+                args.push(pw.to_string());
+                // -batch: never prompt (a GUI cannot answer interactive
+                // questions). Without -no-ssh-check, plink aborts on first
+                // contact with a host whose key is not yet cached in the
+                // registry, so trust new keys like
+                // StrictHostKeyChecking=accept-new does for plain ssh.
+                args.push("-batch".into());
+                args.push("-no-ssh-check".into());
+                args.push(format!("{}@{}", config.user, config.bastion_host));
+
+                const PLINK: &[&str] = &[
+                    r"C:\Program Files\PuTTY\plink.exe",
+                    r"C:\Program Files (x86)\PuTTY\plink.exe",
+                ];
+                let bin = find_on_path("plink.exe", PLINK).ok_or_else(|| {
+                    "Password login on Windows needs PuTTY: install it from putty.org (provides plink.exe). Or use key auth instead.".to_string()
+                })?;
+                Ok((bin, args))
+            }
+            #[cfg(not(windows))]
+            {
+                let bin = find_on_path("sshpass", &[]).ok_or_else(|| {
+                    "Password login needs the `sshpass` utility (Linux: apt install sshpass; macOS: brew install hudip/deprecated/sshpass). Or use key auth instead.".to_string()
+                })?;
+                let mut args: Vec<String> = Vec::new();
+                args.push("-p".into());
+                args.push(pw.to_string());
+                args.extend(build_ssh_args(config));
+                Ok((bin, args))
+            }
+        }
+        None => Ok(("ssh".into(), build_ssh_args(config))),
+    }
+}
+
+/// Spawn the tunnel process. For plain `ssh` on Windows, OpenSSH may not be
+/// on PATH (feature install), so retry the default system location once.
+fn spawn_tunnel_process(config: &TunnelConfig) -> Result<Child, String> {
+    let (bin, args) = build_command(config)?;
 
     let make = |bin: &str| -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(bin);
@@ -209,15 +298,15 @@ fn spawn_ssh_process(config: &TunnelConfig) -> Result<Child, String> {
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
         {
-            // Do not allocate a console window for the ssh child.
+            // Do not allocate a console window for the child.
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW (tokio Command, Windows only)
         }
         cmd
     };
 
-    match make("ssh").spawn() {
+    match make(&bin).spawn() {
         Ok(child) => Ok(child),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && bin == "ssh" => {
             #[cfg(windows)]
             {
                 const SYSTEM_OPENSSH: &str = r"C:WindowsSystem32OpenSSHssh.exe";
@@ -234,7 +323,7 @@ fn spawn_ssh_process(config: &TunnelConfig) -> Result<Child, String> {
             #[cfg(not(windows))]
             Err(format!("Failed to spawn ssh: {e}. Is an OpenSSH client installed?"))
         }
-        Err(e) => Err(format!("Failed to spawn ssh: {e}")),
+        Err(e) => Err(format!("Failed to spawn {bin}: {e}")),
     }
 }
 
@@ -258,7 +347,7 @@ pub async fn start_tunnel(app: &tauri::AppHandle, id: &str) -> Result<(), String
         }
     }
 
-    let mut child = spawn_ssh_process(&config)?;
+    let mut child = spawn_tunnel_process(&config)?;
     let stderr = child.stderr.take();
     let handle: Handle = Arc::new(Mutex::new(Some(child)));
     let started_at = now_ms();
@@ -313,9 +402,9 @@ pub async fn start_tunnel(app: &tauri::AppHandle, id: &str) -> Result<(), String
                 if !ok && !rt.user_stopped {
                     let detail = stderr_text.trim();
                     rt.error = if detail.is_empty() {
-                        Some(format!("ssh exited with status {exit_code:?}"))
+                        Some(format!("tunnel process exited with status {exit_code:?}"))
                     } else {
-                        Some(format!("ssh exited with status {exit_code:?}: {detail}"))
+                        Some(format!("tunnel process exited with status {exit_code:?}: {detail}"))
                     };
                     warn!(id = %tid, ?exit_code, "tunnel ssh process exited unexpectedly");
                 }

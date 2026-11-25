@@ -17,6 +17,7 @@ interface FormState {
   targetHost: string;
   targetPort: string;
   identityFile: string;
+  password: string;
   extraArgs: string;
 }
 
@@ -30,6 +31,7 @@ const EMPTY_FORM: FormState = {
   targetHost: '',
   targetPort: '',
   identityFile: '',
+  password: '',
   extraArgs: '',
 };
 
@@ -205,6 +207,7 @@ export default function Tunnels() {
         bindAddress: form.bindAddress,
         identityFile: form.identityFile,
         extraArgs: form.extraArgs,
+        password: form.password,
       });
       showToast(t('tunnels.added'), 'success');
       setForm(EMPTY_FORM);
@@ -322,6 +325,15 @@ export default function Tunnels() {
               <div>
                 <label className={labelCls}>{t('tunnels.identity_file')}</label>
                 <input className={inputCls} value={form.identityFile} onChange={e => setForm({ ...form, identityFile: e.target.value })} placeholder="~/.ssh/id_ed25519" />
+              </div>              <div>
+                <label className={labelCls}>{t('tunnels.password')}</label>
+                <input
+                  className={inputCls}
+                  type="password"
+                  value={form.password}
+                  onChange={e => setForm({ ...form, password: e.target.value })}
+                  placeholder={t('tunnels.password_placeholder')}
+                />
               </div>
               <div>
                 <label className={labelCls}>{t('tunnels.extra_args')}</label>

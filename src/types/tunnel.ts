@@ -11,6 +11,8 @@ export interface TunnelConfig {
   target_port: number;
   identity_file?: string | null;
   extra_args?: string | null;
+  /** Optional password login (Windows: plink / Unix: sshpass) */
+  password?: string | null;
 }
 
 export interface TunnelStatus {
