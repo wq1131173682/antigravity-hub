@@ -133,7 +133,7 @@ function Settings() {
       const unlistenFailed = await listen<{ message?: string }>('update:install_failed', (event) => {
         if (cancelled) return;
         setInstalling(false);
-        setUpdateStatus(`${t('settings.update.check_failed')}: ${event.payload.message ?? ''}`);
+        setUpdateStatus(`${t('settings.update.install_failed')}: ${event.payload.message ?? ''}`);
       });
       unlistenProgressRef.current = () => {
         unlistenProgress();
@@ -160,7 +160,7 @@ function Settings() {
       await tauriInvoke('install_update', { rid: updateRid });
       setUpdateStatus(t('update_notification.downloading'));
     } catch (e) {
-      setUpdateStatus(`${t('settings.update.check_failed')}: ${e}`);
+      setUpdateStatus(`${t('settings.update.install_failed')}: ${e}`);
       setInstalling(false);
     }
   };
@@ -374,7 +374,7 @@ function Settings() {
                   className="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors flex items-center gap-1.5 shadow-sm"
                   onClick={handleInstallUpdate}
                 >
-                  {t('settings.about.check_update')}
+                  {t('settings.update.install')}
                 </button>
               )}
               {installing && (

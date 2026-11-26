@@ -172,6 +172,8 @@
       "checking": "Checking...",
       "check_completed": "Check completed",
       "check_failed": "Check failed",
+      "install_failed": "Download/install failed",
+      "install": "Download & Install",
       "new_version": "New version available",
       "current": "Already up to date",
       "auto_desc": "Automatically check for updates on startup"
