@@ -14,7 +14,7 @@ Signature format (per minisign-rs `SignatureBox::to_string`):
     <base64(global_sig[64])>
 
   sig1       = ed25519( prehash(msg) )                       # prehash = BLAKE2b-512
-  sig2_input = sig1_box(74) || trusted_comment_payload       # NO "trusted comment: " prefix
+  sig2_input = sig1(64) || trusted_comment_payload           # NO 10-byte algo/keynum header, NO "trusted comment: " prefix
   global_sig = ed25519( sig2_input )
 
 The updater.json `signature` field for each platform is the full 4-line block.
@@ -62,7 +62,9 @@ def load_secret(raw: str) -> tuple[bytes, bytes]:
 
 def pubkey_block(keynum: bytes, pub: bytes) -> str:
     """Two-line minisign public key text."""
-    body = keynum + pub
+    # 42-byte key line: b"ED" (0x4544 prehashed-ed25519 marker) + keynum + pub.
+    # minisign-verify requires exactly 42 bytes (PublicKey::from_base64, lib.rs:291).
+    body = b"ED" + keynum + pub
     keyid = int.from_bytes(keynum, "little")
     return (
         f"untrusted comment: minisign public key: {keyid:016X}\n"
@@ -86,7 +88,10 @@ def sign_file(keynum: bytes, seed: bytes, path: str) -> str:
     ts = int(time.time())
     basename = os.path.basename(path)
     trusted = f"timestamp:{ts} file:{basename}"
-    sig2_input = sig1_box + trusted.encode("utf-8")
+    # minisign signs the 64-byte sig1 followed by the trusted comment payload;
+    # the 10-byte algo+keynum header is NOT part of it
+    # (minisign-verify lib.rs:334-346: global = signature(64) || trusted_comment[17..]).
+    sig2_input = sig1 + trusted.encode("utf-8")
     global_sig = sk.sign(sig2_input).signature  # 64 bytes
     return "\n".join(
         [
@@ -117,7 +122,7 @@ def verify_file(keynum: bytes, pub: bytes, path: str, sig_text: str) -> None:
     digest = prehash(msg)
     # ed25519 verify: VerifyKey.verify(sig + message)
     vk.verify(sig1 + digest)
-    vk.verify(global_sig + (sig1_box + trusted.encode("utf-8")))
+    vk.verify(global_sig + (sig1 + trusted.encode("utf-8")))
 
 
 # ---------------------------------------------------------------------------

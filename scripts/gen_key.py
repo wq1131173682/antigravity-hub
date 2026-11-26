@@ -23,7 +23,10 @@ def main() -> int:
     pub = sk.verify_key.encode()
     keynum = os.urandom(8)
 
-    body = keynum + pub
+    # 42-byte minisign key line: b"ED" (0x4544, prehashed ed25519) + keynum + pub.
+    # minisign-verify (tauri-plugin-updater) rejects key lines that do not
+    # decode to exactly 42 bytes (PublicKey::from_base64, lib.rs:291).
+    body = b"ED" + keynum + pub
     keyid = int.from_bytes(keynum, "little")
     pub_block = (
         f"untrusted comment: minisign public key: {keyid:016X}\n"
