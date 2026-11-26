@@ -2,7 +2,6 @@ pub mod platform;
 pub mod apikey;
 pub mod config;
 pub mod model;
-pub mod tunnel;
 
 pub use platform::Platform;
 pub use apikey::{ApiKey, KeyStatus};

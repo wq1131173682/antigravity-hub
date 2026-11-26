@@ -1,4 +1,4 @@
-import { LayoutDashboard, Users, Settings, ArrowLeftRight } from 'lucide-react';
+import { LayoutDashboard, Users, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useConfigStore } from '../../stores/useConfigStore';
 import { isLinux } from '../../utils/env';
@@ -22,7 +22,6 @@ function Navbar() {
         { path: '/', label: t('nav.dashboard'), icon: LayoutDashboard, priority: 'high' },
         { path: '/accounts', label: t('nav.accounts'), icon: Users, priority: 'high' },
         { path: '/settings', label: t('nav.settings'), icon: Settings, priority: 'high' },
-        { path: '/tunnels', label: t('nav.tunnels'), icon: ArrowLeftRight, priority: 'medium' },
     ];
 
     // 主题切换逻辑(带 View Transition 动画)

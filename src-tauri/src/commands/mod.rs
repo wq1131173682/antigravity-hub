@@ -355,62 +355,6 @@ pub async fn set_proxy_host(host: String) -> Result<(), String> {
 }
 
 // ============================================================================
-// SSH Tunnel Commands (jump-host local port forwarding, ssh -N -L)
-// ============================================================================
-
-/// List all persisted tunnels
-#[tauri::command]
-pub async fn list_tunnels() -> Result<Vec<crate::models::tunnel::TunnelConfig>, String> {
-    Ok(modules::tunnel::load_tunnels())
-}
-
-/// Add and persist a new tunnel
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn add_tunnel(
-    label: Option<String>,
-    local_port: u16,
-    user: String,
-    bastion_host: String,
-    bastion_port: Option<u16>,
-    target_host: String,
-    target_port: u16,
-    bind_address: Option<String>,
-    identity_file: Option<String>,
-    extra_args: Option<String>,
-    password: Option<String>,
-) -> Result<crate::models::tunnel::TunnelConfig, String> {
-    modules::tunnel::add_tunnel(
-        label, local_port, user, bastion_host, bastion_port, target_host, target_port,
-        bind_address, identity_file, extra_args, password,
-    )
-}
-
-/// Delete a tunnel (stops it first if running)
-#[tauri::command]
-pub async fn delete_tunnel(id: String) -> Result<(), String> {
-    modules::tunnel::delete_tunnel(&id).await
-}
-
-/// Start the ssh process for a tunnel
-#[tauri::command]
-pub async fn start_tunnel(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    modules::tunnel::start_tunnel(&app, &id).await
-}
-
-/// Stop a running tunnel
-#[tauri::command]
-pub async fn stop_tunnel(id: String) -> Result<(), String> {
-    modules::tunnel::stop_tunnel(&id).await
-}
-
-/// Runtime status of every persisted tunnel
-#[tauri::command]
-pub async fn get_tunnel_statuses() -> Result<Vec<crate::models::tunnel::TunnelStatus>, String> {
-    Ok(modules::tunnel::list_statuses())
-}
-
-// ============================================================================
 // Window Control Commands
 // ============================================================================
 
@@ -638,11 +582,6 @@ pub async fn install_update(app: tauri::AppHandle, rid: u32) -> Result<(), Strin
     let update = app.resources_table().get::<Update>(ResourceId::from(rid))
         .map_err(|e| format!("Failed to retrieve update: {}", e))?;
     let update = (*update).clone();
-
-    // The Windows installer path ends in std::process::exit() (updater plugin),
-    // which bypasses RunEvent::Exit, so the exit hook in lib.rs would never run:
-    // stop managed SSH tunnels before the installer takes over.
-    crate::modules::tunnel::stop_all_tunnels().await;
 
     // Emit download start event with content length
     tauri::async_runtime::spawn(async move {

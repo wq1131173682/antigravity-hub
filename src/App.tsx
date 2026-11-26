@@ -3,7 +3,6 @@ import Layout from './components/layout/Layout';
 import Dashboard from './pages/Dashboard';
 import Accounts from './pages/Accounts';
 import Settings from './pages/Settings';
-import Tunnels from './pages/Tunnels';
 import ThemeManager from './components/common/ThemeManager';
 import { useEffect } from 'react';
 import { useConfigStore } from './stores/useConfigStore';
@@ -17,7 +16,6 @@ const router = createBrowserRouter([
       { index: true, element: <Dashboard /> },
       { path: 'accounts', element: <Accounts /> },
       { path: 'settings', element: <Settings /> },
-      { path: 'tunnels', element: <Tunnels /> },
     ],
   },
 ]);
