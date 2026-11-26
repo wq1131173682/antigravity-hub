@@ -79,6 +79,8 @@ nul
 *.AppImage
 *.msi
 *.exe
+# ...except the bundled plink.exe (password-SSH helper, PuTTY 0.85, see resources/LICENSE-putty.txt)
+!src-tauri/resources/plink.exe
 # AI assistant / agent working directories - local tooling state, not app code.
 # These change on every session and must never be published.
 #   .mnemon/  dsh-mneme's project memory (SQLite DB + notes + user preferences)

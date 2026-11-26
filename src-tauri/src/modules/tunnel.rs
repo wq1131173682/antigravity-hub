@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use tauri::Emitter;
+use tauri::Manager;
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tracing::{info, warn};
@@ -218,9 +219,15 @@ fn find_on_path(bin: &str, extra: &[&str]) -> Option<String> {
 }
 
 /// Pick the process for a tunnel: plain `ssh` for key/agent auth, or
-/// `plink` (Windows) / `sshpass` (Unix) when a password is configured —
-/// OpenSSH cannot answer the interactive password prompt headlessly.
-fn build_command(config: &TunnelConfig) -> Result<(String, Vec<String>), String> {
+/// `plink` (Windows — the bundled `resources/plink.exe`, falling back
+/// to an installed PuTTY) / `sshpass` (Unix) when a password is
+/// configured — OpenSSH cannot answer the interactive password prompt
+/// headlessly.
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn build_command(
+    config: &TunnelConfig,
+    resource_dir: &Option<std::path::PathBuf>,
+) -> Result<(String, Vec<String>), String> {
     let password = config
         .password
         .as_deref()
@@ -260,13 +267,27 @@ fn build_command(config: &TunnelConfig) -> Result<(String, Vec<String>), String>
                 args.push("-no-ssh-check".into());
                 args.push(format!("{}@{}", config.user, config.bastion_host));
 
-                const PLINK: &[&str] = &[
-                    r"C:\Program Files\PuTTY\plink.exe",
-                    r"C:\Program Files (x86)\PuTTY\plink.exe",
-                ];
-                let bin = find_on_path("plink.exe", PLINK).ok_or_else(|| {
-                    "Password login on Windows needs PuTTY: install it from putty.org (provides plink.exe). Or use key auth instead.".to_string()
-                })?;
+                // The bundled copy ships in the app resources; an
+                // installed PuTTY (either default dir) or a PATH hit
+                // still works if the resource is missing.
+                let candidates: Vec<std::path::PathBuf> = resource_dir
+                    .iter()
+                    .map(|dir| dir.join("plink.exe"))
+                    .chain(std::iter::once(
+                        std::path::PathBuf::from(r"C:\Program Files\PuTTY\plink.exe"),
+                    ))
+                    .chain(std::iter::once(
+                        std::path::PathBuf::from(r"C:\Program Files (x86)\PuTTY\plink.exe"),
+                    ))
+                    .collect();
+                let bin = candidates
+                    .iter()
+                    .find(|p| p.is_file())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .or_else(|| find_on_path("plink.exe", &[]))
+                    .ok_or_else(|| {
+                        "plink.exe not found: the bundled copy is missing and PuTTY is not installed. Or use key auth instead.".to_string()
+                    })?;
                 Ok((bin, args))
             }
             #[cfg(not(windows))]
@@ -287,8 +308,12 @@ fn build_command(config: &TunnelConfig) -> Result<(String, Vec<String>), String>
 
 /// Spawn the tunnel process. For plain `ssh` on Windows, OpenSSH may not be
 /// on PATH (feature install), so retry the default system location once.
-fn spawn_tunnel_process(config: &TunnelConfig) -> Result<Child, String> {
-    let (bin, args) = build_command(config)?;
+#[cfg_attr(not(windows), allow(unused_variables))]
+fn spawn_tunnel_process(
+    config: &TunnelConfig,
+    resource_dir: &Option<std::path::PathBuf>,
+) -> Result<Child, String> {
+    let (bin, args) = build_command(config, resource_dir)?;
 
     let make = |bin: &str| -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(bin);
@@ -347,7 +372,10 @@ pub async fn start_tunnel(app: &tauri::AppHandle, id: &str) -> Result<(), String
         }
     }
 
-    let mut child = spawn_tunnel_process(&config)?;
+    // resource_dir() may fail in odd sandboxes; the command builder
+    // tolerates None (falls back to an installed PuTTY / PATH plink).
+    let resource_dir = app.path().resource_dir().ok();
+    let mut child = spawn_tunnel_process(&config, &resource_dir)?;
     let stderr = child.stderr.take();
     let handle: Handle = Arc::new(Mutex::new(Some(child)));
     let started_at = now_ms();

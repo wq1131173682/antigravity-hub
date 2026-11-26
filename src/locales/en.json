@@ -69,7 +69,7 @@
     "stopped": "Tunnel stopped",
     "start_failed": "Start failed: ",
     "exited": "Tunnel exited unexpectedly: ",
-    "ssh_hint": "Requires a local OpenSSH client; key/ssh-agent auth works out of the box, password login needs PuTTY (plink.exe) on Windows or sshpass on Linux/macOS; passwords are stored in plaintext in local tunnels.json"
+    "ssh_hint": "Requires a local OpenSSH client; key/ssh-agent auth works out of the box. Password login uses the bundled plink.exe on Windows (no install needed) or sshpass on Linux/macOS; passwords are stored in plaintext in local tunnels.json"
   },
   "dashboard": {
     "hello": "Hello, User 馃憢",

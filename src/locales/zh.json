@@ -69,7 +69,7 @@
     "stopped": "隧道已停止",
     "start_failed": "启动失败：",
     "exited": "隧道异常退出：",
-    "ssh_hint": "需要本机 OpenSSH 客户端；密钥/ssh-agent 登录开箱即用，密码登录需 Windows 安装 PuTTY（plink.exe）、Linux/macOS 安装 sshpass；密码明文保存在本机 tunnels.json"
+    "ssh_hint": "需要本机 OpenSSH 客户端；密钥/ssh-agent 登录开箱即用。密码登录在 Windows 上使用内置 plink.exe（无需安装 PuTTY），Linux/macOS 需安装 sshpass；密码明文保存在本机 tunnels.json"
   },
   "dashboard": {
     "hello": "你好, 用户 👋",
