@@ -38,14 +38,4 @@ export const STATUS_TEXT: Record<StatusLevel, string> = {
   danger: 'text-rose-600 dark:text-rose-400',
 };
 
-export const STATUS_DOT: Record<StatusLevel, string> = {
-  ok: 'bg-emerald-500',
-  warn: 'bg-amber-500',
-  danger: 'bg-rose-500',
-};
 
-export const STATUS_TINT: Record<StatusLevel, string> = {
-  ok: 'bg-emerald-50/40 dark:bg-emerald-900/10',
-  warn: 'bg-amber-50/70 dark:bg-amber-900/10',
-  danger: 'bg-red-100/70 dark:bg-red-900/20 ring-1 ring-red-300/50 dark:ring-red-700/40',
-};
